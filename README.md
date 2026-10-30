@@ -1,6 +1,8 @@
 # duckx-code
 
-Modeless terminal editor for a 75% keyboard. Printable keys insert text immediately. Movement uses the arrow keys, Home, End, Page Up, and Page Down. Hold Shift with any of those keys to select.
+**For 75% keyboards. No vim motions.**
+
+duckx-code is a modeless terminal editor for a 75% keyboard. The cursor moves with the dedicated arrow keys, Home, End, Page Up, and Page Down. There are no vim motions: no `hjkl`, no `w`/`b`, and no operator-pending commands. Printable keys insert text immediately. Hold Shift with any navigation key to select.
 
 Keybindings and Command Bar commands are listed in [DOCUMENTS.md](DOCUMENTS.md). The design notes are in [DESIGN.md](DESIGN.md).
 
