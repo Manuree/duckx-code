@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      release: ${{ steps.check.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Cargo.toml version is not semver: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          before="${{ github.event.before }}"
+          prev=""
+          if [[ ! "$before" =~ ^0+$ ]] && git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            prev=$(git show "${before}:Cargo.toml" | awk -F '"' '/^version = / { print $2; exit }')
+          fi
+          if [[ "$version" != "$prev" ]]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Version changed: ${prev:-<none>} -> $version"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "Version unchanged ($version); skipping release."
+          fi
+
+  test:
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
+  build:
+    needs: [version, test]
+    if: needs.version.outputs.release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: windows-latest
+            target: windows-x86_64
+          - os: macos-latest
+            target: macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p package
+          target_name="${{ matrix.target }}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/release/duckx-code.exe package/duckx-code.exe
+            tar -a -cf "duckx-code-${target_name}.zip" -C package duckx-code.exe
+          else
+            cp target/release/duckx-code package/duckx-code
+            chmod +x package/duckx-code
+            tar -czf "duckx-code-${target_name}.tar.gz" -C package duckx-code
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: duckx-code-${{ matrix.target }}
+          path: duckx-code-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: duckx-code-*
+          merge-multiple: true
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $tag already exists." >&2
+            exit 1
+          fi
+          gh release create "$tag" dist/* \
+            --repo "${{ github.repository }}" \
+            --target "$SHA" \
+            --title "$tag" \
+            --generate-notes

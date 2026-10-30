@@ -3,6 +3,7 @@ name = "duckx-code"
 version = "0.1.0"
 edition = "2024"
 description = "Modern modeless CLI code editor built for 75% keyboard layouts"
+license = "MIT"
 
 [dependencies]
 crossterm = { version = "0.28", features = ["event-stream"] }
