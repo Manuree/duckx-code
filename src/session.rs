@@ -1,7 +1,9 @@
-//! The folder, open files, and window layout from the last quit.
+//! Open files and window layout for each folder, from the last quit in that folder.
 //!
-//! Stored as `session.json` beside `settings.json`. A start with no path
-//! argument reads it. A path argument leaves it alone until the next quit.
+//! Stored as `session.json` beside `settings.json`. One file holds every folder.
+//! A start with no path argument restores the entry whose root is the current
+//! directory. A different directory does not reopen another folder's files.
+//! A path argument leaves the file alone until the next quit.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -61,14 +63,95 @@ pub enum SessionLayout {
     },
 }
 
+/// How many folders `session.json` keeps. The folder just quit is first.
+const MAX_FOLDERS: usize = 20;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Store {
+    version: u32,
+    workspaces: Vec<Session>,
+}
+
 pub fn file_in(dir: &Path) -> PathBuf {
     dir.join("session.json")
 }
 
-/// `None` when the file is missing, unreadable, the wrong version, or its folder is gone.
-pub fn read(path: &Path) -> Option<Session> {
-    let text = fs::read_to_string(path).ok()?;
-    parse(&text)
+/// The saved session for `root`, if this file has one.
+/// An older file with a single session still matches that session's folder.
+pub fn for_directory(path: &Path, root: &Path) -> Option<Session> {
+    load_all(path)
+        .ok()?
+        .into_iter()
+        .find(|session| same_directory(&session.root, root))
+}
+
+/// Replaces the entry for `session.root` and leaves every other folder in place.
+pub fn upsert(path: &Path, session: &Session) -> Result<(), String> {
+    let mut workspaces = load_all(path)?;
+    workspaces.retain(|saved| !same_directory(&saved.root, &session.root));
+    workspaces.insert(0, session.clone());
+    workspaces.truncate(MAX_FOLDERS);
+    let store = Store {
+        version: VERSION,
+        workspaces,
+    };
+    let text = serde_json::to_string_pretty(&store)
+        .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
+    crate::services::fs::write_atomic(path, &format!("{text}\n"))
+}
+
+fn load_all(path: &Path) -> Result<Vec<Session>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(format!("Could not read {}: {err}", path.display())),
+    };
+    parse_store(&text).ok_or_else(|| format!("Could not read {}", path.display()))
+}
+
+/// A list of folders, or the older single-session document.
+fn parse_store(text: &str) -> Option<Vec<Session>> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    if value.get("workspaces").is_some() {
+        let store: Store = serde_json::from_value(value).ok()?;
+        if store.version != VERSION {
+            return None;
+        }
+        return Some(
+            store
+                .workspaces
+                .into_iter()
+                .filter(|session| session.version == VERSION)
+                .collect(),
+        );
+    }
+    let session: Session = serde_json::from_value(value).ok()?;
+    if session.version != VERSION {
+        return None;
+    }
+    Some(vec![session])
+}
+
+/// True when both paths are the same directory. Windows compares without case.
+pub fn same_directory(a: &Path, b: &Path) -> bool {
+    let (Ok(a), Ok(b)) = (std::path::absolute(a), std::path::absolute(b)) else {
+        return false;
+    };
+    let left: Vec<_> = a.components().collect();
+    let right: Vec<_> = b.components().collect();
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter().zip(right.iter()).all(|(left, right)| {
+        let left = left.as_os_str();
+        let right = right.as_os_str();
+        if cfg!(windows) {
+            left.to_string_lossy()
+                .eq_ignore_ascii_case(&right.to_string_lossy())
+        } else {
+            left == right
+        }
+    })
 }
 
 pub fn parse(text: &str) -> Option<Session> {
@@ -185,6 +268,58 @@ mod tests {
         assert!(join_rel(root, "../secret").is_none());
         assert!(join_rel(root, "src/../../secret").is_none());
         assert!(rel_path("").is_none());
+    }
+
+    #[test]
+    fn a_second_folder_keeps_its_own_session() {
+        let dir = std::env::temp_dir().join(format!(
+            "duckx-sessions-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _guard = DirGuard(dir.clone());
+        let here = dir.join("here");
+        let there = dir.join("there");
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::create_dir_all(&there).unwrap();
+        let file = dir.join("session.json");
+        let older = leaf_session(&there, "there.rs");
+        std::fs::write(&file, to_json(&older).unwrap()).unwrap();
+
+        assert!(for_directory(&file, &here).is_none());
+        assert_eq!(for_directory(&file, &there).unwrap().root, there);
+
+        upsert(&file, &leaf_session(&here, "here.rs")).unwrap();
+        assert_eq!(
+            for_directory(&file, &here).unwrap().layout,
+            leaf_session(&here, "here.rs").layout
+        );
+        assert_eq!(for_directory(&file, &there).unwrap().root, there);
+    }
+
+    fn leaf_session(root: &Path, file: &str) -> Session {
+        Session {
+            version: VERSION,
+            root: root.to_path_buf(),
+            sidebar: Sidebar {
+                open: false,
+                width: 30,
+                expanded: Vec::new(),
+            },
+            sidebar_focused: false,
+            layout: SessionLayout::Leaf {
+                selected: true,
+                active: 0,
+                tabs: vec![SessionTab {
+                    path: file.to_string(),
+                    line: 0,
+                    col: 0,
+                }],
+            },
+        }
     }
 
     #[test]

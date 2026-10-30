@@ -107,18 +107,18 @@ fn load_app(path: Option<PathBuf>) -> io::Result<App> {
     let config = duckx_code::theme::config_dir();
     app.load_appearance(&config);
     app.clipboard = Clipboard::system();
-    let restored = path.is_none()
-        && session::read(&session::file_in(&config)).is_some_and(|saved| {
+    if let Ok(cwd) = env::current_dir() {
+        app.explorer = Explorer::new(cwd.clone());
+        if path.is_none()
+            && let Some(saved) = session::for_directory(&session::file_in(&config), &cwd)
+        {
             app.restore_session(saved);
-            true
-        });
-    if !restored && let Ok(cwd) = env::current_dir() {
-        app.explorer = Explorer::new(cwd);
+        }
     }
-    let branch_dir = if restored {
-        Some(app.explorer.root.clone())
-    } else {
+    let branch_dir = if path.is_some() {
         opened_parent.or_else(|| env::current_dir().ok())
+    } else {
+        env::current_dir().ok()
     };
     app.branch = branch_dir.as_deref().and_then(git::current_branch);
     Ok(app)
@@ -137,19 +137,17 @@ async fn main() -> io::Result<()> {
     result
 }
 
-/// Writes `session.json` after the frame loop, off this thread, so the next
-/// start with no path can reopen the folder and the files.
+/// Writes this folder's entry in `session.json` after the frame loop.
+/// Other folders already in the file stay there.
 async fn persist_session(app: &App) {
     let Some(dir) = app.appearance.config_dir().map(Path::to_path_buf) else {
         return;
     };
-    let Some(text) = app.session_snapshot().as_ref().and_then(session::to_json) else {
+    let Some(session) = app.session_snapshot() else {
         return;
     };
     let path = session::file_in(&dir);
-    let _ =
-        tokio::task::spawn_blocking(move || duckx_code::services::fs::write_atomic(&path, &text))
-            .await;
+    let _ = tokio::task::spawn_blocking(move || session::upsert(&path, &session)).await;
 }
 
 async fn run_loop(terminal: &mut Tui, app: &mut App) -> io::Result<()> {

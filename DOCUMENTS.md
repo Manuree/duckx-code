@@ -7,11 +7,11 @@ This is the user reference for every keybinding and Command Bar command that **d
 ## Getting Started
 
 ```powershell
-cargo run                    # reopen the last folder, files, and layout
+cargo run                    # open the current folder, with its last files and layout
 cargo run -- path\to\file.rs # open a file (a missing path opens as a new file)
 ```
 
-Starting with no path reopens the previous session: the folder, the files that were open, the cursor in each of them, the split windows, and the sidebar (open or closed, its width, and which folders were expanded). That session is `session.json`, next to `settings.json`. A file that was deleted is skipped. Text that was never saved is not restored. Passing a file path opens that file instead, in the folder the command was started from.
+Starting with no path opens the folder the command was started from. Files, cursors, split windows, and the sidebar (open or closed, its width, and which folders were expanded) come back from the last quit in that same folder. Another folder keeps its own session and is not opened in its place. Both live in `session.json`, next to `settings.json`. A file that was deleted is skipped. Text that was never saved is not restored. Passing a file path opens that file instead, in the folder the command was started from.
 
 There are no modes. Every printable key types text immediately. `Ctrl + S` saves the file. `Ctrl + Q` quits; if a file has unsaved changes, duckx-code asks first. `Ctrl + C` copies — it does not quit.
 
