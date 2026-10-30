@@ -1,4 +1,4 @@
-# duckx-code
+# Duckx Code
 
 **For 75% keyboards. No vim motions.**
 
