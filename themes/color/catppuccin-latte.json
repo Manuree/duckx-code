@@ -1,0 +1,66 @@
+{
+  "id": "catppuccin-latte",
+  "name": "Catppuccin Latte",
+  "editor": {
+    "bg": "#eff1f5",
+    "fg": "#4c4f69",
+    "gutter": "#9ca0b0",
+    "gutter_active": "#df8e1d",
+    "selection": "#bcc0cc",
+    "divider": "#acb0be"
+  },
+  "status": {
+    "badge_fg": "#e6e9ef",
+    "normal": "#1e66f5",
+    "command": "#8839ef",
+    "settings": "#40a02b",
+    "select": "#fe640b",
+    "b_bg": "#ccd0da",
+    "b_fg": "#1e66f5",
+    "c_bg": "#e6e9ef",
+    "c_fg": "#4c4f69",
+    "dim": "#8c8fa1",
+    "message": "#df8e1d"
+  },
+  "sidebar": {
+    "bg": "#e6e9ef",
+    "fg": "#4c4f69",
+    "dim": "#8c8fa1",
+    "guide": "#acb0be",
+    "folder": "#1e66f5",
+    "border": "#9ca0b0",
+    "border_focused": "#1e66f5",
+    "prompt": "#8839ef",
+    "match": "#df8e1d",
+    "selected": "#acb0be",
+    "selected_unfocused": "#ccd0da"
+  },
+  "git": {
+    "untracked": "#8c8fa1",
+    "modified": "#df8e1d",
+    "added": "#40a02b",
+    "deleted": "#d20f39",
+    "renamed": "#1e66f5"
+  },
+  "chrome": {
+    "title": "#8c8fa1",
+    "title_active": "#4c4f69",
+    "hint_bg": "#ccd0da",
+    "hint_fg": "#4c4f69",
+    "hint_dim": "#8c8fa1",
+    "hint_active_bg": "#bcc0cc",
+    "hint_active_name": "#8839ef",
+    "dialog_button": "#8c8fa1",
+    "dialog_active_fg": "#4c4f69",
+    "dialog_active_bg": "#acb0be",
+    "dialog_message": "#df8e1d",
+    "command_border": "#8839ef",
+    "command_prompt": "#8839ef"
+  },
+  "diagnostics": {
+    "error": "#d20f39",
+    "warning": "#df8e1d",
+    "info": "#04a5e5",
+    "hint": "#179299"
+  }
+}

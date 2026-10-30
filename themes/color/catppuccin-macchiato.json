@@ -1,0 +1,66 @@
+{
+  "id": "catppuccin-macchiato",
+  "name": "Catppuccin Macchiato",
+  "editor": {
+    "bg": "#24273a",
+    "fg": "#cad3f5",
+    "gutter": "#6e738d",
+    "gutter_active": "#eed49f",
+    "selection": "#494d64",
+    "divider": "#5b6078"
+  },
+  "status": {
+    "badge_fg": "#1e2030",
+    "normal": "#8aadf4",
+    "command": "#c6a0f6",
+    "settings": "#a6da95",
+    "select": "#f5a97f",
+    "b_bg": "#363a4f",
+    "b_fg": "#8aadf4",
+    "c_bg": "#1e2030",
+    "c_fg": "#cad3f5",
+    "dim": "#8087a2",
+    "message": "#eed49f"
+  },
+  "sidebar": {
+    "bg": "#1e2030",
+    "fg": "#cad3f5",
+    "dim": "#8087a2",
+    "guide": "#5b6078",
+    "folder": "#8aadf4",
+    "border": "#6e738d",
+    "border_focused": "#8aadf4",
+    "prompt": "#c6a0f6",
+    "match": "#eed49f",
+    "selected": "#5b6078",
+    "selected_unfocused": "#363a4f"
+  },
+  "git": {
+    "untracked": "#8087a2",
+    "modified": "#eed49f",
+    "added": "#a6da95",
+    "deleted": "#ed8796",
+    "renamed": "#8aadf4"
+  },
+  "chrome": {
+    "title": "#8087a2",
+    "title_active": "#cad3f5",
+    "hint_bg": "#363a4f",
+    "hint_fg": "#cad3f5",
+    "hint_dim": "#8087a2",
+    "hint_active_bg": "#494d64",
+    "hint_active_name": "#c6a0f6",
+    "dialog_button": "#8087a2",
+    "dialog_active_fg": "#cad3f5",
+    "dialog_active_bg": "#5b6078",
+    "dialog_message": "#eed49f",
+    "command_border": "#c6a0f6",
+    "command_prompt": "#c6a0f6"
+  },
+  "diagnostics": {
+    "error": "#ed8796",
+    "warning": "#eed49f",
+    "info": "#91d7e3",
+    "hint": "#8bd5ca"
+  }
+}

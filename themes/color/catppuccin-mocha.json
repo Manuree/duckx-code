@@ -1,0 +1,66 @@
+{
+  "id": "catppuccin-mocha",
+  "name": "Catppuccin Mocha",
+  "editor": {
+    "bg": "#1e1e2e",
+    "fg": "#cdd6f4",
+    "gutter": "#6c7086",
+    "gutter_active": "#f9e2af",
+    "selection": "#45475a",
+    "divider": "#585b70"
+  },
+  "status": {
+    "badge_fg": "#181825",
+    "normal": "#89b4fa",
+    "command": "#cba6f7",
+    "settings": "#a6e3a1",
+    "select": "#fab387",
+    "b_bg": "#313244",
+    "b_fg": "#89b4fa",
+    "c_bg": "#181825",
+    "c_fg": "#cdd6f4",
+    "dim": "#7f849c",
+    "message": "#f9e2af"
+  },
+  "sidebar": {
+    "bg": "#181825",
+    "fg": "#cdd6f4",
+    "dim": "#7f849c",
+    "guide": "#585b70",
+    "folder": "#89b4fa",
+    "border": "#6c7086",
+    "border_focused": "#89b4fa",
+    "prompt": "#cba6f7",
+    "match": "#f9e2af",
+    "selected": "#585b70",
+    "selected_unfocused": "#313244"
+  },
+  "git": {
+    "untracked": "#7f849c",
+    "modified": "#f9e2af",
+    "added": "#a6e3a1",
+    "deleted": "#f38ba8",
+    "renamed": "#89b4fa"
+  },
+  "chrome": {
+    "title": "#7f849c",
+    "title_active": "#cdd6f4",
+    "hint_bg": "#313244",
+    "hint_fg": "#cdd6f4",
+    "hint_dim": "#7f849c",
+    "hint_active_bg": "#45475a",
+    "hint_active_name": "#cba6f7",
+    "dialog_button": "#7f849c",
+    "dialog_active_fg": "#cdd6f4",
+    "dialog_active_bg": "#585b70",
+    "dialog_message": "#f9e2af",
+    "command_border": "#cba6f7",
+    "command_prompt": "#cba6f7"
+  },
+  "diagnostics": {
+    "error": "#f38ba8",
+    "warning": "#f9e2af",
+    "info": "#89dceb",
+    "hint": "#94e2d5"
+  }
+}

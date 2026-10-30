@@ -1,0 +1,66 @@
+{
+  "id": "catppuccin-frappe",
+  "name": "Catppuccin Frappé",
+  "editor": {
+    "bg": "#303446",
+    "fg": "#c6d0f5",
+    "gutter": "#737994",
+    "gutter_active": "#e5c890",
+    "selection": "#51576d",
+    "divider": "#626880"
+  },
+  "status": {
+    "badge_fg": "#292c3c",
+    "normal": "#8caaee",
+    "command": "#ca9ee6",
+    "settings": "#a6d189",
+    "select": "#ef9f76",
+    "b_bg": "#414559",
+    "b_fg": "#8caaee",
+    "c_bg": "#292c3c",
+    "c_fg": "#c6d0f5",
+    "dim": "#838ba7",
+    "message": "#e5c890"
+  },
+  "sidebar": {
+    "bg": "#292c3c",
+    "fg": "#c6d0f5",
+    "dim": "#838ba7",
+    "guide": "#626880",
+    "folder": "#8caaee",
+    "border": "#737994",
+    "border_focused": "#8caaee",
+    "prompt": "#ca9ee6",
+    "match": "#e5c890",
+    "selected": "#626880",
+    "selected_unfocused": "#414559"
+  },
+  "git": {
+    "untracked": "#838ba7",
+    "modified": "#e5c890",
+    "added": "#a6d189",
+    "deleted": "#e78284",
+    "renamed": "#8caaee"
+  },
+  "chrome": {
+    "title": "#838ba7",
+    "title_active": "#c6d0f5",
+    "hint_bg": "#414559",
+    "hint_fg": "#c6d0f5",
+    "hint_dim": "#838ba7",
+    "hint_active_bg": "#51576d",
+    "hint_active_name": "#ca9ee6",
+    "dialog_button": "#838ba7",
+    "dialog_active_fg": "#c6d0f5",
+    "dialog_active_bg": "#626880",
+    "dialog_message": "#e5c890",
+    "command_border": "#ca9ee6",
+    "command_prompt": "#ca9ee6"
+  },
+  "diagnostics": {
+    "error": "#e78284",
+    "warning": "#e5c890",
+    "info": "#99d1db",
+    "hint": "#81c8be"
+  }
+}

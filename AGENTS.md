@@ -1,0 +1,50 @@
+# AGENTS.md
+
+This file provides persistent context, architectural guardrails, and coding conventions for AI coding agents working on **duckx-code**.
+
+## 1. Project Context & Documentation Map
+
+Before making structural, UX, or architectural changes, always consult:
+* [`ARCHITECTURE.md`](./ARCHITECTURE.md) — System data flow, component boundaries, concurrency model, and Rust crate stack.
+* [`DESIGN.md`](./DESIGN.md) — Product philosophy, 75% keyboard layout ergonomics, Shift-driven selection rules, and Semantic Command Bar UX.
+* [`DOCUMENTS.md`](./DOCUMENTS.md) — User reference of every implemented keybinding and Command Bar command, grouped by category. **Update it in the same change** whenever you add, remove, or alter a keybinding (`src/input.rs`) or a command (`src/command.rs`), and move items out of its "Planned" section once they ship.
+
+---
+
+## 2. Core Invariants (Must Never Be Violated)
+
+1. **True Modeless Operation:**
+   * Never introduce modal editing states (`Normal`, `Insert`, `Visual` modes) or `hjkl` navigation bindings.
+   * When the editor canvas has focus, printable characters must always insert text directly into the buffer.
+2. **75% Keyboard Navigation & Shift-Selection:**
+   * All cursor movement must center around `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PgUp`, and `PgDn` (plus `Alt` word and `Ctrl` document modifiers).
+   * `Ctrl + Left / Right / Up / Down` moves focus to the open surface that borders the current one on that side. It must not open a closed surface and must not move the text cursor.
+   * Holding `Shift` with any navigation key must extend/modify the active selection (`anchor` stays fixed, `head` moves).
+   * Unmodified navigation keys must collapse any active selection (`anchor = head`).
+3. **0ms Non-Blocking UI Thread:**
+   * Never perform blocking I/O, synchronous network/stdio reads, or heavy synchronous computation on the main UI/render thread.
+   * All LSP communication (`stdin`/`stdout` JSON-RPC) must live inside the asynchronous `tokio` background worker and communicate with `Application Core` strictly via `tokio::sync::mpsc` channels.
+4. **Unidirectional Data Flow:**
+   * `Input Router` converts raw `crossterm::event::KeyEvent` into `SemanticAction`.
+   * `Application Core` mutates state exclusively in response to `SemanticAction` or `LspEvent`.
+   * `UI & Viewport` (`ratatui`) must remain a pure, read-only projection of `Application Core` state—never mutate editor state inside rendering functions.
+5. **UI Requirements ([`DESIGN.md` §5](./DESIGN.md#5-ui-requirements)):**
+   * **R1 Rounded Borders:** every bordered element must be built with `ui::panel(title)` (rounded `╭╮╰╯` corners). Never construct `Block::bordered()` or set another `BorderType` directly. Any new bordered widget needs a render test asserting rounded corners.
+   * **R2 Block Cursor:** the cursor is set to `SetCursorStyle::SteadyBlock` at startup; never switch it to a bar or underline.
+
+---
+
+## 3. Rust Coding Standards & Conventions
+
+* **Text Indexing & Unicode Safety:**
+  * Always use `ropey::Rope` for buffer storage and manipulation.
+  * Never slice strings by raw byte indices (`&str[a..b]`) without verifying UTF-8 char/grapheme boundaries.
+  * Use `unicode-segmentation` for grapheme cluster movement (`Left`/`Right`) and `unicode-width` for visual column calculations (`Up`/`Down` target column and horizontal scrolling).
+* **Error Handling:**
+  * Do not use `.unwrap()` or `.expect()` in runtime code paths where user input, file I/O, clipboard access, or LSP responses can fail.
+  * Propagate recoverable errors gracefully and surface user-facing errors in the Status Bar or notification overlay instead of panicking.
+  * Ensure a panic hook restores terminal state (`disable_raw_mode`, `LeaveAlternateScreen`) before printing panic backtraces so the user's terminal is never left corrupted.
+* **Terminal Compatibility:**
+  * In `crossterm`, enable `EnableBracketedPaste` and attempt `PushKeyboardEnhancementFlags` where supported, but always provide fallback key matches (`F1` and `Ctrl + ;` alongside `Shift + Space`) so Windows Terminal, Alacritty, WezTerm, and standard terminals all work out of the box.
+* **Testing:**
+  * Write unit tests for `buffer.rs` (cursor movement, `Shift` selection spans, grapheme boundaries, Undo/Redo transactions) and `command.rs` (prefix matching and `Top-1 Recent` ordering) independent of the terminal UI.

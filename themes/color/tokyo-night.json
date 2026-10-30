@@ -1,0 +1,66 @@
+{
+  "id": "tokyo-night",
+  "name": "Tokyo Night",
+  "editor": {
+    "bg": "#1a1b26",
+    "fg": "#a9b1d6",
+    "gutter": "#363b54",
+    "gutter_active": "#e0af68",
+    "selection": "#2b2f41",
+    "divider": "#363b54"
+  },
+  "status": {
+    "badge_fg": "#1a1b26",
+    "normal": "#7aa2f7",
+    "command": "#bb9af7",
+    "settings": "#9ece6a",
+    "select": "#ff9e64",
+    "b_bg": "#292e42",
+    "b_fg": "#7aa2f7",
+    "c_bg": "#16161e",
+    "c_fg": "#a9b1d6",
+    "dim": "#787c99",
+    "message": "#e0af68"
+  },
+  "sidebar": {
+    "bg": "#16161e",
+    "fg": "#787c99",
+    "dim": "#515670",
+    "guide": "#363b54",
+    "folder": "#7aa2f7",
+    "border": "#101014",
+    "border_focused": "#3d59a1",
+    "prompt": "#bb9af7",
+    "match": "#668ac4",
+    "selected": "#202330",
+    "selected_unfocused": "#1c1d29"
+  },
+  "git": {
+    "untracked": "#449dab",
+    "modified": "#6183bb",
+    "added": "#449dab",
+    "deleted": "#914c54",
+    "renamed": "#449dab"
+  },
+  "chrome": {
+    "title": "#787c99",
+    "title_active": "#a9b1d6",
+    "hint_bg": "#16161e",
+    "hint_fg": "#a9b1d6",
+    "hint_dim": "#787c99",
+    "hint_active_bg": "#202330",
+    "hint_active_name": "#bb9af7",
+    "dialog_button": "#787c99",
+    "dialog_active_fg": "#a9b1d6",
+    "dialog_active_bg": "#202330",
+    "dialog_message": "#e0af68",
+    "command_border": "#bb9af7",
+    "command_prompt": "#bb9af7"
+  },
+  "diagnostics": {
+    "error": "#db4b4b",
+    "warning": "#e0af68",
+    "info": "#0db9d7",
+    "hint": "#1abc9c"
+  }
+}
