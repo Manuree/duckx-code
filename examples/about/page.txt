@@ -1,0 +1,7 @@
+# Shift+Space, type about, then Enter.
+# A page opens with the duck logo and the version.
+# Esc closes the page. This file stays as it is.
+
+fn main() {
+    println!("duckx");
+}

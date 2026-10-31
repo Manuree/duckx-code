@@ -14,7 +14,7 @@ use crate::app::{App, LspLabel};
 use crate::buffer::{Buffer, IndentStyle, LineEnding};
 use crate::lsp::{ServerStatus, Severity};
 
-/// `[NORMAL|FILE|COMMAND|FIND|OPEN|SETTINGS][branch][icon file | ❯ input]  ...  [selection][progress line:col][indent ending]`.
+/// `[NORMAL|FILE|COMMAND|FIND|OPEN|SETTINGS|ABOUT][branch][icon file | ❯ input]  ...  [selection][progress line:col][indent ending]`.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let right = Line::from(right_spans(app));
     let right_width = (right.width() as u16).min(area.width);
@@ -54,6 +54,11 @@ fn left_line(app: &App) -> (Vec<Span<'static>>, usize) {
         replace_line(app)
     } else if app.find_mode.is_some() {
         find_line(app)
+    } else if app.about {
+        (
+            file_line(app, " ABOUT ", theme.status_find, theme.status_find_bg),
+            0,
+        )
     } else if app.settings.is_some() {
         (
             file_line(

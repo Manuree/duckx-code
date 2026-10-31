@@ -1,3 +1,4 @@
+mod about;
 mod command_bar;
 mod icons;
 mod picker;
@@ -356,6 +357,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         ..area
     };
     settings::render(frame, app, above_status);
+    about::render(frame, app, above_status);
     picker::render(frame, app, above_status);
     prompt::render(frame, app, above_status);
 }
@@ -1141,6 +1143,61 @@ mod tests {
             "main".into(),
         )));
         draw(&app, 20, 4);
+    }
+
+    #[test]
+    fn about_page_shows_the_duck_and_rounded_corners() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.handle(SemanticAction::OpenCommandBar);
+        app.handle(SemanticAction::CommandBar(CommandBarAction::Insert(
+            "about".into(),
+        )));
+        app.handle(SemanticAction::CommandBar(CommandBarAction::Submit));
+        assert_eq!(app.focus(), crate::action::Focus::About);
+
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("About"), "{screen}");
+        assert!(screen.contains("▄▀▀▀▀▀▄"), "{screen}");
+        assert!(screen.contains("CODE"), "{screen}");
+        assert!(screen.contains("duckx-code"), "{screen}");
+        let lines: Vec<&str> = screen.lines().collect();
+        let column = |line: &str, needle: &str| {
+            let byte = line.find(needle).unwrap();
+            line[..byte].chars().count()
+        };
+        let top = lines
+            .iter()
+            .position(|line| line.contains("▄▀▀▀▀▀▄"))
+            .unwrap();
+        let code = lines.iter().position(|line| line.contains("CODE")).unwrap();
+        let wing = lines
+            .iter()
+            .position(|line| line.contains("█▀▀▀▀▀▀"))
+            .unwrap();
+        let beak = column(lines[top], "▄");
+        assert_eq!(
+            column(lines[code], "CODE") as isize - beak as isize,
+            8,
+            "{screen}"
+        );
+        assert_eq!(
+            beak as isize - column(lines[wing], "█") as isize,
+            6,
+            "{screen}"
+        );
+        assert!(screen.contains(env!("CARGO_PKG_VERSION")), "{screen}");
+        assert!(screen.contains("75%"), "{screen}");
+        assert!(screen.contains("esc"), "{screen}");
+        assert!(screen.contains("ABOUT"), "{screen}");
+        for corner in ["╭", "╮", "╰", "╯"] {
+            assert!(screen.contains(corner), "missing rounded corner {corner}");
+        }
+        for square in ["┌", "┐", "└", "┘"] {
+            assert!(!screen.contains(square), "found square corner {square}");
+        }
+        for (w, h) in [(8, 4), (20, 8), (40, 12), (80, 24)] {
+            draw(&app, w, h);
+        }
     }
 
     #[test]

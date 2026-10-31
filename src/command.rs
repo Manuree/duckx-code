@@ -89,6 +89,8 @@ pub enum CommandId {
     Rename,
     /// Open the settings page.
     Settings,
+    /// Open the about page.
+    About,
     /// Open the workspace file picker.
     FilePicker,
     /// Read the focused file from disk again.
@@ -509,6 +511,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: true,
     },
     CommandSpec {
+        id: CommandId::About,
+        name: "about",
+        description: "Show the version and logo",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
         id: CommandId::Quit,
         name: "quit",
         description: "Exit duckx-code",
@@ -574,8 +585,8 @@ pub const COMMANDS: &[CommandSpec] = &[
 ];
 
 /// Lower comes first in the Command Bar. Opening and search lead, then everyday
-/// edits, language tools, explorer file commands, layout, and finally settings
-/// and quit. [`suggestions`] still pins the most recent command on this surface
+/// edits, language tools, explorer file commands, layout, and finally settings,
+/// about, and quit. [`suggestions`] still pins the most recent command on this surface
 /// ahead of this order whenever that command is one of the matches.
 fn importance(id: CommandId) -> u16 {
     match id {
@@ -629,6 +640,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::CloseView => 370,
         CommandId::CloseAll => 380,
         CommandId::Settings => 390,
+        CommandId::About => 395,
         CommandId::Quit => 400,
     }
 }
@@ -947,6 +959,7 @@ mod tests {
                 "close-view",
                 "close-all",
                 "setting",
+                "about",
                 "quit",
             ]
         );
@@ -961,6 +974,7 @@ mod tests {
                 "wider",
                 "narrower",
                 "setting",
+                "about",
                 "quit"
             ]
         );
@@ -981,6 +995,7 @@ mod tests {
                 "wider",
                 "narrower",
                 "setting",
+                "about",
                 "quit"
             ]
         );
@@ -1020,6 +1035,8 @@ mod tests {
         );
         assert_eq!(names("cop", None), ["copy"]);
         assert_eq!(names("set", None), ["setting"]);
+        assert_eq!(names("about", None), ["about"]);
+        assert_eq!(names_in("about", None, CommandContext::Explorer), ["about"]);
         assert_eq!(names("config", None), ["setting"]);
         assert_eq!(
             names_in("conf", None, CommandContext::Explorer),

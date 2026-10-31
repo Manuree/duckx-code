@@ -13,6 +13,8 @@ pub enum Focus {
     Prompt,
     /// Settings page. Arrow keys move through its sections and rows.
     Settings,
+    /// About page. `Esc` closes it. Printable keys do not insert.
+    About,
     /// File picker. Printable keys edit the query; arrows move through the list.
     FilePicker,
     /// Completion list. `Up`/`Down`/`Tab`/`Enter`/`Esc` move the list; other keys still type.
@@ -125,6 +127,8 @@ pub enum SemanticAction {
     Quit,
     Prompt(PromptAction),
     Settings(SettingsAction),
+    /// Close the About page.
+    CloseAbout,
     /// Open the file picker over the editor.
     OpenFilePicker,
     Picker(PickerAction),

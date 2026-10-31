@@ -1,6 +1,6 @@
 # DOCUMENTS.md — Keybindings & Command Reference
 
-This is the user reference for every keybinding and Command Bar command that **duckx-code currently supports**. [Planned](#11-planned) lists designed behavior that is not built yet.
+This is the user reference for every keybinding and Command Bar command that **duckx-code currently supports**. [Planned](#12-planned) lists designed behavior that is not built yet.
 
 > For the design rationale behind these bindings, see [`DESIGN.md`](./DESIGN.md).
 
@@ -259,7 +259,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 
 * **Where it sits:** the bar is the status line. The badge reads `COMMAND` and you type after `❯`. The file name is hidden until the bar closes.
 * **Hints:** matching commands stack upward from the status line, one command per row, in list order. `Up` moves the highlight to the row above and `Down` to the row below. The highlighted row shows `↑↓  tab  enter  esc` on the right. The list disappears when the bar closes.
-* **Focus context:** the list is only the commands for the surface that was focused when the bar opened. From an editor, file commands (`select`, `move`, `delete`, `rename`) are absent. From the explorer, editing commands (`goto`, `save`, `undo`, …) are absent, and `move`, `delete`, and `rename` appear only in FILE mode. `file-picker`, `explorer`, `setting`, and `quit` are in both. Typing a command from the other surface reports where it applies and does not run it. Typing `move`, `delete`, or `rename` outside FILE mode reports that it applies in FILE mode.
+* **Focus context:** the list is only the commands for the surface that was focused when the bar opened. From an editor, file commands (`select`, `move`, `delete`, `rename`) are absent. From the explorer, editing commands (`goto`, `save`, `undo`, …) are absent, and `move`, `delete`, and `rename` appear only in FILE mode. `file-picker`, `explorer`, `setting`, `about`, and `quit` are in both. Typing a command from the other surface reports where it applies and does not run it. Typing `move`, `delete`, or `rename` outside FILE mode reports that it applies in FILE mode.
 * **Terminals that hide `Shift + Space`:** some terminals, including some integrated editor terminals, send `Shift + Space` as a plain space. If the bar doesn't open, use `F1`.
 * **Space inside the bar:** pressing `Shift + Space` while the bar is open types a normal space.
 
@@ -268,7 +268,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 1. **The list is the focused surface.** Editor commands and explorer file commands are never mixed. A bare number goes to that line only while an editor is focused: typing `42` shows `goto 42` as the only hint, and `Enter` jumps there. `Tab` leaves the number as-is. In the explorer, a number matches nothing.
 2. **Name prefix matches come next:** `un` → `undo` in the editor, `del` → `delete-line` in the editor and `delete` in the explorer while FILE mode is on.
 3. **Then word matches:** commands where a word in the name or description starts with the input, so `line` in the editor → `goto`, `copy`, `cut`, `comment`, `indent`, `outdent`, `move-line-up`, `move-line-down`, `delete-line`, `duplicate-line-up`, `duplicate-line-down`.
-4. **Each of those groups follows importance.** An empty list in the editor starts `file-picker`, `find`, `replace`, `goto`, `save`, `undo`, `redo`, then clipboard, language tools, layout, `setting`, and `quit`. The explorer uses the same rank: `file-picker`, `find`, `replace`, `select`, then `move`, `delete`, and `rename` in FILE mode, then `explorer`, `setting`, and `quit`.
+4. **Each of those groups follows importance.** An empty list in the editor starts `file-picker`, `find`, `replace`, `goto`, `save`, `undo`, `redo`, then clipboard, language tools, layout, `setting`, `about`, and `quit`. The explorer uses the same rank: `file-picker`, `find`, `replace`, `select`, then `move`, `delete`, and `rename` in FILE mode, then `explorer`, `setting`, `about`, and `quit`.
 5. **The most recent command on this surface is always first** when it is one of the matches, and marked with ★. That holds for an empty input and for a typed filter, including when the recent command only matches a later word. Opening the bar and pressing `Enter` immediately repeats it. A command last run in the editor is not pinned while the explorer is focused, and the reverse.
 
 ### 6.3 Running Commands
@@ -360,10 +360,11 @@ If no OS clipboard is available (e.g. a headless session), `copy`, `cut`, and `p
 | Command | Argument | Description | Shortcut |
 | :--- | :--- | :--- | :--- |
 | `setting` | — | Open the settings page. `config` is another name for the same command. | — |
+| `about` | — | Open the about page. It shows the duck logo, the name, and the version. `Esc` closes it. | — |
 | `quit` | — | Exit duckx-code. Asks before leaving unsaved changes | `Ctrl + Q` |
 
 #### Explorer
-These are listed only while the explorer sidebar is focused. `explorer`, `setting`, and `quit` are also listed here.
+These are listed only while the explorer sidebar is focused. `explorer`, `setting`, `about`, and `quit` are also listed here.
 
 | Command | Argument | Description | Shortcut |
 | :--- | :--- | :--- | :--- |
@@ -450,7 +451,7 @@ In FILE mode, movement without `Shift` clears the cover. Marks last until you `S
 
 ### 8.4 Changing Files
 
-Open the Command Bar while the explorer is focused (`Shift + Space` works in FILE mode too). Outside FILE mode the hints are `file-picker`, `find`, `replace`, `select`, `explorer`, `setting`, and `quit`. Inside FILE mode they also include `move`, `delete`, and `rename`, after `select`. `replace` outside FILTER mode reports that it applies in FILTER mode.
+Open the Command Bar while the explorer is focused (`Shift + Space` works in FILE mode too). Outside FILE mode the hints are `file-picker`, `find`, `replace`, `select`, `explorer`, `setting`, `about`, and `quit`. Inside FILE mode they also include `move`, `delete`, and `rename`, after `select`. `replace` outside FILTER mode reports that it applies in FILTER mode.
 
 | Command | Action |
 | :--- | :--- |
@@ -502,7 +503,7 @@ While the Command Bar is open the file name is hidden, and matching commands sta
 
 | Section | Element | Meaning |
 | :--- | :--- | :--- |
-| Left | `NORMAL` / `FILE` / `COMMAND` / `FIND` / `REPLACE` / `OPEN` / `SETTINGS` | Where keystrokes go. `NORMAL` (blue) while editing the file or the sidebar. `FILE` (orange) while the explorer is in FILE mode, entered with `select`. `FILTER` (teal) while the explorer is showing a file search. `COMMAND` (purple) while the Command Bar is open. `FIND` (yellow) while searching; printable keys jump to that text instead of inserting. `REPLACE` (orange) while typing a replacement. `OPEN` (purple) while the file picker is open. `SETTINGS` (green) while the settings page is open. Printable keys insert text while the badge reads `NORMAL`. |
+| Left | `NORMAL` / `FILE` / `COMMAND` / `FIND` / `REPLACE` / `OPEN` / `SETTINGS` / `ABOUT` | Where keystrokes go. `NORMAL` (blue) while editing the file or the sidebar. `FILE` (orange) while the explorer is in FILE mode, entered with `select`. `FILTER` (teal) while the explorer is showing a file search. `COMMAND` (purple) while the Command Bar is open. `FIND` (yellow) while searching; printable keys jump to that text instead of inserting. `REPLACE` (orange) while typing a replacement. `OPEN` (purple) while the file picker is open. `SETTINGS` (green) while the settings page is open. `ABOUT` (yellow) while the about page is open. Printable keys insert text while the badge reads `NORMAL`. |
 | Left | Git branch | Shown while the bar is closed and the working directory is inside a repository. The branch icon and the branch name sit between the badge and the file. A detached HEAD shows the first 7 characters of the commit hash. Outside a repository this section is omitted. Hidden while the Command Bar, FIND mode, or REPLACE mode is open. |
 | Left | Icon + path | Shown while the Command Bar, FIND mode, and REPLACE mode are closed. File-type icon, the directory dimmed, and the file name in bold. A file saved as a bare name shows the folder duckx-code was started from. `[No Name]` when the buffer has no path. `[+]` after the name while there are unsaved changes. A yellow message (e.g. `Saved E:\Work\duckx-code\hello.rs`, `Copied 5 characters`, `Unknown command`) appears after it until the next key press. |
 | Left | `❯` input | Shown while the bar is open, in place of the file name. Matching commands are stacked on the rows above this line. |
@@ -609,6 +610,12 @@ Code uses the syntax theme's `text` color. The other syntax roles are stored for
 
 ---
 
-## 11. Planned
+## 11. About
+
+`about` opens a page over the editor and the sidebar. The status bar badge reads `ABOUT`. The page shows the duck logo, the name **duckx-code**, and the version from this build. `Esc`, `Backspace`, or `F1` closes it and returns to the surface that was focused. Printable keys do not insert while it is open. `Ctrl + Q` still quits.
+
+---
+
+## 12. Planned
 
 Nothing in [`DESIGN.md`](./DESIGN.md) is waiting on a keybinding. New editing commands are listed with the keys above.

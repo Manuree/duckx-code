@@ -32,6 +32,7 @@ pub fn route_flags(
         Focus::Sidebar => route_sidebar(event, selecting, filtering, keys),
         Focus::Prompt => route_prompt(event),
         Focus::Settings => route_settings(event, capturing),
+        Focus::About => route_about(event),
         Focus::Find => route_find(event),
         Focus::Replace => route_replace(event),
         Focus::FilePicker => route_picker(event),
@@ -260,6 +261,25 @@ fn route_picker(event: &Event) -> Option<SemanticAction> {
         _ => return None,
     };
     Some(SemanticAction::Picker(action))
+}
+
+fn route_about(event: &Event) -> Option<SemanticAction> {
+    let key = match event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => key,
+        _ => return None,
+    };
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    if ctrl && !alt && matches!(key.code, KeyCode::Char('q' | 'Q')) {
+        return Some(SemanticAction::Quit);
+    }
+    if ctrl || alt {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::F(1) | KeyCode::Backspace => Some(SemanticAction::CloseAbout),
+        _ => None,
+    }
 }
 
 fn route_settings(event: &Event, capturing: bool) -> Option<SemanticAction> {
@@ -1039,6 +1059,20 @@ mod tests {
             Some(SemanticAction::Settings(SettingsAction::Back))
         );
         assert_eq!(settings(key(KeyCode::Char('a'), KeyModifiers::NONE)), None);
+        let about = |event| route(&event, Focus::About, false);
+        assert_eq!(
+            about(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(SemanticAction::CloseAbout)
+        );
+        assert_eq!(
+            about(key(KeyCode::Backspace, KeyModifiers::NONE)),
+            Some(SemanticAction::CloseAbout)
+        );
+        assert_eq!(about(key(KeyCode::Char('a'), KeyModifiers::NONE)), None);
+        assert_eq!(
+            about(key(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            Some(SemanticAction::Quit)
+        );
         assert_eq!(
             settings(key(KeyCode::Char('q'), KeyModifiers::CONTROL)),
             Some(SemanticAction::Quit)

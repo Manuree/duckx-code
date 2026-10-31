@@ -80,7 +80,7 @@ Traditional editors either require exiting Insert Mode (`Esc` then `:`) or rely 
 ### 3.2 Real-Time Prefix Match & Top-1 Recent Priority
 When the Command Bar opens:
 1. **Top-1 Recent Pinning:** The most recently executed command on this surface is always the first hint whenever it matches the input, including when the input is empty, so a single `Enter` repeats it.
-2. **Importance order:** Every other hint follows a fixed importance rank. Opening and search come first (`file-picker`, `find`, `replace`, `goto`), then everyday edits (`save`, `undo`, `redo`, clipboard), then language tools, then explorer file commands, then layout, then `setting` and `quit`. The explorer uses the same rank.
+2. **Importance order:** Every other hint follows a fixed importance rank. Opening and search come first (`file-picker`, `find`, `replace`, `goto`), then everyday edits (`save`, `undo`, `redo`, clipboard), then language tools, then explorer file commands, then layout, then `setting`, `about`, and `quit`. The explorer uses the same rank.
 3. **Zero-Latency Prefix Filtering:** As the user types, commands are filtered in real time by prefix/keyword match with zero debounce delay. Names that start with the input stay ahead of commands that only match a later word. Importance orders each of those groups, and the recent command is then moved to the top.
 4. **Keyboard Flow:**
    * `Up` / `Down`: Cycle through matching command hints.
@@ -88,7 +88,7 @@ When the Command Bar opens:
    * `Right`: Accept the dimmed file or folder name drawn after the typed argument. The block cursor sits on the first character of that hint, the same way a shell draws an inline suggestion. `move` hints folders, `rename` hints names in the same folder, and `save` hints files and folders. The closest name is the shortest match, then A–Z. A name already typed in full stays as it is.
    * `Enter`: Execute the selected command immediately and return focus to the editor. An exact command name in the input (e.g. `goto 42`) wins over the highlighted hint. If the command needs an argument that is missing, `Enter` completes the name instead of failing.
    * `Esc` / `F1`: Dismiss the Command Bar without side effects.
-5. **Focus context:** the bar only lists commands for the surface that was focused when it opened. An editor shows editing commands. The explorer shows `file-picker`, `find`, `replace`, `select`, `explorer`, `setting`, and `quit`. In FILE mode it also shows `move`, `delete`, and `rename`, in that order after `select`. A command from the other surface is not hinted, and typing its name does not run it. A bare line number is `goto` only while an editor is focused. The ★ recent command is the last one run on this surface, and it is the first hint whenever it is listed.
+5. **Focus context:** the bar only lists commands for the surface that was focused when it opened. An editor shows editing commands. The explorer shows `file-picker`, `find`, `replace`, `select`, `explorer`, `setting`, `about`, and `quit`. In FILE mode it also shows `move`, `delete`, and `rename`, in that order after `select`. A command from the other surface is not hinted, and typing its name does not run it. A bare line number is `goto` only while an editor is focused. The ★ recent command is the last one run on this surface, and it is the first hint whenever it is listed.
 
 ### 3.3 Built-in Commands
 
@@ -113,6 +113,7 @@ While an editor is focused:
 | `close-view` (`clean-view` is the same command) | — | — |
 | `tab-prev` / `tab-next` | — | `Ctrl + Alt + Left` / `Ctrl + Alt + Right` |
 | `setting` (`config` is the same command) | — | — |
+| `about` | — | — |
 | `quit` | — | `Ctrl + Q` |
 
 While the explorer is focused:
@@ -126,6 +127,7 @@ While the explorer is focused:
 | `explorer` | — | Toggle the sidebar (`Ctrl + B`) |
 | `file-picker` | — | Open a workspace file by name (`Ctrl + P`) |
 | `setting` (`config` is the same command) | — | Open the settings page |
+| `about` | — | Show the version and the duck logo |
 | `quit` | — | Exit duckx-code |
 
 ---
@@ -194,6 +196,9 @@ Modeled on the snacks.nvim explorer (LazyVim):
 **Appearance** has two saved choices. **Color theme** colors the interface (editor, sidebar, status bar, dialogs). **Syntax colors** colors code. They are chosen separately, so a dark interface can sit under a different syntax palette. `Enter` or `Right` on a row opens the choices in the same rows as the command list: full width of that column, no border, the highlighted name in the accent color, and `↑↓  enter  esc` at the right of that row. `Up` / `Down` moves through the list and a theme or an editor value updates immediately. `Enter` keeps the highlighted value and saves it. `Esc`, `Left`, or `Backspace` closes the list and restores the value that was selected when it opened. The syntax row shows a short colored sample (`fn main() { "hi" }`). Built-in themes are Tokyo Night and the four Catppuccin flavors (Latte, Frappé, Macchiato, Mocha). A JSON file in the user theme folder replaces a built-in when the `id` matches, and a new `id` is added to the list.
 
 **Editor** stores tab width (2, 4, or 8), whether Tab inserts spaces, and the line ending written on save (`Auto`, `LF`, or `CRLF`). Those values apply to the next Tab and to new line breaks. Text already in the file is not rewritten until a save that uses a forced line ending. **Files** stores whether a save trims trailing whitespace and whether it adds a final newline. **Keybindings** lists each command chord. `Enter` waits for the next key. `Delete` on a row restores that row. `Delete` on a section name restores every row in the section. Arrow keys, plain characters, `Ctrl` + arrows, `F1`, `Ctrl + ;`, and `Ctrl + Q` cannot be reassigned. A chord that another command already uses is refused.
+
+### About
+`about` covers the editor and the sidebar with one rounded page. It shows the duck logo, the name, and the version. The status badge reads `ABOUT`. `Esc`, `Backspace`, or `F1` closes the page. Typing does not insert into the buffer. `Ctrl + Q` still quits.
 
 ### File picker
 `file-picker` or `Ctrl + P` opens a rounded list over the editor. The status badge reads `OPEN`. The walk respects `.gitignore` and skips hidden files, on a background job, and the previous list stays up while a refresh runs. An empty query lists files opened in this session first, then the rest by file name. Words separated by spaces must all match. A word that starts with `!` drops any path that contains that text. A lowercase query ignores case; any capital letter matches case. `\` is the same as `/`. A match in the file name ranks above the same match in a directory, and a file in the focused file's folder ranks above an equal match elsewhere. `Up` / `Down` / `PgUp` / `PgDn` move the highlight. `Left` / `Right` / `Home` / `End` move the cursor in the query. `Ctrl + Left` / `Ctrl + Right` move by word, and `Ctrl + Backspace` deletes the previous word. `Ctrl + Home` / `Ctrl + End` jump to the first or last file. `Enter` opens the highlighted file. `Esc` closes the list. `Shift + Space` or `F1` closes it and opens the Command Bar.

@@ -432,6 +432,8 @@ pub struct App {
     pub prompt: Option<Prompt>,
     /// Settings page. `None` while it is closed.
     pub settings: Option<crate::settings::Page>,
+    /// About page. Closed when false.
+    pub about: bool,
     /// Color theme, syntax theme, and the styles widgets read.
     pub appearance: crate::theme::Appearance,
     pub editor_prefs: crate::settings::EditorPrefs,
@@ -526,6 +528,7 @@ impl App {
             should_quit: false,
             prompt: None,
             settings: None,
+            about: false,
             appearance: crate::theme::Appearance::builtin(),
             editor_prefs: crate::settings::EditorPrefs::default(),
             file_prefs: crate::settings::FilePrefs::default(),
@@ -923,6 +926,8 @@ impl App {
             Focus::Prompt
         } else if self.command_bar.is_some() {
             Focus::CommandBar
+        } else if self.about {
+            Focus::About
         } else if self.settings.is_some() {
             Focus::Settings
         } else if self.file_picker.is_some() {
@@ -1278,6 +1283,7 @@ impl App {
         self.find_mode = None;
         self.replace_mode = None;
         self.settings = None;
+        self.about = false;
         let cached = self
             .file_index
             .as_ref()
@@ -1972,6 +1978,7 @@ impl App {
             SemanticAction::Quit => self.request_quit(),
             SemanticAction::Prompt(action) => self.handle_prompt(action),
             SemanticAction::Settings(action) => self.handle_settings(action),
+            SemanticAction::CloseAbout => self.about = false,
         }
     }
 
@@ -3237,7 +3244,13 @@ impl App {
             CommandId::Rename => self.begin_rename(arg.unwrap_or(""))?,
             CommandId::Settings => {
                 self.close_picker();
+                self.about = false;
                 self.settings = Some(crate::settings::Page::new());
+            }
+            CommandId::About => {
+                self.close_picker();
+                self.settings = None;
+                self.about = true;
             }
             CommandId::FilePicker => self.open_file_picker(),
             CommandId::Diff => self.toggle_diff(),
@@ -6286,7 +6299,10 @@ mod tests {
                 "replace",
                 "select",
                 "explorer",
+                "wider",
+                "narrower",
                 "setting",
+                "about",
                 "quit"
             ]
         );
@@ -6323,6 +6339,31 @@ mod tests {
         run(&mut app, "config");
         assert_eq!(app.focus(), Focus::Settings);
         app.handle(SemanticAction::Settings(SettingsAction::Back));
+        assert_eq!(app.focus(), Focus::Sidebar);
+    }
+
+    #[test]
+    fn about_opens_over_either_surface_and_esc_closes_it() {
+        let mut app = App::new(Buffer::from_text("keep\n"), None);
+        app.settings = Some(crate::settings::Page::new());
+        run(&mut app, "about");
+        assert!(app.about);
+        assert!(app.settings.is_none());
+        assert_eq!(app.focus(), Focus::About);
+        assert_eq!(app.recent_command, Some(CommandId::About));
+        assert_eq!(app.buffer().rope().to_string(), "keep\n");
+
+        app.handle(SemanticAction::CloseAbout);
+        assert!(!app.about);
+        assert_eq!(app.focus(), Focus::Editor);
+        assert_eq!(app.buffer().rope().to_string(), "keep\n");
+
+        app.explorer.open = true;
+        app.explorer.focused = true;
+        run(&mut app, "about");
+        assert_eq!(app.focus(), Focus::About);
+        assert_eq!(app.recent_explorer, Some(CommandId::About));
+        app.handle(SemanticAction::CloseAbout);
         assert_eq!(app.focus(), Focus::Sidebar);
     }
 

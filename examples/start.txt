@@ -6,3 +6,4 @@ find/      search and replace
 jump/      go to a line, a bracket, or a name
 lang/      see colors for each language
 server/    format a file and jump to an error
+about/     open the page with the duck logo
