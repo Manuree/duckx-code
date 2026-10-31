@@ -235,6 +235,27 @@ pub fn bindings() -> &'static [Binding] {
             action: || SemanticAction::GotoDefinition,
         },
         Binding {
+            id: "goto-references",
+            label: "Find references",
+            detail: "List every place the symbol under the cursor is used.",
+            defaults: &[f(12, true)],
+            action: || SemanticAction::GotoReferences,
+        },
+        Binding {
+            id: "match-bracket",
+            label: "Match bracket",
+            detail: "Jump to the bracket that pairs with this one.",
+            defaults: &[ch(']', true, false, false)],
+            action: || SemanticAction::MatchBracket { extend: false },
+        },
+        Binding {
+            id: "select-bracket",
+            label: "Select to bracket",
+            detail: "Extend the selection to the matching bracket.",
+            defaults: &[ch(']', true, false, true)],
+            action: || SemanticAction::MatchBracket { extend: true },
+        },
+        Binding {
             id: "jump-back",
             label: "Jump back",
             detail: "Return to the place from before the last jump.",

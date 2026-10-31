@@ -1,0 +1,8 @@
+Open a file below and read the notes at the top.
+Each folder is one thing you can try.
+
+edit/      move, copy, and remove lines
+find/      search and replace
+jump/      go to a line, a bracket, or a name
+lang/      see colors for each language
+server/    format a file and jump to an error

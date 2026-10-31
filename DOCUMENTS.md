@@ -50,6 +50,7 @@ Hold `Shift` with **any** navigation key to select. The selection starts where t
 | `Shift + Home` / `Shift + End` | To line start / end |
 | `Shift + PgUp` / `Shift + PgDn` | One screen up / down |
 | `Ctrl + Shift + Home / End` | To document start / end |
+| `Ctrl + Shift + ]` | Through the matching bracket |
 | `Ctrl + A` | Entire document |
 
 Behavior while a selection is active:
@@ -226,11 +227,15 @@ The program must be on `PATH`. On Windows, npm's `.cmd` launchers (such as `type
 | `F7` or `format` | Ask the language server to format the file. |
 | `Ctrl + .` or `code-action` | Show fixes and refactors at the cursor. `Up` / `Down` move, `Enter` applies, `Esc` closes. |
 | `F12` or `goto-definition` | Jump to where that symbol is defined. When the server returns several places, the first one is opened and the status bar says how many there were. |
-| `Ctrl + O` or `jump-back` | Return to the place from before the last definition jump |
+| `Shift + F12` or `goto-references` | List every place that symbol is used, including its declaration when the server sends it. One place jumps there. Several places open a list: `Up` / `Down` move, `Enter` or `Tab` jumps, `Esc` closes. |
+| `Ctrl + ]` or `match-bracket` | Jump to the bracket paired with the one under the cursor, or the one just before it. `Ctrl + Shift + ]` selects through that bracket. |
+| `Ctrl + O` or `jump-back` | Return to the place from before the last definition or references jump |
 | `Ctrl + Shift + O` or `jump-forward` | Go forward again after jump-back |
 | `Ctrl + Space` or `complete` | Open completions at the cursor. Typing a word or a character the server listed (such as `.`) opens the same list on its own. A snippet selects its first placeholder. `Tab` and `Shift + Tab` move between placeholders. `Esc` leaves the snippet. |
 
-With no diagnostics in the file, both diagnostic keys say `No diagnostics in this file`.
+With no diagnostics in the file, both diagnostic keys say `No diagnostics in this file`. With no references, `Shift + F12` says `No references`. A reference row shows the file and line, and the text of that line when the file is already open. `Ctrl + O` returns from that jump the same way it returns from a definition.
+
+`Ctrl + ]` pairs `()` `[]` and `{}`. With a syntax tree, `<>` also jumps when that tree treats the two ends as one pair, such as a generic argument, and a bracket in a string or comment stays put. A file with no tree yet pairs `()` `[]` `{}` by scanning, so a bracket in a string can match. Nothing happens when there is no pair, and this jump is not part of the definition jump list. `match-bracket` does the same jump when a terminal does not report `Ctrl + ]`.
 
 The completion list filters as you keep typing. `Up` and `Down` move the highlight, `Tab` or `Enter` inserts the highlighted item as one undo step, and `Esc` closes the list. Other keys still type into the file. A file that has not been saved yet says so instead of asking a server.
 
@@ -284,6 +289,8 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 | `diagnostic-prev` | — | Jump to the previous error or warning in this file | `Shift + F8` |
 | `hover` | — | Show documentation for the symbol under the cursor | `F2` |
 | `goto-definition` | — | Jump to where the symbol under the cursor is defined | `F12` |
+| `goto-references` | — | Show every place this symbol is used | `Shift + F12` |
+| `match-bracket` | — | Jump to the matching bracket | `Ctrl + ]` |
 | `complete` | — | Open completions at the cursor | `Ctrl + Space` |
 | `comment` | — | Add or remove a line comment | `F4` |
 | `move-line-up` | — | Move the current line or selection up | `Alt + Up` |
@@ -294,7 +301,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 | `rename-symbol` | `<name>` | Rename the symbol under the cursor | `Shift + F2` |
 | `format` | — | Format the current file | `F7` |
 | `code-action` | — | Show fixes and refactors at the cursor | `Ctrl + .` |
-| `jump-back` | — | Return to the place from before the last definition jump | `Ctrl + O` |
+| `jump-back` | — | Return to the place from before the last definition or references jump | `Ctrl + O` |
 | `jump-forward` | — | Go forward again after jump-back | `Ctrl + Shift + O` |
 
 #### Search

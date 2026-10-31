@@ -29,9 +29,42 @@ pub fn render(frame: &mut Frame, app: &App, text: Option<Rect>, theme: &UiStyles
     if let Some(view) = app.completion_view() {
         render_completion(frame, area, &view, app, theme);
     }
+    if let Some(view) = app.reference_view() {
+        render_references(frame, area, &view, app, theme);
+    }
     if let Some(view) = app.action_view() {
         render_actions(frame, area, &view, app, theme);
     }
+}
+
+fn render_references(
+    frame: &mut Frame,
+    text: Rect,
+    view: &crate::app::ReferenceView,
+    app: &App,
+    theme: &UiStyles,
+) {
+    let width = 64.min(text.width);
+    let height = (view.titles.len() as u16 + 2).min(text.height);
+    let area = place(text, width, height, app);
+    let style = Style::new().fg(theme.editor_fg).bg(theme.editor_bg);
+    let rows: Vec<Line> = view
+        .titles
+        .iter()
+        .enumerate()
+        .map(|(index, title)| {
+            let row_style = if index == view.selected {
+                theme.selection
+            } else {
+                style
+            };
+            Line::from(Span::styled(title.clone(), row_style))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(rows).block(panel("References").style(style)),
+        area,
+    );
 }
 
 fn render_actions(

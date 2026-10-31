@@ -90,6 +90,13 @@ pub enum SemanticAction {
     Hover,
     /// Ask the language server where the symbol under the cursor is defined.
     GotoDefinition,
+    /// Ask the language server for every place that symbol is used.
+    GotoReferences,
+    /// Move to the bracket paired with the one under the cursor.
+    /// `extend` keeps the anchor and moves the head, the same way Shift does for navigation.
+    MatchBracket {
+        extend: bool,
+    },
     /// Ask the language server for completions at the cursor.
     Complete,
     /// Move the current line or the selected lines up or down.
@@ -110,7 +117,7 @@ pub enum SemanticAction {
     Format,
     /// Ask the language server for code actions at the cursor.
     CodeAction,
-    /// Return to the location from before the last go-to-definition.
+    /// Return to the location from before the last definition or references jump.
     JumpBack,
     /// The other way after [`SemanticAction::JumpBack`].
     JumpForward,

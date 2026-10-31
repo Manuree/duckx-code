@@ -48,3 +48,5 @@ Before making structural, UX, or architectural changes, always consult:
   * In `crossterm`, enable `EnableBracketedPaste` and attempt `PushKeyboardEnhancementFlags` where supported, but always provide fallback key matches (`F1` and `Ctrl + ;` alongside `Shift + Space`) so Windows Terminal, Alacritty, WezTerm, and standard terminals all work out of the box.
 * **Testing:**
   * Write unit tests for `buffer.rs` (cursor movement, `Shift` selection spans, grapheme boundaries, Undo/Redo transactions) and `command.rs` (prefix matching and `Top-1 Recent` ordering) independent of the terminal UI.
+* **Feature examples:**
+  * When you add a feature, add a file under `examples/<folder>/` with comments that teach the keys. One short English folder per feature. English only, in short easy words. Add one line to `examples/start.txt`. Do not put Cargo binaries in `examples/`.

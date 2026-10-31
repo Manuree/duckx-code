@@ -1,0 +1,14 @@
+---
+description: Add a short English example whenever a feature is added
+alwaysApply: true
+---
+
+# Feature examples
+
+When you add a feature, add a file under `examples/<folder>/` that teaches it.
+
+- One folder per feature. Use a short English name, such as `edit`, `find`, or `jump`.
+- Comments at the top say which keys to press and what happens. English only. Short, easy words.
+- The rest of the file is text or code to try those keys on.
+- Add one line for the new file to `examples/start.txt`.
+- Do not put Cargo binaries in `examples/`. A tool goes in `tools/` with a `[[example]]` entry in `Cargo.toml`.

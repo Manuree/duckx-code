@@ -428,6 +428,21 @@ impl Buffer {
         hash
     }
 
+    /// Puts the cursor on `head`. `extend` keeps the anchor, the same way Shift navigation does.
+    pub fn move_to(&mut self, head: usize, extend: bool) {
+        self.history.seal();
+        self.target_col = None;
+        let head = head.min(self.rope.len_chars());
+        self.selection = if extend {
+            Selection {
+                anchor: self.selection.anchor,
+                head,
+            }
+        } else {
+            Selection::point(head)
+        };
+    }
+
     // ---- Movement ----------------------------------------------------------
 
     pub fn move_cursor(&mut self, movement: Movement, extend: bool) {
@@ -1274,6 +1289,100 @@ fn map_through_edits(p: usize, edits: &[(usize, usize, usize)]) -> usize {
 
 // ---- Grapheme & width helpers ----------------------------------------------
 
+/// The bracket under the cursor, or the one immediately before it.
+/// `<>` is included so a syntax tree can accept it; a plain scan ignores those.
+pub fn bracket_near(rope: &Rope, head: usize) -> Option<(usize, char)> {
+    if head < rope.len_chars() {
+        let ch = rope.char(head);
+        if is_bracket_char(ch) {
+            return Some((head, ch));
+        }
+    }
+    if head > 0 {
+        let ch = rope.char(head - 1);
+        if is_bracket_char(ch) {
+            return Some((head - 1, ch));
+        }
+    }
+    None
+}
+
+fn is_bracket_char(ch: char) -> bool {
+    matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>')
+}
+
+/// Pair of `bracket` at char index `at`, counting nested `()[]{}`.
+/// `<>` is not paired. A closer that crosses a different pair returns nothing.
+pub fn scan_bracket(rope: &Rope, at: usize, bracket: char) -> Option<usize> {
+    if let Some(close) = scan_closer(bracket) {
+        scan_forward(rope, at, close)
+    } else if let Some(open) = scan_opener(bracket) {
+        scan_backward(rope, at, open)
+    } else {
+        None
+    }
+}
+
+fn scan_closer(open: char) -> Option<char> {
+    match open {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        _ => None,
+    }
+}
+
+fn scan_opener(close: char) -> Option<char> {
+    match close {
+        ')' => Some('('),
+        ']' => Some('['),
+        '}' => Some('{'),
+        _ => None,
+    }
+}
+
+fn scan_forward(rope: &Rope, at: usize, close: char) -> Option<usize> {
+    let mut stack = vec![close];
+    let mut index = at + 1;
+    let mut chars = rope.chars_at(index);
+    while let Some(ch) = chars.next() {
+        if let Some(next_close) = scan_closer(ch) {
+            stack.push(next_close);
+        } else if scan_opener(ch).is_some() {
+            if stack.last() != Some(&ch) {
+                return None;
+            }
+            stack.pop();
+            if stack.is_empty() {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn scan_backward(rope: &Rope, at: usize, open: char) -> Option<usize> {
+    let mut stack = vec![open];
+    let mut index = at;
+    let mut chars = rope.chars_at(at);
+    while let Some(ch) = chars.prev() {
+        index -= 1;
+        if let Some(next_open) = scan_opener(ch) {
+            stack.push(next_open);
+        } else if scan_closer(ch).is_some() {
+            if stack.last() != Some(&ch) {
+                return None;
+            }
+            stack.pop();
+            if stack.is_empty() {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
 fn char_to_byte(text: &str, col: usize) -> usize {
     text.char_indices()
         .nth(col)
@@ -1948,6 +2057,34 @@ mod tests {
         buf.duplicate_block(false);
         assert_eq!(text(&buf), "tail\ntail\ntail");
         assert_eq!(buf.cursor_line_col(), (1, 1));
+    }
+
+    #[test]
+    fn scan_bracket_pairs_nested_and_stops_on_a_cross() {
+        let rope = Rope::from_str("f(a)");
+        assert_eq!(bracket_near(&rope, 1), Some((1, '(')));
+        assert_eq!(scan_bracket(&rope, 1, '('), Some(3));
+        assert_eq!(bracket_near(&rope, 2), Some((1, '(')));
+        assert_eq!(scan_bracket(&rope, 3, ')'), Some(1));
+        assert_eq!(bracket_near(&rope, 4), Some((3, ')')));
+        assert_eq!(bracket_near(&rope, 0), None);
+
+        let nested = Rope::from_str("{{}");
+        assert_eq!(scan_bracket(&nested, 1, '{'), Some(2));
+        assert_eq!(scan_bracket(&nested, 0, '{'), None);
+        assert_eq!(scan_bracket(&nested, 2, '}'), Some(1));
+
+        let crossed = Rope::from_str("([)]");
+        assert_eq!(scan_bracket(&crossed, 0, '('), None);
+        assert_eq!(scan_bracket(&Rope::from_str("a < b"), 2, '<'), None);
+
+        let mut buf = Buffer::from_text("f(a)");
+        buf.move_to(1, false);
+        buf.move_to(3, true);
+        assert_eq!(buf.selection(), Selection { anchor: 1, head: 3 });
+        buf.move_to(1, false);
+        assert!(buf.selection().is_empty());
+        assert_eq!(buf.selection().head, 1);
     }
 
     #[test]

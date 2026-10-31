@@ -892,6 +892,7 @@ mod tests {
             signature: false,
             rename: false,
             format: false,
+            references: true,
             code_action: false,
             action_resolve: false,
         });
@@ -936,6 +937,57 @@ mod tests {
         let screen = draw(&app, 80, 24);
         assert!(screen.contains("Completion"), "{screen}");
         assert!(screen.contains("println"), "{screen}");
+        for corner in ["╭", "╮", "╰", "╯"] {
+            assert!(screen.contains(corner), "missing {corner}\n{screen}");
+        }
+        for square in ["┌", "┐", "└", "┘"] {
+            assert!(!screen.contains(square), "{screen}");
+        }
+    }
+
+    #[test]
+    fn references_popup_uses_rounded_corners() {
+        let mut app = App::new(
+            Buffer::from_text("fn main() {\n    work();\n}\nfn work() {}\n"),
+            Some(PathBuf::from("src/main.rs")),
+        );
+        app.handle_lsp(crate::lsp::LspEvent::Features {
+            group: "rust-analyzer",
+            hover: false,
+            definition: false,
+            completion: false,
+            triggers: Vec::new(),
+            resolve: false,
+            signature: false,
+            rename: false,
+            format: false,
+            references: true,
+            code_action: false,
+            action_resolve: false,
+        });
+        app.handle(SemanticAction::GotoReferences);
+        let token = app
+            .take_lsp_requests()
+            .into_iter()
+            .find_map(|request| match request {
+                crate::lsp::LspRequest::Query { token, .. } => Some(token),
+                _ => None,
+            });
+        let place = |line, character| crate::lsp::protocol::JumpTarget {
+            path: PathBuf::from("src/main.rs"),
+            line,
+            character,
+            end_line: line,
+            end_character: character + 4,
+            encoding: crate::lsp::position::Encoding::Utf8,
+        };
+        app.handle_lsp(crate::lsp::LspEvent::References {
+            token: token.expect("references query"),
+            locations: vec![place(1, 4), place(3, 3)],
+        });
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("References"), "{screen}");
+        assert!(screen.contains("work()"), "{screen}");
         for corner in ["╭", "╮", "╰", "╯"] {
             assert!(screen.contains(corner), "missing {corner}\n{screen}");
         }

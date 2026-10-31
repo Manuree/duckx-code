@@ -1,0 +1,12 @@
+Press Ctrl+F and type pear.
+Down or F3 goes to the next one.
+Up or Shift+F3 goes back.
+Esc keeps it selected.
+
+Press Ctrl+H to replace it.
+Type a new word, then Down to change this one.
+Shift+Down changes every one.
+
+one pear
+two pear
+three pear

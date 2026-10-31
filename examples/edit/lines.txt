@@ -1,0 +1,10 @@
+Try these keys on the lines below.
+
+Alt+Up or Alt+Down moves a line.
+Ctrl+Alt+Up or Ctrl+Alt+Down copies a line.
+Shift+Delete removes a line.
+Ctrl+Z puts it back.
+
+red
+green
+blue

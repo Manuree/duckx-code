@@ -1,0 +1,15 @@
+Press Shift+Space, type goto 10, and press Enter.
+Typing 10 and Enter does the same thing.
+Home and End move on a line.
+Ctrl+Home and Ctrl+End move to the start and end of the file.
+
+6
+7
+8
+9
+you are on line 10
+11
+12
+13
+14
+15

@@ -464,6 +464,21 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_bracket_jumps_to_the_match_and_shift_extends() {
+        assert_eq!(
+            editor(key(KeyCode::Char(']'), KeyModifiers::CONTROL)),
+            Some(SemanticAction::MatchBracket { extend: false })
+        );
+        assert_eq!(
+            editor(key(
+                KeyCode::Char(']'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            Some(SemanticAction::MatchBracket { extend: true })
+        );
+    }
+
+    #[test]
     fn ctrl_home_end_jump_to_document_edges() {
         assert_eq!(
             editor(key(KeyCode::Home, KeyModifiers::CONTROL)),
@@ -540,6 +555,10 @@ mod tests {
         assert_eq!(
             editor(key(KeyCode::F(12), KeyModifiers::NONE)),
             Some(SemanticAction::GotoDefinition)
+        );
+        assert_eq!(
+            editor(key(KeyCode::F(12), KeyModifiers::SHIFT)),
+            Some(SemanticAction::GotoReferences)
         );
         assert_eq!(
             editor(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),

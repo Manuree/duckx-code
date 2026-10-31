@@ -51,3 +51,7 @@ tree-sitter-powershell = "0.26.6"
 tree-sitter-xml = "0.7.0"
 tree-sitter-make = "1.1.1"
 tree-sitter-cmake = "0.7.5"
+
+[[example]]
+name = "keylog"
+path = "tools/keylog.rs"

@@ -1,5 +1,5 @@
-//! Hover, go to definition, and completion. Requests go out with the document
-//! sync, and a reply for an older request is ignored.
+//! Hover, go to definition, references, and completion. Requests go out with the
+//! document sync, and a reply for an older request is ignored.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,8 @@ pub(super) struct Nav {
     hover_token: Option<u64>,
     pub(super) hover: Option<String>,
     definition_token: Option<u64>,
+    references_token: Option<u64>,
+    pub(super) references: Option<ReferenceList>,
     back: Vec<JumpPoint>,
     forward: Vec<JumpPoint>,
     pending: Option<(PathBuf, PendingPlace)>,
@@ -57,6 +59,24 @@ pub struct ActionView {
     pub selected: usize,
 }
 
+/// Rows of the references list, windowed so the highlight stays on screen.
+pub struct ReferenceView {
+    pub titles: Vec<String>,
+    pub selected: usize,
+}
+
+#[derive(Debug)]
+pub(super) struct ReferenceList {
+    selected: usize,
+    items: Vec<ReferenceRow>,
+}
+
+#[derive(Debug)]
+struct ReferenceRow {
+    label: String,
+    target: JumpTarget,
+}
+
 #[derive(Debug)]
 pub(super) struct SnippetSession {
     stops: Vec<(usize, usize)>,
@@ -85,6 +105,7 @@ struct Features {
     signature: bool,
     rename: bool,
     format: bool,
+    references: bool,
     code_action: bool,
     action_resolve: bool,
 }
@@ -214,6 +235,18 @@ impl App {
         self.nav.definition_token = Some(token);
         if self.message.is_none() {
             self.message = Some("Finding definition…".to_string());
+        }
+    }
+
+    pub(super) fn goto_references(&mut self) {
+        self.dismiss_lsp_popups();
+        if self.server_lacks(|features| features.references, "find references") {
+            return;
+        }
+        let token = self.enqueue(QueryKind::References);
+        self.nav.references_token = Some(token);
+        if self.message.is_none() {
+            self.message = Some("Finding references…".to_string());
         }
     }
 
@@ -395,6 +428,10 @@ impl App {
         self.nav.hover = None;
         self.nav.hover_token = None;
         self.nav.actions = None;
+        self.nav.references = None;
+        if let Some(token) = self.nav.references_token.take() {
+            self.lsp_nav_requests.push(LspRequest::Cancel { token });
+        }
         self.close_completion();
     }
 
@@ -406,6 +443,26 @@ impl App {
         Some(ActionView {
             titles: menu.items.iter().map(|item| item.title.clone()).collect(),
             selected: menu.selected,
+        })
+    }
+
+    pub fn reference_view(&self) -> Option<ReferenceView> {
+        let list = self.nav.references.as_ref()?;
+        let len = list.items.len();
+        if len == 0 {
+            return None;
+        }
+        let selected = list.selected.min(len - 1);
+        let start = selected
+            .saturating_sub(VISIBLE / 2)
+            .min(len.saturating_sub(VISIBLE));
+        let end = (start + VISIBLE).min(len);
+        Some(ReferenceView {
+            titles: list.items[start..end]
+                .iter()
+                .map(|item| item.label.clone())
+                .collect(),
+            selected: selected - start,
         })
     }
 
@@ -482,6 +539,7 @@ impl App {
         signature: bool,
         rename: bool,
         format: bool,
+        references: bool,
         code_action: bool,
         action_resolve: bool,
     ) {
@@ -496,6 +554,7 @@ impl App {
                 signature,
                 rename,
                 format,
+                references,
                 code_action,
                 action_resolve,
             },
@@ -622,6 +681,101 @@ impl App {
             self.message = None;
         }
         self.jump_to_target(first);
+    }
+
+    pub(super) fn handle_references(&mut self, token: u64, locations: Vec<JumpTarget>) {
+        if self.nav.references_token != Some(token) {
+            return;
+        }
+        self.nav.references_token = None;
+        if locations.is_empty() {
+            self.nav.references = None;
+            self.message = Some("No references".to_string());
+            return;
+        }
+        if locations.len() == 1 {
+            self.nav.references = None;
+            self.message = None;
+            if let Some(target) = locations.into_iter().next() {
+                self.jump_to_target(target);
+            }
+            return;
+        }
+        let items = locations
+            .into_iter()
+            .map(|target| {
+                let label = self.reference_label(&target);
+                ReferenceRow { label, target }
+            })
+            .collect();
+        self.message = None;
+        self.nav.references = Some(ReferenceList { selected: 0, items });
+    }
+
+    pub(super) fn move_reference(&mut self, next: bool) {
+        let Some(list) = self.nav.references.as_mut() else {
+            return;
+        };
+        let len = list.items.len();
+        if len == 0 {
+            return;
+        }
+        list.selected = if next {
+            (list.selected + 1) % len
+        } else {
+            (list.selected + len - 1) % len
+        };
+    }
+
+    pub(super) fn accept_reference(&mut self) {
+        let Some(list) = self.nav.references.take() else {
+            return;
+        };
+        let Some(row) = list.items.get(list.selected) else {
+            return;
+        };
+        let target = row.target.clone();
+        self.jump_to_target(target);
+    }
+
+    pub(super) fn close_references(&mut self) {
+        self.nav.references = None;
+    }
+
+    fn reference_label(&self, target: &JumpTarget) -> String {
+        let path = super::relative_to(&self.explorer.root, &target.path).unwrap_or_else(|| {
+            target
+                .path
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| target.path.clone())
+        });
+        let place = format!("{}:{}", path.display(), target.line + 1);
+        match self.open_line(&target.path, target.line) {
+            Some(text) if !text.is_empty() => clip(&format!("{place}  {text}"), 72),
+            _ => clip(&place, 72),
+        }
+    }
+
+    fn open_line(&self, path: &Path, line: u32) -> Option<String> {
+        let tab = self.editors.iter().find_map(|editor| {
+            editor.tabs.iter().find(|tab| {
+                tab.path
+                    .as_deref()
+                    .is_some_and(|open| super::same_path(open, path))
+            })
+        })?;
+        let rope = tab.buffer.rope();
+        let line = line as usize;
+        if line >= rope.len_lines() {
+            return None;
+        }
+        let text: String = rope
+            .line(line)
+            .chars()
+            .filter(|ch| *ch != '\n' && *ch != '\r')
+            .collect();
+        Some(text.trim().to_string())
     }
 
     pub(super) fn handle_completion(
@@ -1059,6 +1213,16 @@ impl App {
     }
 }
 
+fn clip(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let mut short: String = text.chars().take(max.saturating_sub(1)).collect();
+    short.push('…');
+    short
+}
+
 fn is_word(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
@@ -1146,6 +1310,7 @@ mod tests {
             signature: false,
             rename: true,
             format: true,
+            references: true,
             code_action: true,
             action_resolve: false,
         });
@@ -1234,6 +1399,85 @@ mod tests {
         assert_eq!(app.buffer().selection().head, before);
         app.handle(SemanticAction::JumpForward);
         assert!(app.buffer().selection().head > before);
+    }
+
+    fn target(line: u32, character: u32) -> JumpTarget {
+        JumpTarget {
+            path: PathBuf::from("src/main.rs"),
+            line,
+            character,
+            end_line: line,
+            end_character: character + 4,
+            encoding: Encoding::Utf8,
+        }
+    }
+
+    #[test]
+    fn references_list_jumps_and_one_result_jumps_immediately() {
+        let mut app = App::new(
+            Buffer::from_text("fn main() {\n    work();\n}\nfn work() {}\n"),
+            Some(PathBuf::from("src/main.rs")),
+        );
+        ready(&mut app);
+        let before = app.buffer().selection().head;
+        app.handle(SemanticAction::GotoReferences);
+        let requests = queries(&mut app);
+        let LspRequest::Query {
+            token,
+            kind: QueryKind::References,
+            ..
+        } = &requests[0]
+        else {
+            panic!("{requests:?}");
+        };
+        app.handle_lsp(LspEvent::References {
+            token: *token,
+            locations: vec![target(1, 4), target(3, 3)],
+        });
+        let view = app.reference_view().expect("list");
+        assert_eq!(view.titles.len(), 2);
+        assert!(view.titles[0].contains(":2"), "{}", view.titles[0]);
+        assert!(view.titles[0].contains("work()"), "{}", view.titles[0]);
+        assert!(view.titles[1].contains(":4"), "{}", view.titles[1]);
+        assert_eq!(app.focus(), crate::action::Focus::ActionMenu);
+        app.handle(SemanticAction::Completion(
+            crate::action::CompletionAction::Next,
+        ));
+        app.handle(SemanticAction::Completion(
+            crate::action::CompletionAction::Accept,
+        ));
+        assert!(app.reference_view().is_none());
+        assert!(app.buffer().selection().head > before);
+        app.handle(SemanticAction::JumpBack);
+        assert_eq!(app.buffer().selection().head, before);
+
+        app.handle(SemanticAction::GotoReferences);
+        let requests = queries(&mut app);
+        let LspRequest::Query { token, .. } = &requests[0] else {
+            panic!("{requests:?}");
+        };
+        app.handle_lsp(LspEvent::References {
+            token: *token,
+            locations: vec![target(1, 4)],
+        });
+        assert!(app.reference_view().is_none());
+        assert!(app.buffer().selection().head > before);
+        app.handle_lsp(LspEvent::References {
+            token: token + 9,
+            locations: vec![target(0, 0), target(3, 3)],
+        });
+        assert!(app.reference_view().is_none());
+
+        app.handle(SemanticAction::GotoReferences);
+        let requests = queries(&mut app);
+        let LspRequest::Query { token, .. } = &requests[0] else {
+            panic!("{requests:?}");
+        };
+        app.handle_lsp(LspEvent::References {
+            token: *token,
+            locations: Vec::new(),
+        });
+        assert_eq!(app.message.as_deref(), Some("No references"));
     }
 
     #[test]
@@ -1367,6 +1611,7 @@ mod tests {
             signature: false,
             rename: false,
             format: false,
+            references: false,
             code_action: false,
             action_resolve: false,
         });

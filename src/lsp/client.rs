@@ -195,6 +195,7 @@ struct Capabilities {
     semantic: bool,
     rename: bool,
     format: bool,
+    references: bool,
     code_action: bool,
     action_resolve: bool,
     token_types: Vec<String>,
@@ -263,6 +264,7 @@ impl Capabilities {
             semantic: caps.get("semanticTokensProvider").is_some_and(flag),
             rename: caps.get("renameProvider").is_some_and(flag),
             format: caps.get("documentFormattingProvider").is_some_and(flag),
+            references: caps.get("referencesProvider").is_some_and(flag),
             code_action: caps.get("codeActionProvider").is_some_and(flag),
             action_resolve: caps["codeActionProvider"]["resolveProvider"]
                 .as_bool()
@@ -651,6 +653,7 @@ impl Manager {
                 QueryKind::Resolve { .. } => server.caps.resolve,
                 QueryKind::Rename { .. } => server.caps.rename,
                 QueryKind::Format => server.caps.format,
+                QueryKind::References => server.caps.references,
                 QueryKind::CodeAction => server.caps.code_action,
                 QueryKind::CodeActionResolve { .. } => server.caps.action_resolve,
             };
@@ -665,6 +668,7 @@ impl Manager {
                     QueryKind::Resolve { .. } => "completion resolve",
                     QueryKind::Rename { .. } => "rename",
                     QueryKind::Format => "format",
+                    QueryKind::References => "find references",
                     QueryKind::CodeAction => "code action",
                     QueryKind::CodeActionResolve { .. } => "code action",
                 };
@@ -681,6 +685,7 @@ impl Manager {
                     QueryKind::Resolve { .. } => "completionItem/resolve",
                     QueryKind::Rename { .. } => "textDocument/rename",
                     QueryKind::Format => "textDocument/formatting",
+                    QueryKind::References => "textDocument/references",
                     QueryKind::CodeAction => "textDocument/codeAction",
                     QueryKind::CodeActionResolve { .. } => "codeAction/resolve",
                 };
@@ -710,6 +715,9 @@ impl Manager {
                 }
                 if let QueryKind::Rename { new_name } = &kind {
                     params["newName"] = Value::String(new_name.clone());
+                }
+                if matches!(kind, QueryKind::References) {
+                    params["context"] = json!({"includeDeclaration": true});
                 }
                 if matches!(kind, QueryKind::CodeAction) {
                     params["range"] = json!({
@@ -749,10 +757,32 @@ impl Manager {
         }
     }
 
+    fn jump_targets(&self, server: usize, result: &Value) -> Vec<JumpTarget> {
+        let encoding = self.servers[server].caps.encoding;
+        plain::definition_targets(result)
+            .into_iter()
+            .filter_map(|target| {
+                let path = uri::to_path(&target.uri)?;
+                Some(JumpTarget {
+                    path,
+                    line: target.range.line,
+                    character: target.range.character,
+                    end_line: target.range.end_line,
+                    end_character: target.range.end_character,
+                    encoding,
+                })
+            })
+            .collect()
+    }
+
     fn empty_query(&self, token: u64, kind: &QueryKind) {
         self.emit(match kind {
             QueryKind::Hover => LspEvent::Hover { token, text: None },
             QueryKind::Definition => LspEvent::Definition {
+                token,
+                locations: Vec::new(),
+            },
+            QueryKind::References => LspEvent::References {
                 token,
                 locations: Vec::new(),
             },
@@ -806,21 +836,12 @@ impl Manager {
                 text: plain::hover_text(result),
             }),
             QueryKind::Definition => {
-                let locations = plain::definition_targets(result)
-                    .into_iter()
-                    .filter_map(|target| {
-                        let path = uri::to_path(&target.uri)?;
-                        Some(JumpTarget {
-                            path,
-                            line: target.range.line,
-                            character: target.range.character,
-                            end_line: target.range.end_line,
-                            end_character: target.range.end_character,
-                            encoding,
-                        })
-                    })
-                    .collect();
+                let locations = self.jump_targets(server, result);
                 self.emit(LspEvent::Definition { token, locations });
+            }
+            QueryKind::References => {
+                let locations = self.jump_targets(server, result);
+                self.emit(LspEvent::References { token, locations });
             }
             QueryKind::Completion { .. } => {
                 let (incomplete, raw) = plain::completion_items(result);
@@ -1056,6 +1077,7 @@ impl Manager {
                             signature: false,
                             rename: false,
                             format: false,
+                            references: false,
                             code_action: false,
                             action_resolve: false,
                             pull: false,
@@ -1240,6 +1262,7 @@ impl Manager {
             signature: caps.signature,
             rename: caps.rename,
             format: caps.format,
+            references: caps.references,
             code_action: caps.code_action,
             action_resolve: caps.action_resolve,
         });
@@ -1818,6 +1841,7 @@ fn same_feature(left: &QueryKind, right: &QueryKind) -> bool {
             | (QueryKind::Resolve { .. }, QueryKind::Resolve { .. })
             | (QueryKind::Rename { .. }, QueryKind::Rename { .. })
             | (QueryKind::Format, QueryKind::Format)
+            | (QueryKind::References, QueryKind::References)
             | (QueryKind::CodeAction, QueryKind::CodeAction)
             | (
                 QueryKind::CodeActionResolve { .. },
@@ -1885,6 +1909,7 @@ fn initialize_params(root: &Path) -> Value {
                 },
                 "hover": {"contentFormat": ["plaintext", "markdown"]},
                 "definition": {"linkSupport": true},
+                "references": {"dynamicRegistration": false},
                 "completion": {
                     "completionItem": {
                         "snippetSupport": true,
@@ -2063,6 +2088,14 @@ mod tests {
                                 Some("textDocument/definition") => {
                                     let uri = message["params"]["textDocument"]["uri"].clone();
                                     let reply = json!({"jsonrpc": "2.0", "id": message["id"], "result": {"uri": uri, "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 5}}}});
+                                    transport::write_message(&mut writer, &reply).await.unwrap();
+                                }
+                                Some("textDocument/references") => {
+                                    let uri = message["params"]["textDocument"]["uri"].clone();
+                                    let reply = json!({"jsonrpc": "2.0", "id": message["id"], "result": [
+                                        {"uri": uri, "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 5}}},
+                                        {"uri": uri, "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 1}}}
+                                    ]});
                                     transport::write_message(&mut writer, &reply).await.unwrap();
                                 }
                                 Some("textDocument/completion") => {
@@ -2582,6 +2615,7 @@ mod tests {
                 "textDocumentSync": 1,
                 "hoverProvider": true,
                 "definitionProvider": true,
+                "referencesProvider": true,
                 "completionProvider": {"triggerCharacters": ["."]},
             });
             let (launch, seen, _) = fake_launcher(caps);
@@ -2641,6 +2675,25 @@ mod tests {
         assert_eq!(token, 2);
         assert_eq!(locations.len(), 1);
         assert_eq!((locations[0].line, locations[0].character), (0, 4));
+
+        handle.send(LspRequest::Query {
+            token: 4,
+            path: path.clone(),
+            at: 4,
+            kind: QueryKind::References,
+        });
+        let request = next(&mut seen, method("textDocument/references")).await;
+        assert_eq!(request["params"]["context"]["includeDeclaration"], true);
+        let references = next_event(&mut events, |event| {
+            matches!(event, LspEvent::References { .. })
+        })
+        .await;
+        let LspEvent::References { token, locations } = references else {
+            panic!("references");
+        };
+        assert_eq!(token, 4);
+        assert_eq!(locations.len(), 2);
+        assert_eq!((locations[1].line, locations[1].character), (1, 0));
 
         handle.send(LspRequest::Query {
             token: 3,

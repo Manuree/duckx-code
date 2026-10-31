@@ -58,6 +58,7 @@ Avoids terminal control-code traps while remaining intuitive:
 | `Shift + Delete` | Delete the current line, or every line the selection touches |
 | `Ctrl + Alt + Up` / `Ctrl + Alt + Down` | Duplicate the current line or the selected lines above or below |
 | `F4` or `Ctrl + /` | Toggle a line comment on the current line or selection |
+| `Ctrl + ]` | Jump to the matching bracket. `Ctrl + Shift + ]` selects through it |
 | `Shift + F2` | Rename the symbol under the cursor |
 | `F7` | Format the current file |
 | `Ctrl + .` | Show code actions at the cursor |

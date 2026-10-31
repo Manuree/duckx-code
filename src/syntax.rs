@@ -304,6 +304,198 @@ impl SyntaxState {
         self.tree = Some(parsed.tree);
         self.injections = parsed.injections;
     }
+
+    pub fn has_tree(&self) -> bool {
+        self.tree.is_some()
+    }
+
+    /// Char index of the bracket paired with the one at `at`.
+    /// A string or comment never matches. `<>` matches only when a node starts
+    /// on one and ends on the other. Other brackets fall back to a rope scan
+    /// when the tree has no pair.
+    pub fn match_bracket(&self, rope: &Rope, at: usize) -> Option<usize> {
+        if at >= rope.len_chars() {
+            return None;
+        }
+        let bracket = rope.char(at);
+        if !is_tree_bracket(bracket) {
+            return None;
+        }
+        let byte = rope.char_to_byte(at);
+        if let Some(mate) = self.structural_pair(rope, byte, bracket) {
+            return byte_to_char(rope, mate);
+        }
+        if !is_plain_bracket(bracket) || self.in_literal(byte, bracket) {
+            return None;
+        }
+        crate::buffer::scan_bracket(rope, at, bracket)
+    }
+
+    fn structural_pair(&self, rope: &Rope, byte: usize, bracket: char) -> Option<usize> {
+        let tree = self.tree.as_ref()?;
+        if let Some(injection) = self
+            .injections
+            .iter()
+            .find(|injection| byte >= injection.start_byte && byte < injection.end_byte)
+        {
+            return pair_in(injection.tree.root_node(), rope, byte, bracket);
+        }
+        match tree {
+            HighlightTree::Code(tree) => pair_in(tree.root_node(), rope, byte, bracket),
+            HighlightTree::Markdown(tree) => {
+                for inline in tree.inline_trees() {
+                    let root = inline.root_node();
+                    if byte >= root.start_byte()
+                        && byte < root.end_byte()
+                        && let Some(mate) = pair_in(root, rope, byte, bracket)
+                    {
+                        return Some(mate);
+                    }
+                }
+                pair_in(tree.block_tree().root_node(), rope, byte, bracket)
+            }
+        }
+    }
+
+    fn in_literal(&self, byte: usize, bracket: char) -> bool {
+        let Some(tree) = self.tree.as_ref() else {
+            return false;
+        };
+        if let Some(injection) = self
+            .injections
+            .iter()
+            .find(|injection| byte >= injection.start_byte && byte < injection.end_byte)
+        {
+            return node_in_literal(injection.tree.root_node(), byte, bracket);
+        }
+        match tree {
+            HighlightTree::Code(tree) => node_in_literal(tree.root_node(), byte, bracket),
+            HighlightTree::Markdown(tree) => {
+                for inline in tree.inline_trees() {
+                    let root = inline.root_node();
+                    if byte >= root.start_byte() && byte < root.end_byte() {
+                        return node_in_literal(root, byte, bracket);
+                    }
+                }
+                node_in_literal(tree.block_tree().root_node(), byte, bracket)
+            }
+        }
+    }
+}
+
+fn is_tree_bracket(ch: char) -> bool {
+    is_plain_bracket(ch) || matches!(ch, '<' | '>')
+}
+
+fn is_plain_bracket(ch: char) -> bool {
+    matches!(ch, '(' | ')' | '[' | ']' | '{' | '}')
+}
+
+fn closer_of(open: char) -> Option<char> {
+    match open {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '<' => Some('>'),
+        _ => None,
+    }
+}
+
+fn opener_of(close: char) -> Option<char> {
+    match close {
+        ')' => Some('('),
+        ']' => Some('['),
+        '}' => Some('{'),
+        '>' => Some('<'),
+        _ => None,
+    }
+}
+
+fn pair_in(root: Node, rope: &Rope, byte: usize, bracket: char) -> Option<usize> {
+    let end = byte + bracket.len_utf8();
+    if byte < root.start_byte() || end > root.end_byte() {
+        return None;
+    }
+    let mut current = root.descendant_for_byte_range(byte, end);
+    while let Some(node) = current {
+        if let Some(mate) = mate_byte(node, rope, byte, bracket) {
+            return Some(mate);
+        }
+        current = node.parent();
+    }
+    None
+}
+
+fn mate_byte(node: Node, rope: &Rope, byte: usize, bracket: char) -> Option<usize> {
+    let bracket_end = byte + bracket.len_utf8();
+    if let Some(want_close) = closer_of(bracket)
+        && node.start_byte() == byte
+    {
+        let (close_byte, close) = char_ending_at(rope, node.end_byte())?;
+        if close == want_close && close_byte > byte {
+            return Some(close_byte);
+        }
+    }
+    if let Some(want_open) = opener_of(bracket)
+        && node.end_byte() == bracket_end
+    {
+        let open = char_on_byte(rope, node.start_byte())?;
+        if open == want_open && node.start_byte() < byte {
+            return Some(node.start_byte());
+        }
+    }
+    None
+}
+
+fn node_in_literal(root: Node, byte: usize, bracket: char) -> bool {
+    let end = byte + bracket.len_utf8();
+    if byte < root.start_byte() || end > root.end_byte() {
+        return false;
+    }
+    let mut current = root.descendant_for_byte_range(byte, end);
+    while let Some(node) = current {
+        if literal_kind(node.kind()) {
+            return true;
+        }
+        current = node.parent();
+    }
+    false
+}
+
+fn literal_kind(kind: &str) -> bool {
+    let kind = kind.to_ascii_lowercase();
+    kind.contains("comment")
+        || kind.contains("string")
+        || kind.contains("char_literal")
+        || kind.contains("character")
+}
+
+fn char_on_byte(rope: &Rope, byte: usize) -> Option<char> {
+    let index = rope.try_byte_to_char(byte).ok()?;
+    if index >= rope.len_chars() || rope.char_to_byte(index) != byte {
+        return None;
+    }
+    Some(rope.char(index))
+}
+
+fn char_ending_at(rope: &Rope, end_byte: usize) -> Option<(usize, char)> {
+    if end_byte == 0 || end_byte > rope.len_bytes() {
+        return None;
+    }
+    let end = rope.try_byte_to_char(end_byte).ok()?;
+    if end == 0 {
+        return None;
+    }
+    let index = end - 1;
+    Some((rope.char_to_byte(index), rope.char(index)))
+}
+
+fn byte_to_char(rope: &Rope, byte: usize) -> Option<usize> {
+    let index = rope.try_byte_to_char(byte).ok()?;
+    if rope.char_to_byte(index) != byte {
+        return None;
+    }
+    Some(index)
 }
 
 /// Parse `rope`, reusing `old` when it was built for this language and then edited.
@@ -1383,6 +1575,62 @@ mod tests {
             }
         }
         assert!(missed.is_empty(), "{}", missed.join("\n"));
+    }
+
+    #[test]
+    fn matching_bracket_uses_the_tree_and_skips_literals() {
+        let call = "fn f(a) {}\n";
+        let open = call.find('(').unwrap();
+        let close = call.find(')').unwrap();
+        assert_eq!(jump(Language::Rust, call, open), Some(close));
+        assert_eq!(jump(Language::Rust, call, close), Some(open));
+
+        let nested = "fn f() { { let x = (1); } }\n";
+        let paren = nested.find('(').unwrap();
+        assert_eq!(
+            jump(Language::Rust, nested, paren),
+            Some(nested.find(')').unwrap())
+        );
+        let first_brace = nested.find('{').unwrap();
+        assert_eq!(
+            jump(Language::Rust, nested, first_brace),
+            Some(nested.rfind('}').unwrap())
+        );
+
+        let text = "fn f() {\n    let s = \"(\";\n    // (\n    let n = (1);\n}\n";
+        let in_string = text.find("\"(").unwrap() + 1;
+        assert_eq!(jump(Language::Rust, text, in_string), None);
+        let in_comment = text.find("// (").unwrap() + 3;
+        assert_eq!(jump(Language::Rust, text, in_comment), None);
+        let real = text.find("(1)").unwrap();
+        assert_eq!(jump(Language::Rust, text, real), Some(real + 2));
+
+        let compare = "fn f() { let n = a < b; }\n";
+        assert_eq!(
+            jump(Language::Rust, compare, compare.find('<').unwrap()),
+            None
+        );
+        let generic = "fn f() { let v: Vec<u8> = Vec::new(); }\n";
+        let angle = generic.find('<').unwrap();
+        assert_eq!(
+            jump(Language::Rust, generic, angle),
+            Some(generic.find('>').unwrap())
+        );
+
+        let fence = "```rust\nfn f(a) {}\n```\n";
+        let fenced = fence.find('(').unwrap();
+        assert_eq!(
+            jump(Language::Markdown, fence, fenced),
+            Some(fence.find(')').unwrap())
+        );
+    }
+
+    fn jump(language: Language, text: &str, at: usize) -> Option<usize> {
+        let rope = Rope::from_str(text);
+        let parsed = parse(language, &rope, None).expect("parse");
+        let mut state = SyntaxState::fresh(language, 1, 0);
+        state.install(parsed);
+        state.match_bracket(&rope, at)
     }
 
     #[test]

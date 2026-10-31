@@ -72,6 +72,8 @@ pub enum QueryKind {
     },
     /// `textDocument/formatting` for the whole file.
     Format,
+    /// `textDocument/references` at the cursor.
+    References,
     /// `textDocument/codeAction` at the cursor.
     CodeAction,
     /// `codeAction/resolve`. `action` is the action JSON.
@@ -142,6 +144,8 @@ pub enum LspEvent {
         rename: bool,
         /// `textDocument/formatting`.
         format: bool,
+        /// `textDocument/references`.
+        references: bool,
         /// `textDocument/codeAction`.
         code_action: bool,
         /// `codeAction/resolve`, so an action without an edit can be filled in.
@@ -151,6 +155,11 @@ pub enum LspEvent {
     Hover { token: u64, text: Option<String> },
     /// Places `textDocument/definition` returned, in the order the server sent them.
     Definition {
+        token: u64,
+        locations: Vec<JumpTarget>,
+    },
+    /// Places `textDocument/references` returned, in the order the server sent them.
+    References {
         token: u64,
         locations: Vec<JumpTarget>,
     },

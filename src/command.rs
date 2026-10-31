@@ -51,6 +51,10 @@ pub enum CommandId {
     Hover,
     /// Jump to where the symbol under the cursor is defined.
     GotoDefinition,
+    /// List every place the symbol under the cursor is used.
+    GotoReferences,
+    /// Jump to the bracket paired with the one under the cursor.
+    MatchBracket,
     /// Open the completion list at the cursor.
     Complete,
     /// Add or remove a line comment.
@@ -71,7 +75,7 @@ pub enum CommandId {
     Format,
     /// Show code actions at the cursor.
     CodeAction,
-    /// Return to the place from before the last definition jump.
+    /// Return to the place from before the last definition or references jump.
     JumpBack,
     /// Undo [`CommandId::JumpBack`].
     JumpForward,
@@ -289,6 +293,24 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: false,
     },
     CommandSpec {
+        id: CommandId::GotoReferences,
+        name: "goto-references",
+        description: "Show every place this symbol is used",
+        shortcut: "Shift+F12",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::MatchBracket,
+        name: "match-bracket",
+        description: "Jump to the matching bracket",
+        shortcut: "Ctrl+]",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
         id: CommandId::Complete,
         name: "complete",
         description: "Open completions at the cursor",
@@ -381,7 +403,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::JumpBack,
         name: "jump-back",
-        description: "Return to the place from before the last definition jump",
+        description: "Return to the place from before the last definition or references jump",
         shortcut: "Ctrl+O",
         arg: None,
         editor: true,
@@ -570,6 +592,8 @@ fn importance(id: CommandId) -> u16 {
         CommandId::Cut => 90,
         CommandId::Paste => 100,
         CommandId::GotoDefinition => 110,
+        CommandId::GotoReferences => 112,
+        CommandId::MatchBracket => 115,
         CommandId::Complete => 120,
         CommandId::Hover => 130,
         CommandId::Format => 140,
@@ -892,6 +916,8 @@ mod tests {
                 "cut",
                 "paste",
                 "goto-definition",
+                "goto-references",
+                "match-bracket",
                 "complete",
                 "hover",
                 "format",
@@ -972,6 +998,7 @@ mod tests {
                 "undo",
                 "redo",
                 "goto-definition",
+                "goto-references",
                 "hover",
                 "rename-symbol",
                 "move-line-up",
@@ -984,6 +1011,7 @@ mod tests {
                 "redo",
                 "undo",
                 "goto-definition",
+                "goto-references",
                 "hover",
                 "rename-symbol",
                 "move-line-up",

@@ -244,6 +244,7 @@ impl App {
                 signature,
                 rename,
                 format,
+                references,
                 code_action,
                 action_resolve,
             } => self.handle_features(
@@ -256,6 +257,7 @@ impl App {
                 signature,
                 rename,
                 format,
+                references,
                 code_action,
                 action_resolve,
             ),
@@ -298,6 +300,7 @@ impl App {
             }
             LspEvent::Hover { token, text } => self.handle_hover(token, text),
             LspEvent::Definition { token, locations } => self.handle_definition(token, locations),
+            LspEvent::References { token, locations } => self.handle_references(token, locations),
             LspEvent::Completion {
                 token,
                 incomplete,

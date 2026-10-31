@@ -28,7 +28,7 @@ use crate::theme::SyntaxRole;
 mod lsp_nav;
 mod lsp_sync;
 
-pub use lsp_nav::ActionView;
+pub use lsp_nav::{ActionView, ReferenceView};
 
 pub use lsp_nav::{CompletionRow, CompletionView};
 pub use lsp_sync::LspLabel;
@@ -933,7 +933,7 @@ impl App {
             Focus::Find
         } else if self.completion_view().is_some() {
             Focus::CompletionPopup
-        } else if self.action_view().is_some() {
+        } else if self.reference_view().is_some() || self.action_view().is_some() {
             Focus::ActionMenu
         } else if self.explorer.open && self.explorer.focused {
             Focus::Sidebar
@@ -1930,6 +1930,8 @@ impl App {
             }
             SemanticAction::Hover => self.show_hover(),
             SemanticAction::GotoDefinition => self.goto_definition(),
+            SemanticAction::GotoReferences => self.goto_references(),
+            SemanticAction::MatchBracket { extend } => self.match_bracket(extend),
             SemanticAction::Complete => self.complete_now(),
             SemanticAction::MoveLine { down } => {
                 self.clear_snippet();
@@ -1951,6 +1953,12 @@ impl App {
             SemanticAction::CodeAction => self.code_action(),
             SemanticAction::JumpBack => self.jump_back(),
             SemanticAction::JumpForward => self.jump_forward(),
+            SemanticAction::Completion(action) if self.nav.references.is_some() => match action {
+                CompletionAction::Prev => self.move_reference(false),
+                CompletionAction::Next => self.move_reference(true),
+                CompletionAction::Accept => self.accept_reference(),
+                CompletionAction::Close => self.close_references(),
+            },
             SemanticAction::Completion(action) if self.nav.actions.is_some() => match action {
                 CompletionAction::Prev => self.move_action(false),
                 CompletionAction::Next => self.move_action(true),
@@ -3196,6 +3204,8 @@ impl App {
             CommandId::DiagnosticPrev => self.goto_diagnostic(false),
             CommandId::Hover => self.show_hover(),
             CommandId::GotoDefinition => self.goto_definition(),
+            CommandId::GotoReferences => self.goto_references(),
+            CommandId::MatchBracket => self.match_bracket(false),
             CommandId::Complete => self.complete_now(),
             CommandId::Comment => self.toggle_comment(),
             CommandId::MoveLineUp => self.handle(SemanticAction::MoveLine { down: false }),
@@ -3668,6 +3678,29 @@ impl App {
             after,
         });
         self.message = Some(format!("Saving {name}…"));
+    }
+
+    fn match_bracket(&mut self, extend: bool) {
+        self.dismiss_lsp_popups();
+        self.clear_snippet();
+        let target = {
+            let tab = self.active_editor().tab();
+            let rope = tab.buffer.rope();
+            let head = tab.buffer.selection().head;
+            let Some((at, bracket)) = crate::buffer::bracket_near(rope, head) else {
+                return;
+            };
+            if let Some(state) = tab.syntax.as_ref().filter(|state| state.has_tree()) {
+                state.match_bracket(rope, at)
+            } else {
+                crate::buffer::scan_bracket(rope, at, bracket)
+            }
+        };
+        let Some(target) = target else {
+            return;
+        };
+        self.buffer_mut().move_to(target, extend);
+        self.scroll_to_cursor();
     }
 
     fn toggle_comment(&mut self) {
@@ -4758,6 +4791,32 @@ mod tests {
     fn numbered_lines(count: usize) -> Buffer {
         let lines: Vec<String> = (0..count).map(|i| i.to_string()).collect();
         Buffer::from_text(&lines.join("\n"))
+    }
+
+    #[test]
+    fn match_bracket_moves_the_cursor_and_shift_keeps_the_anchor() {
+        let mut app = App::new(Buffer::from_text("f(a)"), None);
+        app.buffer_mut().move_to(1, false);
+        app.handle(SemanticAction::MatchBracket { extend: false });
+        assert_eq!(app.buffer().selection().head, 3);
+        app.handle(SemanticAction::MatchBracket { extend: false });
+        assert_eq!(app.buffer().selection().head, 1);
+        assert!(app.buffer().selection().is_empty());
+
+        app.handle(SemanticAction::MatchBracket { extend: true });
+        assert_eq!(
+            app.buffer().selection(),
+            crate::buffer::Selection { anchor: 1, head: 3 }
+        );
+
+        app.buffer_mut().move_to(0, false);
+        app.handle(SemanticAction::MatchBracket { extend: false });
+        assert_eq!(app.buffer().selection().head, 0);
+
+        app.buffer_mut().move_to(1, false);
+        app.run_command(crate::command::CommandId::MatchBracket, None)
+            .unwrap();
+        assert_eq!(app.buffer().selection().head, 3);
     }
 
     #[test]

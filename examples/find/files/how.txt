@@ -1,0 +1,11 @@
+Focus the file tree with Ctrl+B.
+Press Ctrl+F and type pear.
+Enter lists every file that has it.
+three.txt is not in the list.
+Enter on a row opens that file.
+Esc clears the list.
+
+To change the word in many files:
+mark rows with Space, then run replace.
+Type a new word and press Enter.
+With no marks, every file in the list changes.
