@@ -414,6 +414,8 @@ pub struct App {
     pub clipboard: Clipboard,
     pub branch: Option<String>,
     pub explorer: Explorer,
+    /// Workspace-relative file to select once the tree scan that `reveal` started finishes.
+    reveal_file: Option<PathBuf>,
     /// Preferred explorer column width. Drawing clamps it to half the terminal.
     sidebar_width: u16,
     /// File picker modal. `None` while it is closed.
@@ -517,6 +519,7 @@ impl App {
             clipboard: Clipboard::in_memory(),
             branch: None,
             explorer: Explorer::new(PathBuf::from(".")),
+            reveal_file: None,
             sidebar_width: layout::SIDEBAR_WIDTH,
             file_picker: None,
             file_index: None,
@@ -963,6 +966,7 @@ impl App {
         match event {
             AppEvent::TreeScanned { root, entries } if root == self.explorer.root => {
                 self.explorer.set_entries(entries);
+                self.finish_reveal_file();
             }
             AppEvent::GitStatus { root, statuses } if root == self.explorer.root => {
                 self.explorer.git = statuses;
@@ -1494,6 +1498,44 @@ impl App {
         }
         self.sidebar_width = next;
         self.message = None;
+    }
+
+    /// Open the sidebar on the focused file without moving focus. A closed sidebar
+    /// opens and keeps the editor focused. Focus mode stays as it is.
+    fn reveal_focused_file(&mut self) -> Result<(), String> {
+        if self.focus_mode {
+            return Ok(());
+        }
+        let path = self
+            .find_tab(self.active_tab_id())
+            .and_then(|tab| tab.path.clone())
+            .ok_or_else(|| "No file to reveal".to_string())?;
+        let rel = self
+            .relative_to_root(&path)
+            .filter(|rel| !rel.as_os_str().is_empty())
+            .ok_or_else(|| "File is not in the explorer".to_string())?;
+        if !self.explorer.open {
+            self.reveal_sidebar();
+        }
+        if self.explorer.reveal_file(&rel) {
+            self.reveal_file = None;
+            return Ok(());
+        }
+        if self.explorer.loading {
+            self.reveal_file = Some(rel);
+            return Ok(());
+        }
+        Err("File is not in the explorer".to_string())
+    }
+
+    /// Applies a `reveal` that waited for the tree scan.
+    fn finish_reveal_file(&mut self) {
+        let Some(path) = self.reveal_file.take() else {
+            return;
+        };
+        if !self.explorer.reveal_file(&path) {
+            self.message = Some("File is not in the explorer".to_string());
+        }
     }
 
     /// Open the sidebar and queue a scan. A sidebar that is already open is left as-is.
@@ -3198,6 +3240,7 @@ impl App {
             CommandId::Find => self.open_find_mode(arg.unwrap_or("")),
             CommandId::Replace => self.open_replace_mode(arg.unwrap_or("")),
             CommandId::ToggleExplorer => self.toggle_sidebar(),
+            CommandId::Reveal => self.reveal_focused_file()?,
             CommandId::SidebarWider => self.resize_sidebar(true),
             CommandId::SidebarNarrower => self.resize_sidebar(false),
             CommandId::SplitRight => self.split(Axis::Horizontal),
@@ -6264,6 +6307,98 @@ mod tests {
     }
 
     #[test]
+    fn reveal_selects_the_focused_file_without_moving_the_cursor() {
+        let (dir, _guard) = temp_dir();
+        std::fs::create_dir(dir.join("src")).unwrap();
+        let file = dir.join("src").join("lib.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), Some(file));
+        app.handle(SemanticAction::Move {
+            movement: Movement::Right,
+            extend: false,
+        });
+        let cursor = app.buffer().selection().head;
+
+        app.explorer = Explorer::new(dir.clone());
+        let mut src = file_entry("src");
+        src.is_dir = true;
+        app.explorer
+            .set_entries(vec![src, file_entry("src/lib.rs"), file_entry("one.txt")]);
+        app.explorer.insert_filter("one");
+        app.explorer.enter_select();
+        app.explorer.commit_mark();
+        app.explorer.open = false;
+
+        app.run_command(CommandId::Reveal, None).unwrap();
+        assert!(app.explorer.open);
+        assert!(!app.explorer.focused);
+        assert_eq!(app.focus(), Focus::Editor);
+        assert_eq!(app.buffer().selection().head, cursor);
+        assert!(app.explorer.filter.is_empty());
+        assert!(app.explorer.selecting);
+        assert!(app.explorer.is_marked(Path::new("one.txt")));
+        assert_eq!(
+            app.explorer.selected().unwrap(),
+            Path::new("src").join("lib.rs")
+        );
+        assert!(
+            app.explorer
+                .expanded_paths()
+                .iter()
+                .any(|path| path == Path::new("src"))
+        );
+        assert!(app.reveal_file.is_none());
+    }
+
+    #[test]
+    fn reveal_waits_for_the_scan_and_reports_a_missing_file() {
+        let (dir, _guard) = temp_dir();
+        std::fs::create_dir(dir.join("src")).unwrap();
+        let file = dir.join("src").join("lib.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), Some(file));
+        app.explorer = Explorer::new(dir.clone());
+        app.explorer.open = true;
+        app.explorer.loading = true;
+
+        app.run_command(CommandId::Reveal, None).unwrap();
+        assert!(app.message.is_none());
+        assert_eq!(
+            app.reveal_file.as_deref(),
+            Some(Path::new("src").join("lib.rs").as_path())
+        );
+
+        let mut src = file_entry("src");
+        src.is_dir = true;
+        app.handle_event(AppEvent::TreeScanned {
+            root: dir.clone(),
+            entries: vec![src, file_entry("src/lib.rs")],
+        });
+        assert!(app.reveal_file.is_none());
+        assert_eq!(
+            app.explorer.selected().unwrap(),
+            Path::new("src").join("lib.rs")
+        );
+        assert!(app.message.is_none());
+
+        app.explorer.loading = false;
+        app.explorer.set_entries(vec![file_entry("one.txt")]);
+        let error = app.run_command(CommandId::Reveal, None).unwrap_err();
+        assert_eq!(error, "File is not in the explorer");
+
+        let mut unnamed = App::new(Buffer::from_text("draft"), None);
+        unnamed.explorer = Explorer::new(dir);
+        let error = unnamed.run_command(CommandId::Reveal, None).unwrap_err();
+        assert_eq!(error, "No file to reveal");
+
+        app.run_command(CommandId::Focus, None).unwrap();
+        app.explorer.open = false;
+        app.run_command(CommandId::Reveal, None).unwrap();
+        assert!(!app.explorer.open);
+        assert!(app.focus_mode());
+    }
+
+    #[test]
     fn command_bar_only_offers_the_focused_surface() {
         let mut app = App::new(Buffer::from_text("one\ntwo\nthree\n"), None);
         run(&mut app, "delete");
@@ -6298,6 +6433,7 @@ mod tests {
                 "find",
                 "replace",
                 "select",
+                "reveal",
                 "explorer",
                 "wider",
                 "narrower",

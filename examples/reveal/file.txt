@@ -1,0 +1,5 @@
+Press Shift+Space, type reveal, and press Enter.
+The file tree opens on this file.
+The cursor stays where it is.
+
+this file

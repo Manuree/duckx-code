@@ -301,6 +301,42 @@ impl Explorer {
         self.scroll_into_view();
     }
 
+    /// Selects `path` in the full tree. Ancestor folders open, a filter or content
+    /// search is cleared, and a `Shift` cover is dropped. Marks stay. Returns false
+    /// when `path` is not a file in the scanned tree.
+    pub fn reveal_file(&mut self, path: &Path) -> bool {
+        let path: PathBuf = path.components().collect();
+        let found = self
+            .entries
+            .iter()
+            .any(|entry| !entry.is_dir && entry.path == path);
+        if !found {
+            return false;
+        }
+        self.filter.clear();
+        self.file_hits = None;
+        self.file_query = None;
+        let mut parent = path.as_path();
+        while let Some(dir) = parent.parent() {
+            if dir.as_os_str().is_empty() {
+                break;
+            }
+            if self
+                .entries
+                .iter()
+                .any(|entry| entry.is_dir && entry.path == dir)
+            {
+                self.expanded.insert(dir.to_path_buf());
+            }
+            parent = dir;
+        }
+        self.selected = Some(path);
+        self.range_anchor = None;
+        self.shift_paths.clear();
+        self.scroll_into_view();
+        true
+    }
+
     /// Restores the normal tree after a content search.
     pub fn clear_file_search(&mut self) {
         self.file_hits = None;
@@ -718,6 +754,38 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    fn reveal_file_opens_ancestors_and_keeps_marks() {
+        let mut explorer = sample();
+        explorer.height = 2;
+        explorer.enter_select();
+        explorer.commit_mark();
+        explorer.move_selection(1, true);
+        assert!(explorer.is_covered(Path::new("src")));
+        assert!(explorer.is_marked(Path::new("examples")));
+        explorer.insert_filter("toml");
+
+        assert!(explorer.reveal_file(Path::new("src/ui/mod.rs")));
+        assert!(explorer.selecting);
+        assert!(explorer.filter.is_empty());
+        assert_eq!(selected_name(&explorer), "mod.rs");
+        assert!(explorer.expanded_paths().contains(&PathBuf::from("src")));
+        assert!(explorer.expanded_paths().contains(&PathBuf::from("src/ui")));
+        assert!(
+            !explorer
+                .expanded_paths()
+                .contains(&PathBuf::from("examples"))
+        );
+        assert!(explorer.is_marked(Path::new("examples")));
+        assert!(!explorer.is_covered(Path::new("src")));
+        let index = explorer.selected_index().unwrap();
+        assert!(index >= explorer.scroll && index < explorer.scroll + explorer.height);
+        assert!(shown(&explorer).iter().any(|row| row.ends_with("mod.rs")));
+
+        assert!(!explorer.reveal_file(Path::new("src")));
+        assert!(!explorer.reveal_file(Path::new("missing.rs")));
     }
 
     #[test]
