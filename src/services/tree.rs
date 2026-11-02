@@ -24,10 +24,9 @@ pub fn scan(root: &Path) -> Vec<FileEntry> {
         if entry.depth() == 0 {
             continue;
         }
-        let Ok(relative) = entry.path().strip_prefix(root) else {
+        let Some(relative) = relative_from(root, entry.path()) else {
             continue;
         };
-        let relative: PathBuf = relative.components().collect();
         let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
         let parent = relative.parent().map(Path::to_path_buf).unwrap_or_default();
         children.entry(parent).or_default().push((relative, is_dir));
@@ -42,6 +41,52 @@ pub fn scan(root: &Path) -> Vec<FileEntry> {
     let mut entries = Vec::new();
     push_children(Path::new(""), 1, &children, &mut entries);
     entries
+}
+
+/// Path of `path` relative to `root`. A `\\?\` prefix or a different case still matches.
+/// The returned name keeps the case of `path`.
+pub fn relative_from(root: &Path, path: &Path) -> Option<PathBuf> {
+    let root = without_verbatim(root);
+    let path = without_verbatim(path);
+    if let Ok(relative) = path.strip_prefix(&root) {
+        let relative: PathBuf = relative.components().collect();
+        return (!relative.as_os_str().is_empty()).then_some(relative);
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    let root_parts: Vec<_> = root.components().collect();
+    let path_parts: Vec<_> = path.components().collect();
+    if path_parts.len() <= root_parts.len() {
+        return None;
+    }
+    let same = root_parts
+        .iter()
+        .zip(path_parts.iter())
+        .all(|(left, right)| {
+            left.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+        });
+    if !same {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for part in &path_parts[root_parts.len()..] {
+        relative.push(part.as_os_str());
+    }
+    (!relative.as_os_str().is_empty()).then_some(relative)
+}
+
+fn without_verbatim(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
 }
 
 fn sort_key(path: &Path) -> String {
@@ -120,5 +165,17 @@ mod tests {
             ]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_verbatim_prefix_and_different_case_still_make_a_relative_path() {
+        let root = Path::new(r"E:\Work\Duckx");
+        let file = Path::new(r"\\?\E:\work\duckx\src\AGENTS.md");
+        assert_eq!(
+            relative_from(root, file).unwrap(),
+            PathBuf::from("src").join("AGENTS.md")
+        );
+        assert!(relative_from(root, Path::new(r"E:\Work\other\a.rs")).is_none());
     }
 }

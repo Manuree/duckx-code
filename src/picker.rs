@@ -355,10 +355,10 @@ pub fn index_workspace(root: &Path) -> (Vec<IndexedFile>, bool) {
             truncated = true;
             break;
         }
-        let Ok(relative) = entry.path().strip_prefix(root) else {
+        let Some(relative) = crate::services::tree::relative_from(root, entry.path()) else {
             continue;
         };
-        let relative = forward_slash(relative);
+        let relative = forward_slash(&relative);
         if relative.is_empty() {
             continue;
         }

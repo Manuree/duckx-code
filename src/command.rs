@@ -97,6 +97,8 @@ pub enum CommandId {
     Agent,
     /// Open the workspace file picker.
     FilePicker,
+    /// Leave this folder and open another one.
+    Workspace,
     /// Read the focused file from disk again.
     Reload,
     /// Show or set the encoding the next save writes.
@@ -142,6 +144,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Open a workspace file by name",
         shortcut: "Ctrl+P",
         arg: None,
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
+        id: CommandId::Workspace,
+        name: "workspace",
+        description: "Open another folder",
+        shortcut: "",
+        arg: Some("<folder>"),
         editor: true,
         explorer: true,
     },
@@ -613,6 +624,7 @@ pub const COMMANDS: &[CommandSpec] = &[
 fn importance(id: CommandId) -> u16 {
     match id {
         CommandId::FilePicker => 10,
+        CommandId::Workspace => 15,
         CommandId::Find => 20,
         CommandId::Replace => 30,
         CommandId::GotoLine => 40,
@@ -748,6 +760,8 @@ pub enum NameSource {
     Sibling,
     /// Workspace-relative files and directories (`save`).
     Path,
+    /// Saved folder paths (`workspace`).
+    Workspace,
 }
 
 /// Commands whose argument is a file or folder name.
@@ -756,8 +770,14 @@ pub fn name_source(id: CommandId) -> Option<NameSource> {
         CommandId::Move => Some(NameSource::Directory),
         CommandId::Rename => Some(NameSource::Sibling),
         CommandId::Save => Some(NameSource::Path),
+        CommandId::Workspace => Some(NameSource::Workspace),
         _ => None,
     }
+}
+
+/// True when `candidate` starts with `typed`. Case and `\` / `/` are ignored.
+pub fn name_prefix(typed: &str, candidate: &str) -> bool {
+    split_suffix(typed, candidate).is_some()
 }
 
 /// Dim remainder of the closest name, drawn after the characters already typed.
@@ -940,6 +960,7 @@ mod tests {
             names("", None),
             [
                 "file-picker",
+                "workspace",
                 "find",
                 "replace",
                 "goto",
@@ -993,6 +1014,7 @@ mod tests {
             names_in("", None, CommandContext::Explorer),
             [
                 "file-picker",
+                "workspace",
                 "find",
                 "replace",
                 "select",
@@ -1013,6 +1035,7 @@ mod tests {
             [
                 "delete",
                 "file-picker",
+                "workspace",
                 "find",
                 "replace",
                 "select",
@@ -1178,6 +1201,12 @@ mod tests {
         assert_eq!(name_source(CommandId::Move), Some(NameSource::Directory));
         assert_eq!(name_source(CommandId::Rename), Some(NameSource::Sibling));
         assert_eq!(name_source(CommandId::Save), Some(NameSource::Path));
+        assert_eq!(
+            name_source(CommandId::Workspace),
+            Some(NameSource::Workspace)
+        );
         assert_eq!(name_source(CommandId::GotoLine), None);
+        assert!(name_prefix("E:/Wo", "e:\\work"));
+        assert!(!name_prefix("zzz", "e:\\work"));
     }
 }

@@ -1,0 +1,7 @@
+Press Shift+Space and type workspace.
+Enter with no path lists folders you have opened before.
+Up and Down move in that list. Enter opens the highlighted folder.
+Type a path instead, such as .. or a full path. Right accepts the dim hint.
+Yes saves unsaved files first. No leaves them unsaved. Cancel stays here.
+The folder you leave is remembered, and its tabs come back when you return.
+Files from the folder you left close. A relative save writes in the folder you opened.

@@ -439,6 +439,11 @@ async fn run(
         tokio::select! {
             request = requests.recv() => match request {
                 None | Some(LspRequest::Shutdown) => break,
+                Some(LspRequest::Reset) => {
+                    manager.shutdown(&mut internal_rx).await;
+                    manager.clear_after_reset();
+                    manager.emit(LspEvent::ResetDone);
+                }
                 Some(request) => manager.handle_request(request),
             },
             Some(message) = internal_rx.recv() => manager.handle_internal(message),
@@ -547,7 +552,7 @@ impl Manager {
                 kind,
             } => self.query(token, path, at, kind),
             LspRequest::Cancel { token } => self.cancel(token),
-            LspRequest::Shutdown => {}
+            LspRequest::Shutdown | LspRequest::Reset => {}
             LspRequest::Configure(prefs) => self.configure(prefs),
         }
     }
@@ -1143,7 +1148,11 @@ impl Manager {
                 instance,
                 body,
             } => {
-                if self.servers[server].instance != instance {
+                if self
+                    .servers
+                    .get(server)
+                    .is_none_or(|slot| slot.instance != instance)
+                {
                     return;
                 }
                 let Ok(message) = serde_json::from_slice::<Value>(&body) else {
@@ -1156,14 +1165,23 @@ impl Manager {
                 instance,
                 reason,
             } => {
-                if self.servers[server].instance == instance {
+                if self
+                    .servers
+                    .get(server)
+                    .is_some_and(|slot| slot.instance == instance)
+                {
                     self.exited(server, reason);
                 }
             }
             Internal::Flush { server } => {
-                if self.servers[server].state == State::Ready
-                    && let Some(status) = self.servers[server].held.take()
+                if self
+                    .servers
+                    .get(server)
+                    .is_none_or(|slot| slot.state != State::Ready)
                 {
+                    return;
+                }
+                if let Some(status) = self.servers[server].held.take() {
                     self.status(server, status);
                 }
             }
@@ -1171,7 +1189,12 @@ impl Manager {
             Internal::Pull { path, generation } => self.pull(&path, generation),
             Internal::Tokens { path, generation } => self.pull_tokens(&path, generation),
             Internal::Restart { server } => {
-                if self.servers[server].state != State::Restarting || self.shutting_down {
+                if self.shutting_down
+                    || self
+                        .servers
+                        .get(server)
+                        .is_none_or(|slot| slot.state != State::Restarting)
+                {
                     return;
                 }
                 let spec = self.servers[server].spec;
@@ -1682,6 +1705,17 @@ impl Manager {
             "{name} stopped: {}",
             first_line(&reason)
         )));
+    }
+
+    /// Drop every server after [`Self::shutdown`] so a new folder can start its own.
+    fn clear_after_reset(&mut self) {
+        self.shutting_down = false;
+        self.servers.clear();
+        self.by_root.clear();
+        self.docs.clear();
+        self.inflight.clear();
+        self.pulls.clear();
+        self.tokens.clear();
     }
 
     /// `shutdown`, then `exit`, then kill whatever is still running.

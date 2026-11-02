@@ -168,6 +168,14 @@ The list is the workspace, with `.gitignore` respected and hidden files skipped.
 
 With an empty query, files opened earlier in this session come first, then everything else by file name. A typed query prefers the file name over a directory, and prefers the folder of the file you are editing when the scores are otherwise equal. Matched characters are highlighted. The counter on the query row is `highlight/matches`.
 
+## Opening a folder
+
+`workspace` opens a different folder without quitting. It is listed from the editor and from the explorer.
+
+`Enter` on `workspace` with no path shows the folders saved in `session.json`, newest first, except the folder you are in. `Up` / `Down` move through that list and `Enter` opens the highlighted folder. A typed path is used as it is: a full path, `~`, or a path relative to the current folder. `Right` accepts the dimmed remainder of a saved folder. The folder must exist. The current folder says `Already here`. A path that is not a folder says `Not a folder`.
+
+Each file with unsaved edits asks `Yes` / `No` / `Cancel` before the switch. `Yes` saves that file, `No` leaves it unsaved on disk, and `Cancel` stays in the current folder. The folder you leave is written to `session.json` first. The folder you open restores its tabs, cursors, splits, and sidebar from that file. A folder with no saved session opens one empty tab. Files from the folder you left do not stay open, and a load that was already running for that folder cannot put them back. The file tree, git status, and branch refresh in the background. Language servers for the previous folder stop, and files in the new folder start their own. The assistant transcript is cleared. Move, delete, rename, the file picker, and a relative `save` all use the folder you opened.
+
 ---
 
 ## Saving
@@ -175,7 +183,7 @@ With an empty query, files opened earlier in this session come first, then every
 | Keys / Command | Action |
 | :--- | :--- |
 | `Ctrl + S` or `save` | Save the focused editor |
-| `save <path>` | Save the focused editor to that path and remember it |
+| `save <path>` | Save the focused editor to that path and remember it. A relative path is inside the open folder. |
 
 * **Atomic write:** the new text is written to a temporary file in the same directory, flushed, then renamed over the real file. A failed save leaves the previous file as it was.
 * **Encoding:** the status bar shows the encoding after the line ending (`4 LF UTF-8`). A file opens as UTF-8, or as UTF-8 or UTF-16 when a BOM is present. `encoding utf-16le` makes the next save write that encoding. `reload` reads the file again with the encoding it already has. `reload windows-874` reads those bytes as that encoding. A character the encoding cannot store is not written, and the status bar says so. Names: `utf-8`, `utf-8-bom`, `utf-16le`, `utf-16be`, `windows-1252`, `windows-874`.
@@ -259,7 +267,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 
 * **Where it sits:** the bar is the status line. The badge reads `COMMAND` and you type after `❯`. The file name is hidden until the bar closes.
 * **Hints:** matching commands stack upward from the status line, one command per row, in list order. `Up` moves the highlight to the row above and `Down` to the row below. The highlighted row shows `↑↓  tab  enter  esc` on the right. The list disappears when the bar closes.
-* **Focus context:** the list is only the commands for the surface that was focused when the bar opened. From an editor, file commands (`select`, `move`, `delete`, `rename`) are absent. From the explorer, editing commands (`goto`, `save`, `undo`, …) are absent, and `move`, `delete`, and `rename` appear only in FILE mode. `file-picker`, `reveal`, `explorer`, `setting`, `about`, and `quit` are in both. Typing a command from the other surface reports where it applies and does not run it. Typing `move`, `delete`, or `rename` outside FILE mode reports that it applies in FILE mode.
+* **Focus context:** the list is only the commands for the surface that was focused when the bar opened. From an editor, file commands (`select`, `move`, `delete`, `rename`) are absent. From the explorer, editing commands (`goto`, `save`, `undo`, …) are absent, and `move`, `delete`, and `rename` appear only in FILE mode. `file-picker`, `workspace`, `reveal`, `explorer`, `setting`, `about`, and `quit` are in both. Typing a command from the other surface reports where it applies and does not run it. Typing `move`, `delete`, or `rename` outside FILE mode reports that it applies in FILE mode.
 * **Terminals that hide `Shift + Space`:** some terminals, including some integrated editor terminals, send `Shift + Space` as a plain space. If the bar doesn't open, use `F1`.
 * **Space inside the bar:** pressing `Shift + Space` while the bar is open types a normal space.
 
@@ -268,13 +276,13 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 1. **The list is the focused surface.** Editor commands and explorer file commands are never mixed. A bare number goes to that line only while an editor is focused: typing `42` shows `goto 42` as the only hint, and `Enter` jumps there. `Tab` leaves the bar and opens the assistant. In the explorer, a number matches nothing.
 2. **Name prefix matches come next:** `un` → `undo` in the editor, `del` → `delete-line` in the editor and `delete` in the explorer while FILE mode is on.
 3. **Then word matches:** commands where a word in the name or description starts with the input, so `line` in the editor → `goto`, `copy`, `cut`, `comment`, `indent`, `outdent`, `move-line-up`, `move-line-down`, `delete-line`, `duplicate-line-up`, `duplicate-line-down`.
-4. **Each of those groups follows importance.** An empty list in the editor starts `file-picker`, `find`, `replace`, `goto`, `save`, `undo`, `redo`, then clipboard, language tools, layout, `reveal`, `explorer`, `setting`, `agent`, `about`, and `quit`. The explorer uses the same rank: `file-picker`, `find`, `replace`, `select`, then `move`, `delete`, and `rename` in FILE mode, then `reveal`, `explorer`, `setting`, `about`, and `quit`.
+4. **Each of those groups follows importance.** An empty list in the editor starts `file-picker`, `workspace`, `find`, `replace`, `goto`, `save`, `undo`, `redo`, then clipboard, language tools, layout, `reveal`, `explorer`, `setting`, `agent`, `about`, and `quit`. The explorer uses the same rank: `file-picker`, `workspace`, `find`, `replace`, `select`, then `move`, `delete`, and `rename` in FILE mode, then `reveal`, `explorer`, `setting`, `about`, and `quit`.
 5. **The most recent command on this surface is always first** when it is one of the matches, and marked with ★. That holds for an empty input and for a typed filter, including when the recent command only matches a later word. Opening the bar and pressing `Enter` immediately repeats it. A command last run in the editor is not pinned while the explorer is focused, and the reverse.
 
 ### 6.3 Running Commands
 
 * **Arguments:** put them after the command name, separated by a space, e.g. `goto 42`.
-* **File and folder names:** `move`, `rename`, and `save` draw the rest of the closest matching name in dim text after what you typed. The block cursor sits on the first character of that hint, and `Right` accepts the whole hint. The highlighted command row shows `→` while the hint is visible. The closest name is the shortest match, then A–Z, ignoring case and treating `\` like `/`. A name you have already finished is left alone, so `move src` does not grow into `move src/ui`. Hints come from the workspace tree the explorer has scanned. `move` hints folders. `rename` hints names in the same folder as the focused row. `save` hints files and folders. `Right` does nothing when there is no hint.
+* **File and folder names:** `move`, `rename`, `save`, and `workspace` draw the rest of the closest matching name in dim text after what you typed. The block cursor sits on the first character of that hint, and `Right` accepts the whole hint. The highlighted row shows `→` while the hint is visible. The closest name is the shortest match, then A–Z, ignoring case and treating `\` like `/`. A name you have already finished is left alone, so `move src` does not grow into `move src/ui`. `move`, `rename`, and `save` take names from the workspace tree the explorer has scanned. `move` hints folders. `rename` hints names in the same folder as the focused row. `save` hints files and folders. `workspace` hints folders saved in `session.json`. `Right` does nothing when there is no hint.
 * **Exact names win:** a fully typed command name runs even if another suggestion is highlighted.
 * **Missing arguments:** pressing `Enter` on a command that needs an argument fills in `goto ` and waits for you to type it. `find` and `replace` take no argument: `Enter` opens FIND or REPLACE mode. `replace kitten` opens REPLACE mode with that new word already typed.
 * **Errors:** messages such as `Unknown command` or `Invalid line number` appear in yellow in the status bar until the next key press.
@@ -311,6 +319,7 @@ See [Search](#search) for wrap, replace, and empty-replacement behavior.
 | :--- | :--- | :--- | :--- |
 | `find` | — | Enter FIND mode. In the explorer, `Enter` searches files. See [Search](#search). | `Ctrl + F` |
 | `file-picker` | — | Open a file from the workspace. A rounded list appears over the editor. Also listed while the explorer is focused. See [Opening a file](#opening-a-file). | `Ctrl + P` |
+| `workspace` | `<folder>` | Open another folder. See [Opening a folder](#opening-a-folder). Also listed while the explorer is focused. | — |
 | `replace` | optional text | Enter REPLACE mode. In FILTER mode, `Enter` replaces the marked files, or every match when nothing is marked. See [Search](#search). | `Ctrl + H` |
 
 #### Clipboard
@@ -445,6 +454,8 @@ A file tree of the directory duckx-code was started from, on the left side of th
 
 `reveal` selects the file of the focused tab in the tree. Folders above that file open. Other open folders stay open. A filter or a file search is cleared. In FILE mode the `Shift` cover clears and marks stay. The text cursor does not move, and focus stays where it was. A closed sidebar opens without taking focus, so typing still inserts in the editor. While focus mode is on, `reveal` does nothing. A tab with no path says `No file to reveal`. A file outside the tree, including one hidden by `.gitignore`, says `File is not in the explorer`. If the tree is still loading, the row moves when the scan finishes.
 
+A file or folder created, deleted, or renamed on disk shows up while the sidebar is open. The rows stay in place until the new list is ready. A closed sidebar shows the change the next time it opens.
+
 ### 8.3 Filtering
 
 Type any printable character to filter. The box has no title. A magnifying-glass icon sits at the left of the input. Every name containing the text (case-insensitive) is shown together with its parent folders, and the first match is selected. `Backspace` deletes the last filter character, and pasting adds to the filter. In FILE mode, `Space` marks files instead of typing a space into the filter.
@@ -455,7 +466,7 @@ In FILE mode, movement without `Shift` clears the cover. Marks last until you `S
 
 ### 8.4 Changing Files
 
-Open the Command Bar while the explorer is focused (`Shift + Space` works in FILE mode too). Outside FILE mode the hints are `file-picker`, `find`, `replace`, `select`, `reveal`, `explorer`, `setting`, `about`, and `quit`. Inside FILE mode they also include `move`, `delete`, and `rename`, after `select`. `replace` outside FILTER mode reports that it applies in FILTER mode.
+Open the Command Bar while the explorer is focused (`Shift + Space` works in FILE mode too). Outside FILE mode the hints are `file-picker`, `workspace`, `find`, `replace`, `select`, `reveal`, `explorer`, `setting`, `about`, and `quit`. Inside FILE mode they also include `move`, `delete`, and `rename`, after `select`. `replace` outside FILTER mode reports that it applies in FILTER mode.
 
 | Command | Action |
 | :--- | :--- |
@@ -650,7 +661,7 @@ The assistant can run these tools. A path that climbs out of the workspace with 
 | `save` | Save an open file. |
 | `goto` | Move to a line. A path opens that file first. |
 
-There is no shell tool. Set the server and the model under [Settings](#10-settings), section AI, before the first prompt.
+`write_file` is `create_file`. `search_replace` is `apply_edit`. `list_files` is `list_dir`. `read` is `read_file`. `bash` and `shell` are refused in the tool result, so the turn keeps going. A reply that arrives only in the server's reasoning field is shown. The request allows 8192 tokens. An empty reply says so in the panel. Set the server and the model under [Settings](#10-settings), section AI, before the first prompt.
 
 ## 12. Planned
 

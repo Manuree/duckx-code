@@ -213,9 +213,14 @@ impl App {
     }
 
     fn run_tool(&mut self, turn: u64, call_id: String, name: &str, arguments: &str) {
-        let value = serde_json::from_str::<serde_json::Value>(arguments)
+        let (name, arguments) = agent::normalize_call(name, arguments);
+        let value = serde_json::from_str::<serde_json::Value>(&arguments)
             .unwrap_or(serde_json::Value::Object(Default::default()));
-        let reply = match name {
+        let reply = match name.as_str() {
+            "shell" => Some(
+                "No shell. Create a file with create_file, or change one with apply_edit."
+                    .to_string(),
+            ),
             "read_file" => self.tool_read(&value, turn, call_id.clone()),
             "list_dir" => self.tool_list(&value, turn, call_id.clone()),
             "editor_state" => Some(self.tool_state()),

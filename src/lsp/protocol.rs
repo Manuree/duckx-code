@@ -34,6 +34,8 @@ pub enum LspRequest {
     },
     /// Stop every server. The worker exits after this.
     Shutdown,
+    /// Stop every server and forget their documents. The worker stays up.
+    Reset,
     /// Settings the next `workspace/configuration` answer should use.
     Configure(crate::settings::LspPrefs),
     /// Ask the server about one cursor position. `token` is echoed on the reply.
@@ -197,6 +199,8 @@ pub enum LspEvent {
         encoding: crate::lsp::position::Encoding,
         actions: Vec<ActionOffer>,
     },
+    /// Servers from before a workspace switch are gone.
+    ResetDone,
 }
 
 /// One text replacement. Byte offsets are in `version`'s text when `version` is set.

@@ -12,7 +12,7 @@ use crate::action::{
 use crate::buffer::{Buffer, Movement, fingerprint_bytes};
 use crate::command::{
     CommandBar, CommandContext, CommandId, CommandSpec, NameSource, find_command, ghost_suffix,
-    is_known_name, is_line_number, name_source, spec, suggestions, unavailable_reason,
+    is_known_name, is_line_number, name_prefix, name_source, spec, suggestions, unavailable_reason,
 };
 use crate::explorer::Explorer;
 use crate::jobs::{AfterSave, AppEvent, CloseBatch, Job, LoadKind};
@@ -391,6 +391,8 @@ enum Pending {
     /// `close-all` or `close-view` still has more tabs to close.
     CloseBatch(CloseBatch),
     Open(PathBuf),
+    /// Open another folder after every unsaved tab has been saved or skipped.
+    Workspace(PathBuf),
     Delete(Vec<PathBuf>),
     /// Read the tab from disk again. `stamp` is the outside change the user can choose to keep.
     Reload {
@@ -471,7 +473,7 @@ pub struct App {
     reveal_find: Option<(PathBuf, String)>,
     /// Replacement. The badge reads `REPLACE` while this is set.
     pub replace_mode: Option<ReplaceMode>,
-    /// Tabs the user chose not to save during this quit.
+    /// Tabs the user chose not to save during quit or a workspace switch.
     quit_skipped: Vec<TabId>,
     /// Focus returns to the sidebar when the unsaved-changes flow is cancelled.
     prompt_restore_sidebar: bool,
@@ -498,6 +500,17 @@ pub struct App {
     diff_inflight: HashMap<TabId, (u64, u64)>,
     /// Announce the result of the toggle for this tab and fingerprint.
     diff_announce: Option<(TabId, u64)>,
+    /// Folders remembered in `session.json`, newest first.
+    sessions: Vec<crate::session::Session>,
+    /// Language-server events from the previous folder are ignored until `ResetDone`.
+    lsp_resetting: bool,
+    /// Tree scan that has been queued or is running. `dirty` asks for one more pass.
+    tree_scan: Option<TreeScan>,
+}
+
+struct TreeScan {
+    root: PathBuf,
+    dirty: bool,
 }
 
 struct CachedFiles {
@@ -510,7 +523,7 @@ impl App {
     /// Starts with an in-memory clipboard; the binary swaps in `Clipboard::system()`.
     pub fn new(buffer: Buffer, path: Option<PathBuf>) -> Self {
         let id = EditorId(0);
-        let path = path.map(located);
+        let path = path.map(|path| locate(Path::new("."), path.clone()).unwrap_or(path));
         let mut app = Self {
             editors: vec![fresh_editor(id, fresh_tab(TabId(0), buffer, path))],
             active: id,
@@ -573,6 +586,9 @@ impl App {
             diff_generation: 1,
             diff_inflight: HashMap::new(),
             diff_announce: None,
+            sessions: Vec::new(),
+            lsp_resetting: false,
+            tree_scan: None,
         };
         app.configure_syntax(TabId(0));
         app
@@ -743,6 +759,19 @@ impl App {
         }
     }
 
+    /// Reads `session.json` into memory. The command bar lists these folders without touching disk.
+    pub fn load_sessions(&mut self, path: &Path) {
+        self.sessions = crate::session::read_all(path);
+    }
+
+    /// The remembered session for `root`, if this process has loaded one.
+    pub fn saved_session(&self, root: &Path) -> Option<crate::session::Session> {
+        self.sessions
+            .iter()
+            .find(|session| crate::session::same_directory(&session.root, root))
+            .cloned()
+    }
+
     /// Folder, saved files, cursors, splits, and the sidebar. Untitled text is left out.
     pub fn session_snapshot(&self) -> Option<crate::session::Session> {
         let root = std::path::absolute(&self.explorer.root).ok()?;
@@ -815,10 +844,18 @@ impl App {
     /// Replaces the editors with `session`. Files that are gone are skipped.
     /// Each remaining file is queued to load off the UI thread.
     pub fn restore_session(&mut self, session: crate::session::Session) {
-        if session.version != crate::session::VERSION || !session.root.is_dir() {
-            return;
-        }
         self.jobs.clear();
+        self.install_session(session);
+    }
+
+    /// Replaces the editors with `session`. Files that are gone are skipped.
+    /// Each remaining file is queued to load off the UI thread.
+    /// Jobs already queued, such as the session write, stay in place.
+    /// `false` when the session is the wrong version or its folder is gone.
+    fn install_session(&mut self, session: crate::session::Session) -> bool {
+        if session.version != crate::session::VERSION || !session.root.is_dir() {
+            return false;
+        }
         let mut explorer = Explorer::new(session.root.clone());
         explorer.open = session.sidebar.open;
         explorer.focused = session.sidebar_focused && session.sidebar.open;
@@ -834,8 +871,6 @@ impl App {
             self.sidebar_width = session.sidebar.width;
         }
         self.editors.clear();
-        self.next_id = 0;
-        self.next_tab = 0;
         let mut loads = Vec::new();
         let (layout, selected) = self.materialize_session(&session.layout, &mut loads);
         self.layout = layout;
@@ -854,11 +889,9 @@ impl App {
             );
         }
         if self.explorer.open {
-            self.explorer.loading = true;
-            let root = self.explorer.root.clone();
-            self.jobs.push(Job::ScanTree(root.clone()));
-            self.jobs.push(Job::GitStatus(root));
+            self.queue_tree_scan(true);
         }
+        true
     }
 
     fn materialize_session(
@@ -1001,11 +1034,20 @@ impl App {
     /// Results from background jobs. Stale results for a different root are dropped.
     pub fn handle_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::TreeScanned { root, entries } if root == self.explorer.root => {
+            AppEvent::TreeScanned { root, entries } if self.same_root(&root) => {
                 self.explorer.set_entries(entries);
                 self.finish_reveal_file();
+                if self.file_find.is_some() {
+                    self.refresh_file_find();
+                }
+                if self.file_picker.is_some() {
+                    self.queue_index();
+                }
+                if self.take_tree_follow_up(&root) {
+                    self.queue_tree_scan(true);
+                }
             }
-            AppEvent::GitStatus { root, statuses } if root == self.explorer.root => {
+            AppEvent::GitStatus { root, statuses } if self.same_root(&root) => {
                 self.explorer.git = statuses;
             }
             AppEvent::FileSaved {
@@ -1031,21 +1073,21 @@ impl App {
                 stamp,
                 result,
             } => self.finish_stat(tab_id, path, stamp, result),
-            AppEvent::FilesChanged { root, outcome } if root == self.explorer.root => {
+            AppEvent::FilesChanged { root, outcome } if self.same_root(&root) => {
                 self.finish_files(outcome);
             }
             AppEvent::FilesFound {
                 root,
                 generation,
                 hits,
-            } if root == self.explorer.root => self.finish_file_find(generation, hits),
+            } if self.same_root(&root) => self.finish_file_find(generation, hits),
             AppEvent::FilesReplaced {
                 root,
                 generation,
                 matches,
                 files,
                 errors,
-            } if root == self.explorer.root => {
+            } if self.same_root(&root) => {
                 self.finish_file_replace(generation, matches, files, errors)
             }
             AppEvent::FilesPatched { files, errors } => {
@@ -1073,7 +1115,7 @@ impl App {
                 generation,
                 files,
                 truncated,
-            } if root == self.explorer.root && generation == self.index_generation => {
+            } if self.same_root(&root) && generation == self.index_generation => {
                 self.file_index = Some(CachedFiles {
                     root,
                     files: Arc::new(files),
@@ -1122,10 +1164,20 @@ impl App {
                 result,
                 open,
             } => {
-                if let Some(path) = open {
-                    self.open_path(path);
+                if turn == self.agent.turn && self.agent.busy {
+                    if let Some(path) = open {
+                        self.open_path(path);
+                    }
                 }
                 self.reply_tool(turn, call_id, result);
+            }
+            AppEvent::SessionSaved {
+                result: Err(message),
+            } => {
+                self.message = Some(message);
+            }
+            AppEvent::GitBranch { root, name } if self.same_root(&root) => {
+                self.branch = name;
             }
             _ => {}
         }
@@ -1340,7 +1392,7 @@ impl App {
         let cached = self
             .file_index
             .as_ref()
-            .is_some_and(|index| index.root == self.explorer.root);
+            .is_some_and(|index| self.same_root(&index.root));
         self.file_picker = Some(FilePicker {
             scanning: !cached,
             refreshing: cached,
@@ -1407,11 +1459,11 @@ impl App {
         self.jobs
             .retain(|job| !matches!(job, Job::IndexFiles { .. }));
         self.jobs.push(Job::IndexFiles { root, generation });
+        let cached = self
+            .file_index
+            .as_ref()
+            .is_some_and(|index| self.same_root(&index.root));
         if let Some(picker) = &mut self.file_picker {
-            let cached = self
-                .file_index
-                .as_ref()
-                .is_some_and(|index| index.root == self.explorer.root);
             picker.scanning = !cached && picker.rows.is_empty();
             picker.refreshing = cached || !picker.rows.is_empty();
         }
@@ -1428,7 +1480,7 @@ impl App {
         let ready = self
             .file_index
             .as_ref()
-            .is_some_and(|index| index.root == self.explorer.root)
+            .is_some_and(|index| self.same_root(&index.root))
             && self.file_picker.is_some();
         if !ready {
             return;
@@ -1593,10 +1645,67 @@ impl App {
             return;
         }
         self.explorer.open = true;
-        self.explorer.loading = true;
+        self.queue_tree_scan(true);
+    }
+
+    /// The folder watcher, after its quiet period, asks for one scan of `root`.
+    /// A different folder and a closed sidebar are ignored.
+    pub fn note_fs_changed(&mut self, root: &Path) {
+        if !self.same_root(root) {
+            return;
+        }
+        self.queue_tree_scan(true);
+    }
+
+    /// Queues one tree scan and one git status.
+    /// A scan already in the queue is left alone, because it has not read the disk yet.
+    /// A scan that is already running remembers one later pass in `tree_scan.dirty`.
+    /// `Loading…` is only shown when the tree has no rows yet.
+    /// `require_open` skips the scan while the sidebar is closed.
+    fn queue_tree_scan(&mut self, require_open: bool) {
+        if require_open && !self.explorer.open {
+            return;
+        }
         let root = self.explorer.root.clone();
+        let queued = self.jobs.iter().any(
+            |job| matches!(job, Job::ScanTree(path) if crate::session::same_directory(path, &root)),
+        );
+        if queued {
+            return;
+        }
+        if let Some(scan) = &mut self.tree_scan
+            && crate::session::same_directory(&scan.root, &root)
+        {
+            scan.dirty = true;
+            return;
+        }
+        self.tree_scan = Some(TreeScan {
+            root: root.clone(),
+            dirty: false,
+        });
+        if self.explorer.entries().is_empty() {
+            self.explorer.loading = true;
+        }
         self.jobs.push(Job::ScanTree(root.clone()));
-        self.jobs.push(Job::GitStatus(root));
+        let status_queued = self.jobs.iter().any(|job| {
+            matches!(job, Job::GitStatus(path) if crate::session::same_directory(path, &root))
+        });
+        if !status_queued {
+            self.jobs.push(Job::GitStatus(root));
+        }
+    }
+
+    /// Clears the tracker for this scan. `true` when one more scan should run.
+    fn take_tree_follow_up(&mut self, root: &Path) -> bool {
+        let matches = self
+            .tree_scan
+            .as_ref()
+            .is_some_and(|scan| crate::session::same_directory(&scan.root, root));
+        if !matches {
+            return false;
+        }
+        let dirty = self.tree_scan.take().is_some_and(|scan| scan.dirty);
+        dirty && self.explorer.open
     }
 
     /// Open windows, placed the way the screen draws them. A closed sidebar is absent.
@@ -2555,10 +2664,15 @@ impl App {
         };
         let files = self.command_bar.as_ref().is_some_and(|bar| bar.files);
         let recent = self.recent_for(context);
+        let folders = self.workspace_choices();
+        let listing = folders.is_some();
         let Some(bar) = self.command_bar.as_mut() else {
             return;
         };
-        let count = suggestions(&bar.input, recent, context, files).len();
+        let count = folders
+            .as_ref()
+            .map(|rows| rows.len())
+            .unwrap_or_else(|| suggestions(&bar.input, recent, context, files).len());
         match action {
             CommandBarAction::Insert(text) => {
                 bar.input.push_str(&text);
@@ -2576,7 +2690,8 @@ impl App {
             }
             CommandBarAction::SelectNext | CommandBarAction::SelectPrev => {}
             CommandBarAction::Complete
-                if context == CommandContext::Editor && is_line_number(bar.query()) => {}
+                if listing
+                    || (context == CommandContext::Editor && is_line_number(bar.query())) => {}
             CommandBarAction::Complete => {
                 if let Some(spec) = bar.selected(recent) {
                     bar.input = completed_input(spec);
@@ -2610,6 +2725,22 @@ impl App {
         ghost_suffix(typed, &self.name_candidates(source))
     }
 
+    /// Saved folders while `workspace` is waiting for a path. `None` for every other command.
+    pub fn workspace_choices(&self) -> Option<Vec<String>> {
+        let bar = self.command_bar.as_ref()?;
+        let spec = find_command(&bar.query().to_lowercase(), bar.context, bar.files)?;
+        if spec.id != CommandId::Workspace || bar.argument_slot().is_none() {
+            return None;
+        }
+        let typed = bar.argument().unwrap_or("");
+        Some(
+            self.name_candidates(NameSource::Workspace)
+                .into_iter()
+                .filter(|path| typed.is_empty() || name_prefix(typed, path))
+                .collect(),
+        )
+    }
+
     fn name_candidates(&self, source: NameSource) -> Vec<String> {
         let entries = self.explorer.entries();
         match source {
@@ -2621,6 +2752,14 @@ impl App {
             NameSource::Path => entries
                 .iter()
                 .map(|entry| display_rel(&entry.path))
+                .collect(),
+            NameSource::Workspace => self
+                .sessions
+                .iter()
+                .filter(|session| {
+                    !crate::session::same_directory(&session.root, &self.explorer.root)
+                })
+                .map(|session| session.root.display().to_string())
                 .collect(),
             NameSource::Sibling => {
                 let Some(selected) = self.explorer.selected() else {
@@ -2906,10 +3045,13 @@ impl App {
         texts
     }
 
+    /// The same folder, including when one path is `E:\Work\app` and the other differs by case or a `\\?\` prefix that `absolute` folds.
+    fn same_root(&self, root: &Path) -> bool {
+        root == self.explorer.root || crate::session::same_directory(root, &self.explorer.root)
+    }
+
     fn relative_to_root(&self, path: &Path) -> Option<PathBuf> {
-        let root = std::path::absolute(&self.explorer.root).ok()?;
-        let path = std::path::absolute(path).ok()?;
-        path.strip_prefix(root).ok().map(PathBuf::from)
+        relative_to(&self.explorer.root, path)
     }
 
     /// Selects the first match of `query`. An empty query leaves the cursor where it is.
@@ -3359,6 +3501,10 @@ impl App {
         }
 
         if let Some(spec) = find_command(&name, context, files) {
+            if spec.id == CommandId::Workspace {
+                self.submit_workspace(arg, context);
+                return;
+            }
             self.dispatch_spec(spec, arg, context);
             return;
         }
@@ -3371,6 +3517,37 @@ impl App {
             return;
         }
         self.message = Some(format!("Unknown command: {name}"));
+    }
+
+    /// `workspace` with no path lists saved folders. A typed path opens that folder.
+    fn submit_workspace(&mut self, arg: Option<String>, context: CommandContext) {
+        let Some(arg) = arg else {
+            if let Some(bar) = self.command_bar.as_mut() {
+                bar.input = "workspace ".to_string();
+                bar.selected = 0;
+                bar.prompted = Some(CommandId::Workspace);
+            }
+            return;
+        };
+        let chosen = if arg.is_empty() {
+            let rows = self.workspace_choices().unwrap_or_default();
+            let index = self
+                .command_bar
+                .as_ref()
+                .map(|bar| bar.selected)
+                .unwrap_or(0);
+            match rows.get(index.min(rows.len().saturating_sub(1))) {
+                Some(path) if !rows.is_empty() => path.clone(),
+                _ => {
+                    self.message = Some("Enter a folder".to_string());
+                    return;
+                }
+            }
+        } else {
+            arg
+        };
+        self.command_bar = None;
+        self.finish_command(spec(CommandId::Workspace), Some(&chosen), context);
     }
 
     fn dispatch_spec(&mut self, spec: &CommandSpec, arg: Option<String>, context: CommandContext) {
@@ -3481,6 +3658,7 @@ impl App {
             }
             CommandId::Agent => self.toggle_agent(),
             CommandId::FilePicker => self.open_file_picker(),
+            CommandId::Workspace => self.request_workspace(arg.unwrap_or(""))?,
             CommandId::Diff => self.toggle_diff(),
             CommandId::Focus => self.toggle_focus(),
         }
@@ -3806,11 +3984,7 @@ impl App {
         }
         self.message = Some(outcome.error.unwrap_or(outcome.summary));
         self.refresh_picker_index();
-        if self.explorer.open {
-            let root = self.explorer.root.clone();
-            self.jobs.push(Job::ScanTree(root.clone()));
-            self.jobs.push(Job::GitStatus(root));
-        }
+        self.queue_tree_scan(true);
     }
 
     fn retarget_editors(&mut self, from: &Path, to: &Path) {
@@ -3861,14 +4035,9 @@ impl App {
             });
             return Ok(());
         };
+        let path = locate(&self.explorer.root, path)?;
         let after = follow.map(pending_after).unwrap_or(AfterSave::Nothing);
-        self.queue_save(
-            self.active,
-            self.active_tab_id(),
-            located(path),
-            after,
-            true,
-        );
+        self.queue_save(self.active, self.active_tab_id(), path, after, true);
         Ok(())
     }
 
@@ -4212,6 +4381,180 @@ impl App {
         })
     }
 
+    fn request_workspace(&mut self, raw: &str) -> Result<(), String> {
+        let path = resolve_workspace(&self.explorer.root, raw)?;
+        if crate::session::same_directory(&path, &self.explorer.root) {
+            self.message = Some("Already here".to_string());
+            return Ok(());
+        }
+        self.remember_sidebar();
+        self.quit_skipped.clear();
+        self.begin_workspace(path);
+        Ok(())
+    }
+
+    fn begin_workspace(&mut self, path: PathBuf) {
+        self.continue_workspace(path);
+    }
+
+    fn continue_workspace(&mut self, path: PathBuf) {
+        if let Some(id) = self.next_unsaved_for_quit() {
+            self.show_prompt(id, Pending::Workspace(path));
+        } else {
+            self.finish_workspace(path);
+        }
+    }
+
+    /// Writes the folder being left, then opens `path` and restores its session.
+    fn finish_workspace(&mut self, path: PathBuf) {
+        self.prompt_restore_sidebar = false;
+        self.quit_skipped.clear();
+        self.resume = None;
+        self.queue_session_save();
+        self.jobs
+            .retain(|job| matches!(job, Job::SaveSession { .. }));
+        self.reset_workspace_runtime();
+        let restored = self
+            .saved_session(&path)
+            .is_some_and(|saved| self.install_session(saved));
+        if !restored {
+            self.install_empty_workspace(&path);
+        }
+        self.detach_outside_files();
+        self.branch = None;
+        self.queue_workspace_refresh();
+        let name = file_label(Some(&self.explorer.root));
+        self.message = Some(format!("Opened {name}"));
+    }
+
+    /// A file from the folder just left must not stay open in the folder just opened.
+    fn detach_outside_files(&mut self) {
+        let root = self.explorer.root.clone();
+        let stale: Vec<TabId> = self
+            .editors
+            .iter()
+            .flat_map(|editor| editor.tabs.iter())
+            .filter(|tab| {
+                tab.path
+                    .as_deref()
+                    .is_some_and(|path| !inside_workspace(&root, path))
+            })
+            .map(|tab| tab.id)
+            .collect();
+        for id in stale {
+            let blank = self.style_buffer(Buffer::new());
+            let Some(tab) = self.find_tab_mut(id) else {
+                continue;
+            };
+            let width = tab.view.width;
+            let height = tab.view.height;
+            tab.buffer = blank;
+            tab.path = None;
+            tab.dirty = false;
+            tab.saved_fingerprint = tab.buffer.fingerprint();
+            tab.epoch = tab.epoch.wrapping_add(1);
+            tab.load_generation = tab.load_generation.wrapping_add(1);
+            tab.disk = None;
+            tab.loading = false;
+            tab.saving = false;
+            tab.stat_pending = false;
+            tab.readable = true;
+            tab.noted_missing = false;
+            tab.lsp_edits.clear();
+            tab.syntax = None;
+            tab.diff = None;
+            tab.view.resize(width as u16, height as u16);
+        }
+    }
+
+    fn queue_session_save(&mut self) {
+        let Some(session) = self.session_snapshot() else {
+            return;
+        };
+        self.sessions
+            .retain(|saved| !crate::session::same_directory(&saved.root, &session.root));
+        self.sessions.insert(0, session.clone());
+        self.sessions.truncate(20);
+        let Some(dir) = self.appearance.config_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        self.jobs.push(Job::SaveSession {
+            path: crate::session::file_in(&dir),
+            session,
+        });
+    }
+
+    fn reset_workspace_runtime(&mut self) {
+        self.close_picker();
+        self.find_mode = None;
+        self.replace_mode = None;
+        self.file_find = None;
+        self.reveal_find = None;
+        self.reveal_file = None;
+        self.replace_notice = None;
+        self.settings = None;
+        self.about = false;
+        self.focus_mode = false;
+        self.command_bar = None;
+        self.prompt = None;
+        self.recent_files.clear();
+        self.file_index = None;
+        self.diff_inflight.clear();
+        self.diff_announce = None;
+        self.diff_generation = self.diff_generation.wrapping_add(1);
+        self.reset_agent();
+        self.lsp_docs.clear();
+        self.diagnostics = Default::default();
+        self.semantic = Default::default();
+        self.lsp_servers.clear();
+        self.nav = lsp_nav::Nav::default();
+        self.lsp_nav_requests.clear();
+        self.lsp_requests.clear();
+        self.lsp_requests.push(crate::lsp::LspRequest::Reset);
+        self.lsp_resetting = true;
+    }
+
+    fn reset_agent(&mut self) {
+        let turn = self.agent.turn;
+        if self.agent.busy {
+            if let Some(tx) = &self.agent_tx {
+                let _ = tx.send(crate::agent::AgentCommand::Cancel { id: turn });
+            }
+        }
+        self.agent = crate::agent::Panel::default();
+        self.agent.turn = turn.wrapping_add(1);
+    }
+
+    fn install_empty_workspace(&mut self, path: &Path) {
+        let open = self.explorer.open;
+        let mut explorer = Explorer::new(path.to_path_buf());
+        explorer.open = open;
+        self.explorer = explorer;
+        self.editors.clear();
+        let id = EditorId(self.next_id);
+        self.next_id += 1;
+        let tab = self.alloc_tab(self.style_buffer(Buffer::new()), None);
+        self.editors = vec![Editor {
+            id,
+            tabs: vec![tab],
+            active: 0,
+        }];
+        self.layout = Layout::Leaf(id);
+        self.active = id;
+    }
+
+    fn queue_workspace_refresh(&mut self) {
+        self.queue_tree_scan(false);
+        let root = self.explorer.root.clone();
+        if !self
+            .jobs
+            .iter()
+            .any(|job| matches!(job, Job::GitBranch(path) if path == &root))
+        {
+            self.jobs.push(Job::GitBranch(root));
+        }
+    }
+
     fn request_quit(&mut self) {
         self.remember_sidebar();
         self.quit_skipped.clear();
@@ -4346,6 +4689,14 @@ impl App {
                 ),
                 confirm_buttons(),
             ),
+            Pending::Workspace(path) => (
+                " Unsaved ".to_string(),
+                format!(
+                    "Save changes to {name} before opening {}?",
+                    file_label(Some(path))
+                ),
+                confirm_buttons(),
+            ),
             Pending::Delete(_) => (
                 " Delete ".to_string(),
                 "Delete?".to_string(),
@@ -4468,6 +4819,10 @@ impl App {
                     }
                 }
                 Pending::Open(path) => self.queue_load(self.active, tab_id, path),
+                Pending::Workspace(path) => {
+                    self.quit_skipped.push(tab_id);
+                    self.continue_workspace(path);
+                }
                 Pending::Reload { stamp, .. } => self.keep_external(tab_id, stamp),
                 Pending::Delete(_) => {
                     self.message = Some("Delete cancelled".to_string());
@@ -4553,7 +4908,14 @@ impl App {
         };
 
         let applied = self.find_tab(tab_id).is_some_and(|tab| tab.epoch == epoch);
-        if applied {
+        let keep_path = applied
+            && (inside_workspace(&self.explorer.root, &path)
+                || self.find_tab(tab_id).is_some_and(|tab| {
+                    tab.path
+                        .as_deref()
+                        .is_some_and(|open| same_path(open, &path))
+                }));
+        if keep_path {
             let tab = self.find_tab_mut(tab_id).expect("tab exists");
             tab.path = Some(path.clone());
             tab.saved_fingerprint = fingerprint;
@@ -4564,17 +4926,14 @@ impl App {
             self.message = Some(format!("Saved {}", path.display()));
             self.notify_lsp_saved(tab_id);
         }
-        if self.explorer.open {
-            let root = self.explorer.root.clone();
-            self.jobs.push(Job::ScanTree(root.clone()));
-            self.jobs.push(Job::GitStatus(root));
-        }
+        self.queue_tree_scan(true);
         self.refresh_picker_index();
 
         if !applied {
             match after {
                 AfterSave::Quit => self.continue_quit(),
                 AfterSave::CloseBatch(batch) => self.continue_close_batch(batch),
+                AfterSave::Workspace(path) => self.continue_workspace(path),
                 AfterSave::Nothing | AfterSave::Close | AfterSave::Open(_) => {}
             }
             return;
@@ -4602,6 +4961,10 @@ impl App {
                 }
             }
             AfterSave::Open(path) if dirty => self.show_prompt(tab_id, Pending::Open(path)),
+            AfterSave::Workspace(path) if dirty => {
+                self.show_prompt(tab_id, Pending::Workspace(path))
+            }
+            AfterSave::Workspace(path) => self.continue_workspace(path),
             AfterSave::Open(path) => {
                 if let Some(pane) = self.pane_of(tab_id) {
                     self.queue_load(pane, tab_id, path);
@@ -4936,14 +5299,53 @@ fn ensure_inside(root: &Path, path: &Path, allow_root: bool) -> Result<PathBuf, 
         std::path::absolute(root).map_err(|err| format!("Cannot resolve the workspace: {err}"))?;
     let path = std::path::absolute(path)
         .map_err(|err| format!("Cannot resolve {}: {err}", path.display()))?;
-    if path == root {
+    if crate::session::same_directory(&root, &path) {
         if allow_root {
             return Ok(path);
         }
         return Err("That path is the workspace itself".to_string());
     }
-    if !path.starts_with(&root) {
+    if crate::services::tree::relative_from(&root, &path).is_none() {
         return Err("That path is outside the workspace".to_string());
+    }
+    Ok(path)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+}
+
+/// `~` and `~/rest` expand to the home folder. Every other path is left as typed.
+fn expand_user(arg: &str) -> Result<PathBuf, String> {
+    if arg == "~" {
+        return home_dir().ok_or_else(|| "No home folder".to_string());
+    }
+    if let Some(rest) = arg.strip_prefix("~/").or_else(|| arg.strip_prefix("~\\")) {
+        let home = home_dir().ok_or_else(|| "No home folder".to_string())?;
+        return Ok(home.join(rest));
+    }
+    Ok(PathBuf::from(arg))
+}
+
+/// A folder to open. Absolute paths, `~`, and paths relative to `current` are accepted.
+fn resolve_workspace(current: &Path, arg: &str) -> Result<PathBuf, String> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Err("Enter a folder".to_string());
+    }
+    let raw = expand_user(arg)?;
+    let joined = if raw.is_absolute() {
+        raw
+    } else {
+        current.join(raw)
+    };
+    let path = std::path::absolute(&joined)
+        .map_err(|err| format!("Cannot resolve {}: {err}", joined.display()))?;
+    if !path.is_dir() {
+        return Err(format!("Not a folder: {}", path.display()));
     }
     Ok(path)
 }
@@ -4972,27 +5374,21 @@ fn first_leaf(layout: &Layout) -> EditorId {
 fn relative_to(root: &Path, path: &Path) -> Option<PathBuf> {
     let root = std::path::absolute(root).ok()?;
     let path = std::path::absolute(path).ok()?;
-    path.strip_prefix(&root).ok().map(Path::to_path_buf)
+    crate::services::tree::relative_from(&root, &path)
 }
 
 fn covers(parent: &Path, child: &Path) -> bool {
-    match (std::path::absolute(parent), std::path::absolute(child)) {
-        (Ok(parent), Ok(child)) => child == parent || child.starts_with(&parent),
-        _ => false,
-    }
+    inside_workspace(parent, child)
 }
 
 fn retarget_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
     let path = std::path::absolute(path).ok()?;
     let from = std::path::absolute(from).ok()?;
     let to = std::path::absolute(to).ok()?;
-    if path == from {
+    if crate::session::same_directory(&path, &from) {
         return Some(to);
     }
-    path.strip_prefix(&from)
-        .ok()
-        .filter(|rel| !rel.as_os_str().is_empty())
-        .map(|rel| to.join(rel))
+    crate::services::tree::relative_from(&from, &path).map(|rel| to.join(rel))
 }
 
 fn pending_after(action: Pending) -> AfterSave {
@@ -5001,6 +5397,7 @@ fn pending_after(action: Pending) -> AfterSave {
         Pending::Close => AfterSave::Close,
         Pending::CloseBatch(batch) => AfterSave::CloseBatch(batch),
         Pending::Open(path) => AfterSave::Open(path),
+        Pending::Workspace(path) => AfterSave::Workspace(path),
         Pending::Delete(_) | Pending::Reload { .. } => AfterSave::Nothing,
     }
 }
@@ -5012,6 +5409,7 @@ fn pending_from_after(after: AfterSave) -> Option<Pending> {
         AfterSave::Close => Some(Pending::Close),
         AfterSave::CloseBatch(batch) => Some(Pending::CloseBatch(batch)),
         AfterSave::Open(path) => Some(Pending::Open(path)),
+        AfterSave::Workspace(path) => Some(Pending::Workspace(path)),
     }
 }
 
@@ -5033,9 +5431,23 @@ fn file_label(path: Option<&Path>) -> String {
         .unwrap_or_else(|| "[No Name]".to_string())
 }
 
-/// A bare name such as `hello.rs` is stored from the current directory, so the status bar can show the folder.
-fn located(path: PathBuf) -> PathBuf {
-    std::path::absolute(&path).unwrap_or(path)
+/// `path` joined onto the open folder when it is relative. An absolute path is kept.
+/// A relative path that climbs out of `root` is an error, so a save stays in that folder.
+fn locate(root: &Path, path: PathBuf) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return std::path::absolute(&path)
+            .map_err(|err| format!("Cannot resolve {}: {err}", path.display()));
+    }
+    ensure_inside(root, &root.join(path), false)
+}
+
+/// True when `path` is `root` or a file inside it. Windows ignores case.
+fn inside_workspace(root: &Path, path: &Path) -> bool {
+    let (Ok(root), Ok(path)) = (std::path::absolute(root), std::path::absolute(path)) else {
+        return false;
+    };
+    crate::session::same_directory(&root, &path)
+        || crate::services::tree::relative_from(&root, &path).is_some()
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -5929,6 +6341,52 @@ mod tests {
     }
 
     #[test]
+    fn an_outside_change_scans_an_open_tree_once_and_keeps_the_rows() {
+        let root = PathBuf::from("/work/repo");
+        let mut app = App::new(Buffer::new(), None);
+        app.explorer = Explorer::new(root.clone());
+        app.explorer.open = true;
+        app.explorer.set_entries(vec![file_entry("keep.rs")]);
+        assert_eq!(app.explorer.selected(), Some(Path::new("keep.rs")));
+
+        app.note_fs_changed(Path::new("/elsewhere"));
+        assert!(app.take_jobs().is_empty());
+
+        app.explorer.open = false;
+        app.note_fs_changed(&root);
+        assert!(app.take_jobs().is_empty());
+        app.explorer.open = true;
+
+        app.note_fs_changed(&root);
+        app.note_fs_changed(&root);
+        assert_eq!(
+            app.take_jobs(),
+            [Job::ScanTree(root.clone()), Job::GitStatus(root.clone())]
+        );
+        assert!(!app.explorer.loading);
+        assert_eq!(app.explorer.selected(), Some(Path::new("keep.rs")));
+
+        app.note_fs_changed(&root);
+        assert!(app.take_jobs().is_empty());
+        app.handle_event(AppEvent::TreeScanned {
+            root: root.clone(),
+            entries: vec![file_entry("fresh.rs"), file_entry("keep.rs")],
+        });
+        assert!(!app.explorer.loading);
+        assert_eq!(app.explorer.selected(), Some(Path::new("keep.rs")));
+        assert!(
+            app.explorer
+                .entries()
+                .iter()
+                .any(|entry| entry.name == "fresh.rs")
+        );
+        assert_eq!(
+            app.take_jobs(),
+            [Job::ScanTree(root.clone()), Job::GitStatus(root)]
+        );
+    }
+
+    #[test]
     fn focus_shows_one_buffer_and_leaves_the_rest_in_place() {
         let mut app = App::new(Buffer::from_text("alpha"), None);
         run(&mut app, "explorer");
@@ -6228,8 +6686,11 @@ mod tests {
             panic!("expected a save job, got {jobs:?}");
         };
         assert!(path.is_absolute(), "{path:?}");
+        assert_eq!(
+            path.parent(),
+            Some(std::path::absolute(&dir).unwrap().as_path())
+        );
         assert!(path.ends_with("hello.rs"));
-        assert!(path.parent().is_some_and(|parent| parent.is_absolute()));
 
         let saved = dir.join("note.rs");
         run(&mut app, &format!("save {}", saved.display()));
@@ -6759,6 +7220,7 @@ mod tests {
             names,
             [
                 "file-picker",
+                "workspace",
                 "find",
                 "replace",
                 "select",
@@ -7196,5 +7658,202 @@ mod tests {
             app.message
         );
         assert!(app.is_dirty());
+    }
+
+    fn leaf_session(root: &Path, file: &str) -> crate::session::Session {
+        crate::session::Session {
+            version: crate::session::VERSION,
+            root: root.to_path_buf(),
+            sidebar: crate::session::Sidebar {
+                open: true,
+                width: 30,
+                expanded: Vec::new(),
+            },
+            sidebar_focused: false,
+            layout: crate::session::SessionLayout::Leaf {
+                selected: true,
+                active: 0,
+                tabs: vec![crate::session::SessionTab {
+                    path: file.to_string(),
+                    line: 0,
+                    col: 0,
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn workspace_opens_the_saved_folder_and_drops_the_old_tree() {
+        let (left, _left_guard) = temp_dir();
+        let (right, _right_guard) = temp_dir();
+        std::fs::write(right.join("note.txt"), "from the other folder\n").unwrap();
+        let mut app = App::new(Buffer::from_text("here\n"), None);
+        app.explorer = Explorer::new(left.clone());
+        app.explorer.open = true;
+        app.sessions.push(leaf_session(&right, "note.txt"));
+
+        run(&mut app, &format!("workspace {}", right.display()));
+        assert_eq!(app.explorer.root, std::path::absolute(&right).unwrap());
+        let opened = app.message.clone();
+        assert!(
+            opened
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Opened ")),
+            "{opened:?}"
+        );
+        assert!(crate::session::same_directory(&app.sessions[0].root, &left));
+
+        let requests = app.take_lsp_requests();
+        assert!(matches!(
+            requests.first(),
+            Some(crate::lsp::LspRequest::Reset)
+        ));
+        app.handle_lsp(crate::lsp::LspEvent::Notice("rust-analyzer stopped".into()));
+        assert_eq!(app.message, opened);
+        app.handle_lsp(crate::lsp::LspEvent::ResetDone);
+
+        app.handle_event(AppEvent::TreeScanned {
+            root: left,
+            entries: vec![file_entry("secret.txt")],
+        });
+        assert!(
+            app.explorer
+                .entries()
+                .iter()
+                .all(|entry| entry.name != "secret.txt")
+        );
+
+        finish_jobs(&mut app);
+        assert_eq!(app.buffer().rope().to_string(), "from the other folder\n");
+    }
+
+    #[test]
+    fn workspace_asks_before_discarding_unsaved_edits() {
+        let (left, _left_guard) = temp_dir();
+        let (right, _right_guard) = temp_dir();
+        let mut app = App::new(Buffer::from_text("old\n"), None);
+        app.explorer = Explorer::new(left.clone());
+        app.handle(SemanticAction::InsertChar('!'));
+
+        run(&mut app, &format!("workspace {}", right.display()));
+        assert_eq!(app.focus(), Focus::Prompt);
+        assert_eq!(app.explorer.root, left);
+        app.handle(SemanticAction::Prompt(PromptAction::Cancel));
+        assert_eq!(app.explorer.root, left);
+        assert!(app.is_dirty());
+        assert_eq!(app.buffer().rope().to_string(), "!old\n");
+
+        run(&mut app, &format!("workspace {}", right.display()));
+        app.handle(SemanticAction::Prompt(PromptAction::Accelerator('n')));
+        assert_eq!(app.explorer.root, std::path::absolute(&right).unwrap());
+        assert_eq!(app.buffer().rope().to_string(), "");
+    }
+
+    #[test]
+    fn workspace_rejects_the_current_folder_and_a_missing_path() {
+        let (left, _left_guard) = temp_dir();
+        let mut app = App::new(Buffer::new(), None);
+        app.explorer = Explorer::new(left.clone());
+
+        run(&mut app, &format!("workspace {}", left.display()));
+        assert_eq!(app.message.as_deref(), Some("Already here"));
+        assert_eq!(app.explorer.root, left);
+
+        run(&mut app, "workspace missing-folder");
+        assert!(
+            app.message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Not a folder")),
+            "{:?}",
+            app.message
+        );
+        assert_eq!(app.explorer.root, left);
+
+        let child = left.join("child");
+        std::fs::create_dir(&child).unwrap();
+        run(&mut app, "workspace child");
+        assert_eq!(app.explorer.root, std::path::absolute(&child).unwrap());
+    }
+
+    #[test]
+    fn workspace_lists_saved_folders_and_writes_the_one_being_left() {
+        let (left, _left_guard) = temp_dir();
+        let (right, _right_guard) = temp_dir();
+        let (config, _config_guard) = temp_dir();
+        std::fs::write(left.join("stay.txt"), "stay\n").unwrap();
+        let mut app = App::new(Buffer::from_text("stay\n"), Some(left.join("stay.txt")));
+        app.explorer = Explorer::new(left.clone());
+        app.load_appearance(&config);
+        app.sessions.push(leaf_session(&right, "note.txt"));
+
+        app.handle(SemanticAction::OpenCommandBar);
+        type_in_bar(&mut app, "workspace");
+        bar(&mut app, CommandBarAction::Submit);
+        assert_eq!(
+            app.command_bar.as_ref().map(|bar| bar.input.as_str()),
+            Some("workspace ")
+        );
+        let choices = app.workspace_choices().unwrap();
+        assert_eq!(choices, vec![right.display().to_string()]);
+        bar(&mut app, CommandBarAction::Submit);
+
+        assert_eq!(app.explorer.root, std::path::absolute(&right).unwrap());
+        let saved = app.take_jobs().into_iter().find_map(|job| match job {
+            Job::SaveSession { path, session } => Some((path, session)),
+            _ => None,
+        });
+        let (path, session) = saved.expect("session write");
+        assert!(crate::session::same_directory(&session.root, &left));
+        app.handle_event(crate::jobs::run(Job::SaveSession { path, session }));
+        let text = std::fs::read_to_string(config.join("session.json")).unwrap();
+        assert!(text.contains("stay.txt"), "{text}");
+    }
+
+    #[test]
+    fn workspace_drops_the_old_file_and_a_late_load_cannot_bring_it_back() {
+        let (left, _left_guard) = temp_dir();
+        let (right, _right_guard) = temp_dir();
+        std::fs::write(right.join("here.txt"), "new folder\n").unwrap();
+        let old = left.join("AGENTS.md");
+        std::fs::write(&old, "from the first folder\n").unwrap();
+        let mut app = opened(&old, "from the first folder\n");
+        app.explorer = Explorer::new(left);
+        let tab_id = app.active_tab_id();
+
+        run(&mut app, &format!("workspace {}", right.display()));
+        assert!(app.path().is_none(), "{:?}", app.path());
+        assert_eq!(app.buffer().rope().to_string(), "");
+
+        app.handle_event(AppEvent::FileLoaded {
+            editor_id: crate::layout::EditorId(0),
+            tab_id,
+            path: old.clone(),
+            generation: 0,
+            kind: crate::jobs::LoadKind::Open {
+                encoding: None,
+                place: None,
+                focus: true,
+            },
+            result: Ok(crate::services::encoding::Decoded {
+                text: "from the first folder\n".to_string(),
+                encoding: TextEncoding::Utf8,
+                stamp: crate::services::encoding::FileStamp {
+                    modified: std::time::SystemTime::UNIX_EPOCH,
+                    len: 0,
+                },
+            }),
+        });
+        assert!(app.path().is_none(), "{:?}", app.path());
+        assert_eq!(app.buffer().rope().to_string(), "");
+
+        run(&mut app, "save note.txt");
+        let saved = app.take_jobs().into_iter().find_map(|job| match job {
+            Job::SaveFile { path, .. } => Some(path),
+            _ => None,
+        });
+        assert_eq!(
+            saved.as_deref().and_then(|path| path.parent()),
+            Some(std::path::absolute(&right).unwrap().as_path())
+        );
     }
 }

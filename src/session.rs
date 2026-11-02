@@ -4,6 +4,7 @@
 //! A start with no path argument restores the entry whose root is the current
 //! directory. A different directory does not reopen another folder's files.
 //! A path argument leaves the file alone until the next quit.
+//! `workspace` writes the folder being left, then restores the folder being opened.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,11 +77,15 @@ pub fn file_in(dir: &Path) -> PathBuf {
     dir.join("session.json")
 }
 
+/// Every saved folder, newest first. A missing or unreadable file is an empty list.
+pub fn read_all(path: &Path) -> Vec<Session> {
+    load_all(path).unwrap_or_default()
+}
+
 /// The saved session for `root`, if this file has one.
 /// An older file with a single session still matches that session's folder.
 pub fn for_directory(path: &Path, root: &Path) -> Option<Session> {
-    load_all(path)
-        .ok()?
+    read_all(path)
         .into_iter()
         .find(|session| same_directory(&session.root, root))
 }

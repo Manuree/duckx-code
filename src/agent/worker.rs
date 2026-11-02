@@ -101,7 +101,7 @@ async fn run_turn(
         };
         if reply.calls.is_empty() {
             let text = if reply.content.trim().is_empty() {
-                "The model returned nothing.".to_string()
+                "The model sent an empty reply. Send it again. A thinking model can spend the whole reply before it writes anything, and a local server drops a tool call whose name is not in the tool list.".to_string()
             } else {
                 reply.content
             };

@@ -193,6 +193,9 @@ impl App {
     }
 
     pub fn handle_lsp(&mut self, event: LspEvent) {
+        if self.lsp_resetting && !matches!(event, LspEvent::ResetDone) {
+            return;
+        }
         match event {
             LspEvent::Diagnostics {
                 path,
@@ -234,6 +237,10 @@ impl App {
                 self.lsp_servers.insert(group, (name, status));
             }
             LspEvent::Notice(text) => self.message = Some(text),
+            LspEvent::ResetDone => {
+                self.lsp_resetting = false;
+                self.lsp_servers.clear();
+            }
             LspEvent::Features {
                 group,
                 hover,

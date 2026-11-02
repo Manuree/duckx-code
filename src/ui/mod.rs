@@ -707,14 +707,16 @@ mod tests {
             lines[first].contains("Open a workspace file by name"),
             "{screen}"
         );
-        assert!(lines[first + 1].contains("find"), "{screen}");
+        assert!(lines[first + 1].contains("workspace"), "{screen}");
+        assert!(lines[first + 1].contains("Open another folder"), "{screen}");
+        assert!(lines[first + 2].contains("find"), "{screen}");
         assert!(
-            lines[first + 1].contains("Find text in the file or explorer"),
+            lines[first + 2].contains("Find text in the file or explorer"),
             "{screen}"
         );
-        assert!(lines[first + 2].contains("replace"), "{screen}");
-        assert!(lines[first + 3].contains("goto <line>"), "{screen}");
-        assert!(first + 3 < lines.len() - 1, "{screen}");
+        assert!(lines[first + 3].contains("replace"), "{screen}");
+        assert!(lines[first + 4].contains("goto <line>"), "{screen}");
+        assert!(first + 4 < lines.len() - 1, "{screen}");
         assert!(!lines.last().unwrap().contains("[No Name]"));
     }
 

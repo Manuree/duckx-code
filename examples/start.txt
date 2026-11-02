@@ -9,3 +9,4 @@ server/    format a file and jump to an error
 about/     open the page with the duck logo
 agent/     ask the assistant to change a file
 reveal/    show this file in the tree
+workspace/ open another folder

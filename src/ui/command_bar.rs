@@ -24,19 +24,21 @@ const NAME_WIDTH: usize = 18;
 /// Hint rows stacked above the status line, one command per row.
 /// `Up` moves up the list and `Down` moves down it.
 pub fn reserved_height(app: &App, width: u16, height: u16) -> u16 {
-    let Some(bar) = &app.command_bar else {
-        return 0;
-    };
-    if width < 20 || height < 3 {
+    if app.command_bar.is_none() || width < 20 || height < 3 {
         return 0;
     }
-    let count = suggestions(
-        &bar.input,
-        app.recent_for(bar.context),
-        bar.context,
-        bar.files,
-    )
-    .len()
+    let count = if let Some(rows) = app.workspace_choices() {
+        rows.len()
+    } else {
+        let bar = app.command_bar.as_ref().expect("bar is open");
+        suggestions(
+            &bar.input,
+            app.recent_for(bar.context),
+            bar.context,
+            bar.files,
+        )
+        .len()
+    }
     .clamp(1, MAX_VISIBLE) as u16;
     count.min(height.saturating_sub(2))
 }
@@ -90,6 +92,22 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let theme = *app.styles();
+    if let Some(paths) = app.workspace_choices() {
+        let selected = app
+            .command_bar
+            .as_ref()
+            .map(|bar| bar.selected)
+            .unwrap_or(0);
+        render_folders(
+            frame,
+            area,
+            &paths,
+            selected,
+            app.argument_ghost().is_some(),
+            &theme,
+        );
+        return;
+    }
     let Some(bar) = &app.command_bar else {
         return;
     };
@@ -123,6 +141,94 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         );
         frame.render_widget(Paragraph::new(line).style(style), rect);
     }
+}
+
+fn render_folders(
+    frame: &mut Frame,
+    area: Rect,
+    paths: &[String],
+    selected: usize,
+    ghost: bool,
+    theme: &UiStyles,
+) {
+    if paths.is_empty() {
+        let rect = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+        frame.render_widget(
+            Paragraph::new(padded(
+                " No saved folder",
+                theme.hint_dim,
+                "",
+                theme.hint,
+                "",
+                theme.hint,
+                theme.hint,
+                area.width as usize,
+            ))
+            .style(theme.hint),
+            rect,
+        );
+        return;
+    }
+    let rows = area.height as usize;
+    let selected = selected.min(paths.len() - 1);
+    for (offset, index) in row_window(paths.len(), selected, rows).enumerate() {
+        let rect = Rect::new(area.x, area.y + offset as u16, area.width, 1);
+        let (line, style) = folder_row(
+            paths[index].as_str(),
+            index == selected,
+            ghost,
+            area.width as usize,
+            theme,
+        );
+        frame.render_widget(Paragraph::new(line).style(style), rect);
+    }
+}
+
+fn folder_row(
+    path: &str,
+    selected: bool,
+    ghost: bool,
+    width: usize,
+    theme: &UiStyles,
+) -> (Line<'static>, Style) {
+    let base = if selected {
+        theme.hint_active
+    } else {
+        theme.hint
+    };
+    let name_style = if selected {
+        theme.hint_active_name
+    } else {
+        theme.hint_dim
+    };
+    let extra_style = if selected {
+        theme.hint_active_dim
+    } else {
+        theme.hint_keys
+    };
+    let head = format!(" {path}");
+    let mut right = String::new();
+    if selected {
+        let keys = if ghost { KEYS_GHOST } else { KEYS };
+        if head.width() + keys.width() + 1 <= width {
+            right = keys.to_string();
+        }
+    }
+    let room = width.saturating_sub(right.width());
+    let head = truncate_width(&head, room);
+    (
+        padded(
+            &head,
+            name_style,
+            "",
+            base,
+            &right,
+            extra_style,
+            base,
+            width,
+        ),
+        base,
+    )
 }
 
 fn empty_row(width: usize, theme: &UiStyles) -> Line<'static> {

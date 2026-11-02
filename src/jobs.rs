@@ -35,6 +35,8 @@ pub enum AfterSave {
     /// Continue `close-all` or `close-view` after this tab is saved.
     CloseBatch(CloseBatch),
     Open(PathBuf),
+    /// Continue opening another folder after this tab is saved.
+    Workspace(PathBuf),
 }
 
 /// How a load should land in the buffer.
@@ -147,13 +149,20 @@ pub enum Job {
         tab_id: TabId,
         request: ParseInput,
     },
-    /// Compare one buffer with `HEAD`. `text` is a rope clone, so the UI thread does not copy it.
+    /// Write this folder's entry in `session.json`.
+    SaveSession {
+        path: PathBuf,
+        session: crate::session::Session,
+    },
+    /// Branch name of the repository that contains `root`.
+    GitBranch(PathBuf),
     /// Read, list, or edit a file that is not open. The result is the tool text.
     AgentDisk {
         turn: u64,
         call_id: String,
         task: crate::agent::DiskTask,
     },
+    /// Compare one buffer with `HEAD`. `text` is a rope clone, so the UI thread does not copy it.
     GitDiff {
         tab_id: TabId,
         path: PathBuf,
@@ -251,6 +260,21 @@ pub enum AppEvent {
         result: String,
         /// A file the assistant just created. The core opens it.
         open: Option<PathBuf>,
+    },
+    SessionSaved {
+        result: Result<(), String>,
+    },
+    GitBranch {
+        root: PathBuf,
+        name: Option<String>,
+    },
+    /// A create, remove, or rename under `root`. The loop debounces these before scanning.
+    FsChanged {
+        root: PathBuf,
+    },
+    /// `notify` could not keep watching `root`. The loop refreshes on its one-second tick instead.
+    FsWatchFailed {
+        root: PathBuf,
     },
 }
 
@@ -400,6 +424,13 @@ pub fn run(job: Job) -> AppEvent {
             path,
             generation,
             fingerprint,
+        },
+        Job::SaveSession { path, session } => AppEvent::SessionSaved {
+            result: crate::session::upsert(&path, &session),
+        },
+        Job::GitBranch(root) => AppEvent::GitBranch {
+            name: git::current_branch(&root),
+            root,
         },
     }
 }

@@ -81,15 +81,15 @@ Traditional editors either require exiting Insert Mode (`Esc` then `:`) or rely 
 ### 3.2 Real-Time Prefix Match & Top-1 Recent Priority
 When the Command Bar opens:
 1. **Top-1 Recent Pinning:** The most recently executed command on this surface is always the first hint whenever it matches the input, including when the input is empty, so a single `Enter` repeats it.
-2. **Importance order:** Every other hint follows a fixed importance rank. Opening and search come first (`file-picker`, `find`, `replace`, `goto`), then everyday edits (`save`, `undo`, `redo`, clipboard), then language tools, then explorer file commands, then layout, then `setting`, `about`, and `quit`. The explorer uses the same rank.
+2. **Importance order:** Every other hint follows a fixed importance rank. Opening and search come first (`file-picker`, `workspace`, `find`, `replace`, `goto`), then everyday edits (`save`, `undo`, `redo`, clipboard), then language tools, then explorer file commands, then layout, then `setting`, `about`, and `quit`. The explorer uses the same rank.
 3. **Zero-Latency Prefix Filtering:** As the user types, commands are filtered in real time by prefix/keyword match with zero debounce delay. Names that start with the input stay ahead of commands that only match a later word. Importance orders each of those groups, and the recent command is then moved to the top.
 4. **Keyboard Flow:**
    * `Up` / `Down`: Cycle through matching command hints.
    * `Tab`: Leave the bar and open the assistant. `Tab` in the assistant opens the command bar again.
-   * `Right`: Accept the dimmed file or folder name drawn after the typed argument. The block cursor sits on the first character of that hint, the same way a shell draws an inline suggestion. `move` hints folders, `rename` hints names in the same folder, and `save` hints files and folders. The closest name is the shortest match, then A–Z. A name already typed in full stays as it is.
+   * `Right`: Accept the dimmed file or folder name drawn after the typed argument. The block cursor sits on the first character of that hint, the same way a shell draws an inline suggestion. `move` hints folders, `rename` hints names in the same folder, `save` hints files and folders, and `workspace` hints saved folders. The closest name is the shortest match, then A–Z. A name already typed in full stays as it is.
    * `Enter`: Execute the selected command immediately and return focus to the editor. An exact command name in the input (e.g. `goto 42`) wins over the highlighted hint. If the command needs an argument that is missing, `Enter` completes the name instead of failing.
    * `Esc` / `F1`: Dismiss the Command Bar without side effects.
-5. **Focus context:** the bar only lists commands for the surface that was focused when it opened. An editor shows editing commands. The explorer shows `file-picker`, `find`, `replace`, `select`, `reveal`, `explorer`, `setting`, `about`, and `quit`. In FILE mode it also shows `move`, `delete`, and `rename`, in that order after `select`. A command from the other surface is not hinted, and typing its name does not run it. A bare line number is `goto` only while an editor is focused. The ★ recent command is the last one run on this surface, and it is the first hint whenever it is listed.
+5. **Focus context:** the bar only lists commands for the surface that was focused when it opened. An editor shows editing commands. The explorer shows `file-picker`, `workspace`, `find`, `replace`, `select`, `reveal`, `explorer`, `setting`, `about`, and `quit`. In FILE mode it also shows `move`, `delete`, and `rename`, in that order after `select`. A command from the other surface is not hinted, and typing its name does not run it. A bare line number is `goto` only while an editor is focused. The ★ recent command is the last one run on this surface, and it is the first hint whenever it is listed.
 
 ### 3.3 Built-in Commands
 
@@ -110,6 +110,7 @@ While an editor is focused:
 | `explorer` | — | `Ctrl + B` |
 | `focus` | — | — |
 | `file-picker` | — | `Ctrl + P` |
+| `workspace` | `<folder>` | — |
 | `split-right` / `split-down` | — | — |
 | `close` | — | — |
 | `close-all` | — | — |
@@ -129,6 +130,7 @@ While the explorer is focused:
 | `rename` | `<name>` | FILE mode only. Rename the focused file or folder. The new name stays in the same folder. |
 | `explorer` | — | Toggle the sidebar (`Ctrl + B`) |
 | `file-picker` | — | Open a workspace file by name (`Ctrl + P`) |
+| `workspace` | `<folder>` | Open another folder. An empty argument lists saved folders. |
 | `setting` (`config` is the same command) | — | Open the settings page |
 | `about` | — | Show the version and the duck logo |
 | `quit` | — | Exit duckx-code |
@@ -180,7 +182,7 @@ Modeled on the snacks.nvim explorer (LazyVim):
 * **`Enter` opens a file** as a tab in the focused window and moves focus there. A file that is already open is focused instead of loaded again. A clean untitled tab is reused; a tab that already has a path, or unsaved edits, stays open and the file loads in a new tab beside it. `Enter` on a folder still expands or collapses it.
 * **File commands:** `select` is listed while the explorer is focused. `move`, `delete`, and `rename` are listed only in FILE mode. Editor commands such as `goto` and `indent` are not listed there. See §3.2.
 * **Marks:** `select` enters FILE mode (the status badge reads `FILE`). `Space` toggles a mark on the focused row (a green `●`). Hold `Shift` and move to cover rows (a green `○` and a selection background); release `Shift` and press `Space` to mark that cover, or to unmark it when every covered row is already marked. `Shift + Space` opens the Command Bar, so `move`, `delete`, and `rename` run without leaving the mode. Movement without `Shift` clears the cover and leaves marks in place. `Esc`, closing the sidebar, or moving focus to an editor returns to NORMAL and clears every mark. A marked folder includes everything inside it. `rename` always renames the focused row.
-* The scan and `git status` run in the background, so the editor stays responsive on large trees (`Loading…` is shown meanwhile). Deletes, renames, and moves also run in the background and then refresh the tree. An open editor follows a rename or move. Deleting a file that is open keeps its text and marks that editor unsaved.
+* The scan and `git status` run in the background, so the editor stays responsive on large trees (`Loading…` is shown meanwhile). A file or folder created, removed, or renamed on disk refreshes an open tree the same way. The rows stay up until that scan arrives, so a later refresh does not flash `Loading…`. Deletes, renames, and moves also run in the background and then refresh the tree. An open editor follows a rename or move. Deleting a file that is open keeps its text and marks that editor unsaved.
 
 ### Editor Windows
 * **`split-right` / `split-down`:** split only the focused editor in half. The new pane is an empty `[No Name]` buffer with its own cursor and undo history, and it receives focus. There is no shortcut yet.
