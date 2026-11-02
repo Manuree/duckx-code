@@ -95,6 +95,12 @@
   * A server that exits after it was ready restarts up to 3 times with 1/2/4 s back-off and reopens its documents; otherwise it is marked failed with the last stderr line. stderr is copied to `logs/lsp-<name>.log` in the config directory. On Windows, servers run with `CREATE_NO_WINDOW` so they cannot change the editor's console modes, and `<name>.cmd` is tried when `<name>` is not found.
   * Quit sends `shutdown`, waits up to 1.5 s for the reply, sends `exit`, waits 0.5 s, then kills what remains.
 
+### 3.6 Assistant worker
+* **Role:** Talks to an OpenAI-compatible server (Ollama at `http://127.0.0.1:11434/v1`, or LM Studio and later hosts at their `/v1` address). The HTTP loop lives on a `tokio` task.
+* **Channels:** `AgentCommand` (a prompt, a tool result, or cancel) goes to the worker. `AgentEvent` (a reply, a tool request, or an error) comes back through `mpsc` into `App::handle_agent` on the main loop, beside LSP events.
+* **Edits:** The worker never touches a `Rope`. A tool that changes an open file becomes one undo step on the core, the same way a language-server patch does. A file that is not open is read or written on `spawn_blocking`. A path that leaves the workspace is an error string returned to the model.
+* **Place:** Every prompt sent to the model ends with `editor_state` for the focused file: path, 1-based cursor line and column, and the selection. The chat line stays the text the user typed. The same tool called with the same arguments three times in a row ends the turn, and so does a 33rd tool call. `create_file` writes a new workspace file on the background job and the core opens it. An existing path is refused.
+
 ---
 
 ## 4. Recommended Rust Crate Stack
@@ -107,6 +113,7 @@
 | **Syntax Highlighting** | `tree-sitter` | Incremental parsing and syntax tree queries |
 | **Async Runtime** | `tokio` | Event loop orchestration, async process I/O, and mpsc channels |
 | **LSP Protocol** | `lsp-types` + `serde_json` | Strongly-typed LSP structures and JSON-RPC 2.0 framing |
+| **Assistant HTTP** | `reqwest` | OpenAI-compatible chat completions for Ollama and other local servers |
 | **OS Clipboard** | `arboard` | Cross-platform native OS clipboard integration |
 | **Unicode Handling** | `unicode-segmentation` / `unicode-width` | Grapheme cluster boundary detection and display column width calculation |
 | **File Tree Walk** | `ignore` | `.gitignore`-aware directory walking for the explorer sidebar |
@@ -121,7 +128,9 @@ src/
 ├── lib.rs             # Library root exposing core modules (testable without a terminal)
 ├── app.rs             # Application Core state and SemanticAction dispatcher
 ├── app/
-│   └── lsp_sync.rs    # Tab <-> language server sync, LspEvent handling, F8 navigation
+│   ├── lsp_sync.rs    # Tab <-> language server sync, LspEvent handling, F8 navigation
+│   └── agent.rs       # Assistant tool results applied on the core
+├── agent/             # Assistant protocol, HTTP worker, path check, edits
 ├── action.rs          # SemanticAction and Focus enums
 ├── input.rs           # Focus-aware Input Router (KeyEvent -> SemanticAction)
 ├── buffer.rs          # Rope wrapper, Selection (anchor/head), and Undo/Redo history

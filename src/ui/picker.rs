@@ -57,7 +57,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             .x
             .saturating_add(column)
             .min(inner.right().saturating_sub(1));
-        frame.set_cursor_position((x, inner.bottom().saturating_sub(1)));
+        super::cursor::place(x, inner.bottom().saturating_sub(1));
     }
 }
 

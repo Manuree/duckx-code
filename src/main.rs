@@ -153,7 +153,9 @@ async fn persist_session(app: &App) {
 async fn run_loop(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
     let (lsp, mut lsp_events) =
         lsp::client::spawn(Some(duckx_code::theme::config_dir().join("logs")));
-    let result = drive(terminal, app, &lsp, &mut lsp_events).await;
+    let (agent_tx, mut agent_events) = duckx_code::agent::spawn();
+    app.attach_agent(agent_tx);
+    let result = drive(terminal, app, &lsp, &mut lsp_events, &mut agent_events).await;
     lsp.shutdown(Duration::from_secs(2)).await;
     result
 }
@@ -163,6 +165,7 @@ async fn drive(
     app: &mut App,
     lsp: &lsp::client::LspHandle,
     lsp_events: &mut mpsc::UnboundedReceiver<lsp::LspEvent>,
+    agent_events: &mut mpsc::UnboundedReceiver<duckx_code::agent::AgentEvent>,
 ) -> io::Result<()> {
     let mut events = EventStream::new();
     let (job_results, mut job_events) = mpsc::unbounded_channel::<AppEvent>();
@@ -192,7 +195,7 @@ async fn drive(
         );
         app.explorer.height = ui::sidebar_tree_height(layout.sidebar);
         app.explorer.scroll_into_view();
-        terminal.draw(|frame| ui::render(frame, &*app))?;
+        ui::draw(terminal, &app)?;
 
         tokio::select! {
             event = events.next() => {
@@ -207,6 +210,7 @@ async fn drive(
                         app.filtering(),
                         app.keys(),
                         app.capturing(),
+                        app.drafting(),
                     )
                 {
                     app.handle(action);
@@ -214,7 +218,11 @@ async fn drive(
             }
             Some(event) = job_events.recv() => app.handle_event(event),
             Some(event) = lsp_events.recv() => app.handle_lsp(event),
+            Some(event) = agent_events.recv() => app.handle_agent(event),
             _ = watch.tick() => app.watch_files(),
+            _ = tokio::time::sleep(Duration::from_millis(80)), if app.agent.busy => {
+                app.advance_agent_spin();
+            }
         }
     }
     Ok(())

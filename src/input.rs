@@ -1,8 +1,8 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::action::{
-    CommandBarAction, CompletionAction, FindAction, Focus, PaneDirection, PickerAction,
-    PromptAction, ReplaceAction, SemanticAction, SettingsAction, SidebarAction,
+    AgentAction, CommandBarAction, CompletionAction, FindAction, Focus, PaneDirection,
+    PickerAction, PromptAction, ReplaceAction, SemanticAction, SettingsAction, SidebarAction,
 };
 use crate::buffer::Movement;
 
@@ -13,6 +13,7 @@ pub fn route(event: &Event, focus: Focus, selecting: bool) -> Option<SemanticAct
         selecting,
         false,
         &crate::keys::KeyMap::defaults(),
+        false,
         false,
     )
 }
@@ -26,12 +27,14 @@ pub fn route_flags(
     filtering: bool,
     keys: &crate::keys::KeyMap,
     capturing: bool,
+    drafting: bool,
 ) -> Option<SemanticAction> {
     match focus {
         Focus::Editor => route_editor(event, keys),
         Focus::Sidebar => route_sidebar(event, selecting, filtering, keys),
         Focus::Prompt => route_prompt(event),
-        Focus::Settings => route_settings(event, capturing),
+        Focus::Settings => route_settings(event, capturing, drafting),
+        Focus::Agent => route_agent(event, keys),
         Focus::About => route_about(event),
         Focus::Find => route_find(event),
         Focus::Replace => route_replace(event),
@@ -206,7 +209,7 @@ fn route_command_bar(event: &Event) -> Option<CommandBarAction> {
         KeyCode::Enter => Some(CommandBarAction::Submit),
         KeyCode::Up | KeyCode::BackTab => Some(CommandBarAction::SelectPrev),
         KeyCode::Down => Some(CommandBarAction::SelectNext),
-        KeyCode::Tab => Some(CommandBarAction::Complete),
+        KeyCode::Tab if !ctrl && !alt && !shift => Some(CommandBarAction::ToChat),
         KeyCode::Right if !ctrl && !alt && !shift => Some(CommandBarAction::AcceptHint),
         KeyCode::Backspace => Some(CommandBarAction::Backspace),
         KeyCode::Char(c) if !ctrl && !alt || ctrl && alt => {
@@ -282,7 +285,10 @@ fn route_about(event: &Event) -> Option<SemanticAction> {
     }
 }
 
-fn route_settings(event: &Event, capturing: bool) -> Option<SemanticAction> {
+fn route_settings(event: &Event, capturing: bool, drafting: bool) -> Option<SemanticAction> {
+    if drafting && !capturing {
+        return route_settings_text(event);
+    }
     let key = match event {
         Event::Key(key) if key.kind != KeyEventKind::Release => key,
         _ => return None,
@@ -325,6 +331,103 @@ fn route_settings(event: &Event, capturing: bool) -> Option<SemanticAction> {
         _ => return None,
     };
     Some(SemanticAction::Settings(action))
+}
+
+/// A server or model row is being typed. Printable keys edit that value.
+fn route_settings_text(event: &Event) -> Option<SemanticAction> {
+    let text = match event {
+        Event::Paste(text) => text.clone(),
+        Event::Key(key) if key.kind != KeyEventKind::Release => {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let alt = key.modifiers.contains(KeyModifiers::ALT);
+            if ctrl && !alt && matches!(key.code, KeyCode::Char('q' | 'Q')) {
+                return Some(SemanticAction::Quit);
+            }
+            if ctrl || alt {
+                return None;
+            }
+            return match key.code {
+                KeyCode::Esc | KeyCode::F(1) => {
+                    Some(SemanticAction::Settings(SettingsAction::Back))
+                }
+                KeyCode::Enter => Some(SemanticAction::Settings(SettingsAction::Enter)),
+                KeyCode::Backspace => Some(SemanticAction::Settings(SettingsAction::DeleteChar)),
+                KeyCode::Char(c) => Some(SemanticAction::Settings(SettingsAction::Insert(
+                    c.to_string(),
+                ))),
+                _ => None,
+            };
+        }
+        _ => return None,
+    };
+    let text: String = text.chars().filter(|c| !c.is_control()).collect();
+    (!text.is_empty()).then_some(SemanticAction::Settings(SettingsAction::Insert(text)))
+}
+
+fn route_agent(event: &Event, keys: &crate::keys::KeyMap) -> Option<SemanticAction> {
+    let key = match event {
+        Event::Paste(text) => {
+            let text: String = text.chars().filter(|c| !c.is_control()).collect();
+            return (!text.is_empty()).then_some(SemanticAction::Agent(AgentAction::Insert(text)));
+        }
+        Event::Key(key) if key.kind != KeyEventKind::Release => key,
+        _ => return None,
+    };
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    if ctrl && !alt {
+        match key.code {
+            KeyCode::Left => {
+                return Some(SemanticAction::FocusAdjacent(PaneDirection::Left));
+            }
+            KeyCode::Right => {
+                return Some(SemanticAction::FocusAdjacent(PaneDirection::Right));
+            }
+            KeyCode::Up => return Some(SemanticAction::Agent(AgentAction::Above)),
+            KeyCode::Down => return Some(SemanticAction::Agent(AgentAction::Below)),
+            _ => {}
+        }
+    }
+    if let Some(action) = crate::keys::dispatch(key, keys) {
+        return Some(action);
+    }
+    if ctrl || alt {
+        return None;
+    }
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    match key.code {
+        KeyCode::Tab => Some(SemanticAction::OpenCommandBar),
+        KeyCode::Esc => Some(SemanticAction::Agent(AgentAction::Close)),
+        KeyCode::Enter => Some(SemanticAction::Agent(AgentAction::Submit)),
+        KeyCode::Left => Some(SemanticAction::Agent(AgentAction::Move {
+            right: false,
+            extend: shift,
+        })),
+        KeyCode::Right => Some(SemanticAction::Agent(AgentAction::Move {
+            right: true,
+            extend: shift,
+        })),
+        KeyCode::Home => Some(SemanticAction::Agent(AgentAction::Jump {
+            end: false,
+            extend: shift,
+        })),
+        KeyCode::End => Some(SemanticAction::Agent(AgentAction::Jump {
+            end: true,
+            extend: shift,
+        })),
+        KeyCode::Up => Some(SemanticAction::Agent(AgentAction::Line {
+            down: false,
+            extend: shift,
+        })),
+        KeyCode::Down => Some(SemanticAction::Agent(AgentAction::Line {
+            down: true,
+            extend: shift,
+        })),
+        KeyCode::Backspace => Some(SemanticAction::Agent(AgentAction::Backspace)),
+        KeyCode::Delete => Some(SemanticAction::Agent(AgentAction::Delete)),
+        KeyCode::Char(c) => Some(SemanticAction::Agent(AgentAction::Insert(c.to_string()))),
+        _ => None,
+    }
 }
 
 fn route_prompt(event: &Event) -> Option<SemanticAction> {
@@ -420,8 +523,8 @@ fn route_editor_key(key: &KeyEvent, keys: &crate::keys::KeyMap) -> Option<Semant
         KeyCode::Delete if shift && !ctrl && !alt => Some(SemanticAction::DeleteLine),
         KeyCode::Delete => Some(SemanticAction::DeleteForward),
         KeyCode::Esc if !ctrl && !alt => Some(SemanticAction::Dismiss),
-        KeyCode::BackTab => Some(SemanticAction::Outdent),
-        KeyCode::Tab if shift => Some(SemanticAction::Outdent),
+        KeyCode::BackTab if !ctrl && !alt => Some(SemanticAction::Outdent),
+        KeyCode::Tab if shift && !ctrl && !alt => Some(SemanticAction::Outdent),
         KeyCode::Tab if !ctrl && !alt => Some(SemanticAction::Indent),
         KeyCode::Char(c) if ctrl && alt => Some(SemanticAction::InsertChar(c)),
         KeyCode::Char(c) if !ctrl && !alt => Some(SemanticAction::InsertChar(c)),
@@ -669,6 +772,7 @@ mod tests {
                 true,
                 &crate::keys::KeyMap::defaults(),
                 false,
+                false,
             ),
             Some(SemanticAction::Sidebar(SidebarAction::Mark))
         );
@@ -714,6 +818,10 @@ mod tests {
             Some(SemanticAction::Outdent)
         );
         assert_eq!(
+            editor(key(KeyCode::BackTab, KeyModifiers::NONE)),
+            Some(SemanticAction::Outdent)
+        );
+        assert_eq!(
             editor(key(KeyCode::Tab, KeyModifiers::SHIFT)),
             Some(SemanticAction::Outdent)
         );
@@ -745,7 +853,7 @@ mod tests {
         let mut overrides = BTreeMap::new();
         crate::keys::assign(&mut overrides, "save", "ctrl+shift+s").unwrap();
         let map = crate::keys::KeyMap::resolve(&overrides);
-        let route = |event| route_flags(&event, Focus::Editor, false, false, &map, false);
+        let route = |event| route_flags(&event, Focus::Editor, false, false, &map, false, false);
         assert_eq!(route(key(KeyCode::Char('s'), KeyModifiers::CONTROL)), None);
         assert_eq!(
             route(key(
@@ -781,6 +889,52 @@ mod tests {
         assert_eq!(
             bar(key(KeyCode::Right, KeyModifiers::NONE)),
             Some(SemanticAction::CommandBar(CommandBarAction::AcceptHint))
+        );
+        assert_eq!(
+            bar(key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(SemanticAction::CommandBar(CommandBarAction::ToChat))
+        );
+        assert_eq!(
+            route(&key(KeyCode::Tab, KeyModifiers::NONE), Focus::Agent, false),
+            Some(SemanticAction::OpenCommandBar)
+        );
+        assert_eq!(
+            route(
+                &key(KeyCode::Left, KeyModifiers::SHIFT),
+                Focus::Agent,
+                false
+            ),
+            Some(SemanticAction::Agent(AgentAction::Move {
+                right: false,
+                extend: true
+            }))
+        );
+        assert_eq!(
+            route(
+                &key(KeyCode::Right, KeyModifiers::NONE),
+                Focus::Agent,
+                false
+            ),
+            Some(SemanticAction::Agent(AgentAction::Move {
+                right: true,
+                extend: false
+            }))
+        );
+        assert_eq!(
+            route(
+                &key(KeyCode::Up, KeyModifiers::CONTROL),
+                Focus::Agent,
+                false
+            ),
+            Some(SemanticAction::Agent(AgentAction::Above))
+        );
+        assert_eq!(
+            route(
+                &key(KeyCode::Down, KeyModifiers::CONTROL),
+                Focus::Agent,
+                false
+            ),
+            Some(SemanticAction::Agent(AgentAction::Below))
         );
         assert_eq!(bar(key(KeyCode::Right, KeyModifiers::CONTROL)), None);
         assert_eq!(bar(Event::Paste("\n".into())), None);

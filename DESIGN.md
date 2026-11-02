@@ -62,7 +62,8 @@ Avoids terminal control-code traps while remaining intuitive:
 | `Shift + F2` | Rename the symbol under the cursor |
 | `F7` | Format the current file |
 | `Ctrl + .` | Show code actions at the cursor |
-| `Tab` / `Shift + Tab` | Indent / Outdent active line or multi-line selection |
+| `Tab` | Indent the active line or multi-line selection |
+| `Shift + Tab` | Outdent the active line or multi-line selection. Inside a snippet, move to the previous placeholder |
 | `Backspace` (inside leading spaces) | Removes one indentation level back to the previous tab stop |
 
 ---
@@ -84,7 +85,7 @@ When the Command Bar opens:
 3. **Zero-Latency Prefix Filtering:** As the user types, commands are filtered in real time by prefix/keyword match with zero debounce delay. Names that start with the input stay ahead of commands that only match a later word. Importance orders each of those groups, and the recent command is then moved to the top.
 4. **Keyboard Flow:**
    * `Up` / `Down`: Cycle through matching command hints.
-   * `Tab`: Autocomplete the highlighted command into the input box.
+   * `Tab`: Leave the bar and open the assistant. `Tab` in the assistant opens the command bar again.
    * `Right`: Accept the dimmed file or folder name drawn after the typed argument. The block cursor sits on the first character of that hint, the same way a shell draws an inline suggestion. `move` hints folders, `rename` hints names in the same folder, and `save` hints files and folders. The closest name is the shortest match, then A–Z. A name already typed in full stays as it is.
    * `Enter`: Execute the selected command immediately and return focus to the editor. An exact command name in the input (e.g. `goto 42`) wins over the highlighted hint. If the command needs an argument that is missing, `Enter` completes the name instead of failing.
    * `Esc` / `F1`: Dismiss the Command Bar without side effects.
@@ -101,7 +102,9 @@ While an editor is focused:
 | `save` | optional path | `Ctrl + S` |
 | `undo` / `redo` | — | `Ctrl + Z` / `Ctrl + Y` |
 | `select-all` | — | `Ctrl + A` |
-| `indent` / `outdent` | — | `Tab` / `Shift + Tab` |
+| `indent` | — | `Tab` |
+| `outdent` | — | `Shift + Tab` |
+| `agent` | — | `F6` |
 | `delete-line` | — | `Shift + Delete` |
 | `duplicate-line-up` / `duplicate-line-down` | — | `Ctrl + Alt + Up` / `Ctrl + Alt + Down` |
 | `explorer` | — | `Ctrl + B` |
@@ -228,5 +231,5 @@ These are **mandatory** rules for every UI element. A change that breaks one of 
 * **Scope:** the main editor canvas and status bar have no border; this rule applies to anything that does.
 
 ### R2. Block Cursor
-* The text cursor is always a steady (non-blinking) block (`SetCursorStyle::SteadyBlock`), not a bar or underline.
+* The text cursor is always a steady (non-blinking) block (`SetCursorStyle::SteadyBlock`), not a bar or underline. A blinking terminal cursor fights each frame: `Terminal::draw` hides the cursor, moves it across changed cells, then shows it again, which restarts the blink.
 * On exit, the terminal's own cursor shape is restored (`SetCursorStyle::DefaultUserShape`).

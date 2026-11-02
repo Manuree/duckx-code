@@ -21,6 +21,8 @@ pub enum Focus {
     CompletionPopup,
     /// Code action list. Arrows move, Enter applies, Esc closes.
     ActionMenu,
+    /// Assistant prompt. Printable keys edit the prompt.
+    Agent,
 }
 
 /// Which way `Ctrl` + an arrow moves focus. Editor panes come from the split
@@ -132,6 +134,40 @@ pub enum SemanticAction {
     /// Open the file picker over the editor.
     OpenFilePicker,
     Picker(PickerAction),
+    /// Open, focus, or close the assistant panel.
+    ToggleAgent,
+    Agent(AgentAction),
+}
+
+/// Keys while the assistant prompt is focused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentAction {
+    Insert(String),
+    Backspace,
+    Delete,
+    /// Move one character. `extend` keeps the anchor, the same way Shift does in the editor.
+    Move {
+        right: bool,
+        extend: bool,
+    },
+    /// Jump to the start or the end of the prompt.
+    Jump {
+        end: bool,
+        extend: bool,
+    },
+    /// Move to the wrapped row above or below. `extend` keeps the anchor.
+    Line {
+        down: bool,
+        extend: bool,
+    },
+    /// `Ctrl+Up`: read the messages above the prompt.
+    Above,
+    /// `Ctrl+Down`: return to the prompt.
+    Below,
+    /// Send the prompt.
+    Submit,
+    /// Leave the prompt. The panel stays open.
+    Close,
 }
 
 /// Keys that belong to the completion list. Typing is not one of these: it still edits the buffer.
@@ -196,6 +232,10 @@ pub enum SettingsAction {
     Reset,
     /// The key pressed while a keybinding row is listening.
     Assign(String),
+    /// Characters typed into a text row.
+    Insert(String),
+    /// Delete the last character of a text row.
+    DeleteChar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +316,8 @@ pub enum CommandBarAction {
     SelectNext,
     SelectPrev,
     Complete,
+    /// Leave the command bar and focus the assistant.
+    ToChat,
     /// Accept the dimmed file or folder name drawn after the input.
     AcceptHint,
     Submit,

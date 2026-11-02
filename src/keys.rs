@@ -207,6 +207,13 @@ pub fn bindings() -> &'static [Binding] {
             action: || SemanticAction::Format,
         },
         Binding {
+            id: "agent",
+            label: "Assistant",
+            detail: "Open or close the assistant panel.",
+            defaults: &[f(6, false)],
+            action: || SemanticAction::ToggleAgent,
+        },
+        Binding {
             id: "diagnostic-next",
             label: "Next diagnostic",
             detail: "Move to the next diagnostic in this file.",

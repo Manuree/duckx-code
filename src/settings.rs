@@ -33,6 +33,14 @@ pub enum SettingId {
     FormatOnSave,
     /// How strictly pyright checks an open Python file.
     PythonChecking,
+    /// The assistant may call tools. Off refuses a turn.
+    AiEnabled,
+    /// Which default server address the assistant uses.
+    AiProvider,
+    /// OpenAI-compatible base URL, including `/v1`.
+    AiServer,
+    /// Model name sent as `model`.
+    AiModel,
 }
 
 /// How a new line is ended. `Auto` keeps the ending detected in the file.
@@ -215,6 +223,157 @@ impl LspPrefs {
 
 fn on_off(on: bool) -> String {
     if on { "on" } else { "off" }.to_string()
+}
+
+/// Which local server the assistant talks to. Both speak `/v1/chat/completions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AiProvider {
+    #[default]
+    Ollama,
+    Openai,
+}
+
+impl AiProvider {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ollama => "Ollama",
+            Self::Openai => "OpenAI",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::Openai => "openai",
+        }
+    }
+
+    /// Base URL, including `/v1`, when the server row is empty.
+    pub fn default_server(self) -> &'static str {
+        match self {
+            Self::Ollama => "http://127.0.0.1:11434/v1",
+            Self::Openai => "http://127.0.0.1:1234/v1",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Ollama => 0,
+            Self::Openai => 1,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        match index {
+            1 => Self::Openai,
+            _ => Self::Ollama,
+        }
+    }
+}
+
+/// Assistant choices stored in `settings.json` under `ai`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiPrefs {
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub provider: AiProvider,
+    /// Empty uses [`AiProvider::default_server`].
+    #[serde(default)]
+    pub server: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+impl Default for AiPrefs {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: AiProvider::Ollama,
+            server: String::new(),
+            model: String::new(),
+        }
+    }
+}
+
+impl AiPrefs {
+    pub fn is_text(id: SettingId) -> bool {
+        matches!(id, SettingId::AiServer | SettingId::AiModel)
+    }
+
+    /// URL the assistant posts to, including `/v1`.
+    pub fn endpoint(&self) -> String {
+        let server = self.server.trim();
+        if server.is_empty() {
+            self.provider.default_server().to_string()
+        } else {
+            server.to_string()
+        }
+    }
+
+    pub fn choice_names(id: SettingId) -> Vec<String> {
+        match id {
+            SettingId::AiEnabled => vec!["On".into(), "Off".into()],
+            SettingId::AiProvider => vec!["Ollama".into(), "OpenAI".into()],
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn choice_index(&self, id: SettingId) -> usize {
+        match id {
+            SettingId::AiEnabled => usize::from(!self.enabled),
+            SettingId::AiProvider => self.provider.index(),
+            _ => 0,
+        }
+    }
+
+    pub fn choice_token(&self, id: SettingId) -> String {
+        match id {
+            SettingId::AiEnabled => on_off(self.enabled),
+            SettingId::AiProvider => self.provider.as_str().to_string(),
+            _ => String::new(),
+        }
+    }
+
+    pub fn choice_label(&self, id: SettingId) -> String {
+        Self::choice_names(id)
+            .get(self.choice_index(id))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set_choice(&mut self, id: SettingId, index: usize) {
+        match id {
+            SettingId::AiEnabled => self.enabled = index == 0,
+            SettingId::AiProvider => self.provider = AiProvider::from_index(index),
+            _ => {}
+        }
+    }
+
+    pub fn restore_choice(&mut self, id: SettingId, token: &str) {
+        match id {
+            SettingId::AiEnabled => self.enabled = token != "off",
+            SettingId::AiProvider => {
+                self.provider = if token == "openai" {
+                    AiProvider::Openai
+                } else {
+                    AiProvider::Ollama
+                };
+            }
+            _ => {}
+        }
+    }
+
+    pub fn reset(&mut self, id: SettingId) {
+        match id {
+            SettingId::AiEnabled => self.enabled = true,
+            SettingId::AiProvider => self.provider = AiProvider::Ollama,
+            SettingId::AiServer => self.server.clear(),
+            SettingId::AiModel => self.model.clear(),
+            _ => {}
+        }
+    }
 }
 
 fn four() -> u8 {
@@ -423,6 +582,8 @@ pub struct SettingsFile {
     pub keybindings: BTreeMap<String, String>,
     #[serde(default)]
     pub lsp: LspPrefs,
+    #[serde(default)]
+    pub ai: AiPrefs,
 }
 
 impl Default for SettingsFile {
@@ -434,6 +595,7 @@ impl Default for SettingsFile {
             files: FilePrefs::default(),
             keybindings: BTreeMap::new(),
             lsp: LspPrefs::default(),
+            ai: AiPrefs::default(),
         }
     }
 }
@@ -539,6 +701,20 @@ pub struct Page {
     pub menu: Option<ChoiceMenu>,
     /// The highlighted keybinding is waiting for the next key.
     pub capture: bool,
+    /// The highlighted server or model row is being typed.
+    pub text: Option<TextDraft>,
+}
+
+/// Text being typed into a settings row. `Enter` keeps it. `Esc` drops it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextDraft {
+    pub value: String,
+}
+
+impl TextDraft {
+    pub fn new(value: String) -> Self {
+        Self { value }
+    }
 }
 
 pub struct Section {
@@ -652,6 +828,31 @@ pub fn sections() -> &'static [Section] {
                         },
                     ],
                 ),
+                fixed(
+                    "AI",
+                    &[
+                        Item {
+                            label: "Assistant",
+                            detail: "Let the assistant read files and edit them.",
+                            id: SettingId::AiEnabled,
+                        },
+                        Item {
+                            label: "Provider",
+                            detail: "Picks the default server address.",
+                            id: SettingId::AiProvider,
+                        },
+                        Item {
+                            label: "Server",
+                            detail: "OpenAI-compatible address, including /v1.",
+                            id: SettingId::AiServer,
+                        },
+                        Item {
+                            label: "Model",
+                            detail: "Model name the server should run.",
+                            id: SettingId::AiModel,
+                        },
+                    ],
+                ),
             ]
         })
         .as_slice()
@@ -665,6 +866,7 @@ impl Page {
             inside: false,
             menu: None,
             capture: false,
+            text: None,
         }
     }
 
@@ -759,13 +961,18 @@ mod tests {
         assert!(file.sanitize().is_empty());
         assert_eq!(file.editor, EditorPrefs::default());
         assert_eq!(file.files, FilePrefs::default());
+        assert_eq!(file.ai, AiPrefs::default());
         assert!(file.keybindings.is_empty());
+        file.ai.server = "http://127.0.0.1:11434/v1".into();
+        file.ai.model = "qwen2.5-coder".into();
         file.editor.tab_width = 2;
         file.keybindings
             .insert("save".into(), "ctrl+shift+s".into());
         let saved = file.to_pretty();
         let back: SettingsFile = serde_json::from_str(&saved).unwrap();
         assert_eq!(back.editor.tab_width, 2);
+        assert_eq!(back.ai.model, "qwen2.5-coder");
+        assert_eq!(back.ai.server, "http://127.0.0.1:11434/v1");
         assert_eq!(
             back.keybindings.get("save").map(String::as_str),
             Some("ctrl+shift+s")

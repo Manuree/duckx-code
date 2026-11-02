@@ -44,7 +44,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         .then(|| page.section().items.get(page.row).map(|item| item.id))
         .flatten();
     let binding = matches!(row_id, Some(SettingId::Binding(_)));
-    let footer = if page.capture {
+    let text_row = matches!(row_id, Some(SettingId::AiServer | SettingId::AiModel));
+    let footer = if page.text.is_some() {
+        " type    enter save    esc cancel"
+    } else if page.capture {
         " press a key    esc cancel"
     } else if page.menu.is_some() {
         " ↑↓ move    enter select    esc close"
@@ -52,6 +55,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         " ↑↓ move    enter → open    del reset    esc back ← close"
     } else if binding {
         " ↑↓ move    enter bind    del reset    esc back ← back"
+    } else if text_row {
+        " ↑↓ move    enter edit    del reset    esc back ← back"
     } else if row_id.is_some() {
         " ↑↓ move    enter → list    del reset    esc back ← back"
     } else {
@@ -211,14 +216,17 @@ fn render_items(
         }
         let open = page.menu.is_some() && page.inside && offset == page.row;
         let capturing = page.capture && page.inside && offset == page.row;
-        let value = choice_label(app, item.id, open, capturing);
+        let drafting = page.text.is_some() && page.inside && offset == page.row;
+        let value = choice_label(app, item.id, open, capturing, drafting);
         let syntax = (item.id == SettingId::SyntaxTheme).then(|| app.appearance.syntax.clone());
+        let label = format!(" {}", item.label);
+        let value = if drafting { format!("{value} ") } else { value };
         paint_row(
             frame,
             inner,
             x,
             row,
-            &format!(" {}", item.label),
+            &label,
             (item_height == 2).then_some(item.detail),
             &value,
             page.inside && offset == page.row,
@@ -229,6 +237,9 @@ fn render_items(
             &theme,
             syntax.as_ref(),
         );
+        if drafting {
+            place_draft_cursor(inner, x, row, &label, &value, width);
+        }
         if open {
             anchor = Some(row);
         }
@@ -236,9 +247,17 @@ fn render_items(
     anchor
 }
 
-fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String {
+fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool, drafting: bool) -> String {
     if capturing {
         return "press a key".to_string();
+    }
+    if drafting {
+        return app
+            .settings
+            .as_ref()
+            .and_then(|page| page.text.as_ref())
+            .map(|draft| draft.value.clone())
+            .unwrap_or_default();
     }
     let mark = if open { "▴" } else { "▾" };
     match id {
@@ -256,6 +275,23 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         | SettingId::FormatOnSave
         | SettingId::PythonChecking) => {
             format!("{} {mark}", app.appearance.lsp.choice_label(id))
+        }
+        id @ (SettingId::AiEnabled | SettingId::AiProvider) => {
+            format!("{} {mark}", app.ai.choice_label(id))
+        }
+        SettingId::AiServer => {
+            if app.ai.server.trim().is_empty() {
+                format!("{} (default)", app.ai.provider.default_server())
+            } else {
+                app.ai.server.clone()
+            }
+        }
+        SettingId::AiModel => {
+            if app.ai.model.trim().is_empty() {
+                "(not set)".to_string()
+            } else {
+                app.ai.model.clone()
+            }
         }
     }
 }
@@ -296,7 +332,10 @@ fn paint_menu(
         | SettingId::CheckOnSave
         | SettingId::FormatOnSave
         | SettingId::PythonChecking) => crate::settings::LspPrefs::choice_names(id),
-        SettingId::Binding(_) => return,
+        id @ (SettingId::AiEnabled | SettingId::AiProvider) => {
+            crate::settings::AiPrefs::choice_names(id)
+        }
+        SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => return,
     };
     if names.is_empty() || width < 8 || footer_row == 0 {
         return;
@@ -493,6 +532,23 @@ fn put(frame: &mut Frame, inner: Rect, x: usize, y: u16, text: &str, style: Styl
         return;
     };
     frame.render_widget(Paragraph::new(fill(text, width, style)).style(style), rect);
+}
+
+/// Block cursor on the cell where the next typed character will land.
+fn place_draft_cursor(inner: Rect, x: usize, y: u16, label: &str, value: &str, width: usize) {
+    let Some((rect, width)) = row_rect(inner, x, y, width) else {
+        return;
+    };
+    let value_width = value.width().min(width);
+    let label_budget = width.saturating_sub(value_width.saturating_add(1));
+    let label = clip(label, label_budget);
+    let gap = width.saturating_sub(label.width().saturating_add(value_width));
+    let column = label
+        .width()
+        .saturating_add(gap)
+        .saturating_add(value_width.saturating_sub(1))
+        .min(width.saturating_sub(1));
+    super::cursor::place(rect.x.saturating_add(column as u16), rect.y);
 }
 
 fn put_row(

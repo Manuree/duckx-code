@@ -66,6 +66,8 @@ pub fn text_row_offset(pane_height: u16) -> u16 {
 pub enum Surface {
     Sidebar,
     Editor(EditorId),
+    /// The assistant panel. Present only while that panel is open.
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

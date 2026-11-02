@@ -37,7 +37,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             .x
             .saturating_add(cursor as u16)
             .min(left_area.right().saturating_sub(1));
-        frame.set_cursor_position((x, left_area.y));
+        super::cursor::place(x, left_area.y);
     }
 }
 
@@ -57,6 +57,16 @@ fn left_line(app: &App) -> (Vec<Span<'static>>, usize) {
     } else if app.about {
         (
             file_line(app, " ABOUT ", theme.status_find, theme.status_find_bg),
+            0,
+        )
+    } else if app.focus() == crate::action::Focus::Agent {
+        (
+            file_line(
+                app,
+                " AGENT ",
+                theme.status_command,
+                theme.status_command_bg,
+            ),
             0,
         )
     } else if app.settings.is_some() {

@@ -1,5 +1,7 @@
 mod about;
+mod agent;
 mod command_bar;
+mod cursor;
 mod icons;
 mod picker;
 mod popup;
@@ -9,11 +11,13 @@ mod sidebar;
 mod status_bar;
 mod viewport;
 
+use std::io;
 use std::path::Path;
 
 use ratatui::{
-    Frame,
-    layout::Rect,
+    Frame, Terminal,
+    backend::Backend,
+    layout::{Position, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block, BorderType, Paragraph},
@@ -47,6 +51,8 @@ pub struct EditorLayout {
     /// The diagnostic message row. Zero height when the cursor line has none.
     pub diagnostic: Rect,
     pub status: Rect,
+    /// Zero height while the assistant panel is closed.
+    pub agent: Rect,
 }
 
 /// The rectangles the screen draws for `app`. Focus mode keeps only the active
@@ -66,6 +72,7 @@ pub fn frame_layout(app: &App, area: Rect) -> EditorLayout {
         app.show_diff(),
         !focus,
         !focus || app.composer_open(),
+        app.agent_rows(),
     )
 }
 
@@ -80,17 +87,16 @@ pub fn layout(
     diff_column: bool,
     show_title: bool,
     show_status: bool,
+    agent_rows: u16,
 ) -> EditorLayout {
     let status_rows = if show_status { area.height.min(1) } else { 0 };
     let command_rows = command_rows.min(area.height.saturating_sub(status_rows));
     let diagnostic_rows =
         diagnostic_rows.min(area.height.saturating_sub(status_rows + command_rows));
-    let (sidebar, editor_area) = layout::split_above(
-        area,
-        sidebar_open,
-        status_rows + command_rows + diagnostic_rows,
-        sidebar_width,
-    );
+    let used = status_rows + command_rows + diagnostic_rows;
+    let agent_rows = agent_rows.min(area.height.saturating_sub(used.saturating_add(3)));
+    let (sidebar, editor_area) =
+        layout::split_above(area, sidebar_open, used + agent_rows, sidebar_width);
     let placed = tree.place(editor_area);
     let panes = placed
         .panes
@@ -110,16 +116,22 @@ pub fn layout(
         sidebar,
         panes,
         dividers: placed.dividers,
-        command: Rect::new(area.x, area.y + sidebar.height, area.width, command_rows),
+        agent: Rect::new(area.x, area.y + sidebar.height, area.width, agent_rows),
+        command: Rect::new(
+            area.x,
+            area.y + sidebar.height + agent_rows,
+            area.width,
+            command_rows,
+        ),
         diagnostic: Rect::new(
             area.x,
-            area.y + sidebar.height + command_rows,
+            area.y + sidebar.height + agent_rows + command_rows,
             area.width,
             diagnostic_rows,
         ),
         status: Rect::new(
             area.x,
-            area.y + sidebar.height + command_rows + diagnostic_rows,
+            area.y + sidebar.height + agent_rows + command_rows + diagnostic_rows,
             area.width,
             status_rows,
         ),
@@ -289,7 +301,22 @@ fn gutter_width(line_count: usize, diff_column: bool) -> usize {
     line_count.to_string().len().max(3) + 2 + usize::from(diff_column)
 }
 
+/// Paint one frame, then show the block cursor on the recorded cell.
+///
+/// The cursor stays hidden while changed cells are written, so a spinning
+/// title does not catch the block.
+pub fn draw<B: Backend>(terminal: &mut Terminal<B>, app: &App) -> io::Result<()> {
+    terminal.hide_cursor()?;
+    terminal.draw(|frame| render(frame, app))?;
+    if let Some((x, y)) = cursor::position() {
+        terminal.set_cursor_position(Position::new(x, y))?;
+        terminal.show_cursor()?;
+    }
+    Ok(())
+}
+
 pub fn render(frame: &mut Frame, app: &App) {
+    cursor::clear();
     let area = frame.area();
     let theme = *app.styles();
     frame.render_widget(
@@ -346,6 +373,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     } else if layout.command.height > 0 {
         command_bar::render(frame, app, layout.command);
     }
+    if layout.agent.height > 0 {
+        agent::render(frame, app, layout.agent);
+    }
     if layout.diagnostic.height > 0 {
         status_bar::render_diagnostic(frame, app, layout.diagnostic);
     }
@@ -387,6 +417,131 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn assistant_panel_uses_rounded_corners() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.agent.transcript.push(crate::agent::TranscriptLine {
+            user: true,
+            text: "rename greet".into(),
+        });
+        app.set_screen_size(80, 24);
+        let screen = draw(&app, 80, 24);
+        for corner in ["╭", "╮", "╰", "╯"] {
+            assert!(
+                screen.contains(corner),
+                "missing rounded corner {corner}\n{screen}"
+            );
+        }
+        assert!(screen.contains("Assistant"), "{screen}");
+        assert!(screen.contains("fn main"), "{screen}");
+    }
+
+    #[test]
+    fn assistant_messages_wrap_instead_of_stopping_at_the_edge() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.set_screen_size(80, 24);
+        let body = format!("HEAD{}TAIL", " word".repeat(30));
+        app.agent.transcript.push(crate::agent::TranscriptLine {
+            user: false,
+            text: body,
+        });
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("HEAD"), "{screen}");
+        assert!(screen.contains("TAIL"), "{screen}");
+    }
+
+    #[test]
+    fn assistant_panel_hides_outside_agent_mode() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.handle(SemanticAction::OpenCommandBar);
+        let screen = draw(&app, 80, 24);
+        assert!(!screen.contains("Assistant"), "{screen}");
+        assert!(screen.contains("fn main"), "{screen}");
+        assert!(screen.contains("COMMAND"), "{screen}");
+    }
+
+    #[test]
+    fn assistant_spinner_turns_while_busy() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.agent.busy = true;
+        app.agent.status = "waiting".into();
+        app.agent.spin = 0;
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("⠋ waiting"), "{screen}");
+        app.advance_agent_spin();
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("⠙ waiting"), "{screen}");
+        app.agent.busy = false;
+        app.agent.status = "ready".into();
+        app.advance_agent_spin();
+        assert_eq!(app.agent.spin, 1);
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("ready"), "{screen}");
+        assert!(!screen.contains('⠋'), "{screen}");
+    }
+
+    #[test]
+    fn the_wait_spinner_does_not_keep_the_cursor() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.agent.busy = true;
+        app.agent.status = "waiting".into();
+        app.agent.spin = 0;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        super::draw(&mut terminal, &app).unwrap();
+        let (x, y) = cursor::position().expect("prompt cursor");
+        let pos = terminal.get_cursor_position().unwrap();
+        assert_eq!((pos.x, pos.y), (x, y));
+        let cursor_cell = terminal.backend().buffer()[(x, y)].symbol();
+        assert_ne!(cursor_cell, "⠋");
+        let spinner = (0..24).find_map(|row| {
+            (0..80).find_map(|col| {
+                (terminal.backend().buffer()[(col, row)].symbol() == "⠋").then_some((col, row))
+            })
+        });
+        assert_ne!(spinner, Some((x, y)));
+    }
+
+    #[test]
+    fn settings_model_draft_places_the_cursor_after_the_text() {
+        use crate::settings::{Page, SettingId, TextDraft, sections};
+
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        let section = sections()
+            .iter()
+            .position(|item| item.name == "AI")
+            .unwrap();
+        let row = sections()[section]
+            .items
+            .iter()
+            .position(|item| item.id == SettingId::AiModel)
+            .unwrap();
+        let mut page = Page::new();
+        page.section = section;
+        page.row = row;
+        page.inside = true;
+        page.text = Some(TextDraft::new("qwen".into()));
+        app.settings = Some(page);
+        let (x, y) = cursor_at(&app, 80, 24);
+        let line = draw(&app, 80, 24);
+        let line = line.lines().nth(y as usize).unwrap();
+        let name_at = line.find("qwen").expect(line);
+        let columns: Vec<char> = line.chars().collect();
+        let end = line[..name_at].chars().count() + "qwen".chars().count();
+        assert!(end < columns.len(), "{line}");
+        assert_eq!(columns[end], ' ', "{line}");
+        assert_eq!(x as usize, end, "{line}");
     }
 
     #[test]
@@ -500,8 +655,7 @@ mod tests {
     fn cursor_at(app: &App, width: u16, height: u16) -> (u16, u16) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
-        let pos = terminal.get_cursor_position().unwrap();
-        (pos.x, pos.y)
+        cursor::position().expect("cursor")
     }
 
     fn cell_at(app: &App, width: u16, height: u16, x: u16, y: u16) -> String {
@@ -1159,7 +1313,7 @@ mod tests {
         assert!(screen.contains("About"), "{screen}");
         assert!(screen.contains("▄▀▀▀▀▀▄"), "{screen}");
         assert!(screen.contains("CODE"), "{screen}");
-        assert!(screen.contains("duckx-code"), "{screen}");
+        assert!(screen.contains("Duckx Code"), "{screen}");
         let lines: Vec<&str> = screen.lines().collect();
         let column = |line: &str, needle: &str| {
             let byte = line.find(needle).unwrap();

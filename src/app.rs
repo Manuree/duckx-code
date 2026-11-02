@@ -25,6 +25,7 @@ use crate::services::git::DiffResult;
 use crate::syntax::{self, SyntaxState};
 use crate::theme::SyntaxRole;
 
+mod agent;
 mod lsp_nav;
 mod lsp_sync;
 
@@ -440,6 +441,10 @@ pub struct App {
     pub appearance: crate::theme::Appearance,
     pub editor_prefs: crate::settings::EditorPrefs,
     pub file_prefs: crate::settings::FilePrefs,
+    pub ai: crate::settings::AiPrefs,
+    /// Sends prompts and tool results to the assistant worker. `None` in tests.
+    agent_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::agent::AgentCommand>>,
+    pub agent: crate::agent::Panel,
     key_overrides: std::collections::BTreeMap<String, String>,
     keys: crate::keys::KeyMap,
     /// A `settings.json` write is already queued.
@@ -535,6 +540,9 @@ impl App {
             appearance: crate::theme::Appearance::builtin(),
             editor_prefs: crate::settings::EditorPrefs::default(),
             file_prefs: crate::settings::FilePrefs::default(),
+            ai: crate::settings::AiPrefs::default(),
+            agent_tx: None,
+            agent: crate::agent::Panel::default(),
             key_overrides: std::collections::BTreeMap::new(),
             keys: crate::keys::KeyMap::defaults(),
             settings_save_inflight: false,
@@ -725,6 +733,7 @@ impl App {
         self.appearance = appearance;
         self.editor_prefs = file.editor;
         self.file_prefs = file.files;
+        self.ai = file.ai;
         self.key_overrides = file.keybindings;
         self.keys = crate::keys::KeyMap::resolve(&self.key_overrides);
         self.apply_editor_prefs();
@@ -924,6 +933,32 @@ impl App {
         self.settings.as_ref().is_some_and(|page| page.capture)
     }
 
+    /// A settings row is accepting typed text.
+    pub fn drafting(&self) -> bool {
+        self.settings
+            .as_ref()
+            .is_some_and(|page| page.text.is_some())
+    }
+
+    pub fn attach_agent(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::agent::AgentCommand>,
+    ) {
+        self.agent_tx = Some(tx);
+    }
+
+    /// Rows the assistant panel takes. Zero unless the prompt itself is focused.
+    pub fn agent_rows(&self) -> u16 {
+        if self.focus() != Focus::Agent {
+            return 0;
+        }
+        let height = self.screen_height;
+        if height < 10 {
+            return 0;
+        }
+        8.min(height / 3).max(4)
+    }
+
     pub fn focus(&self) -> Focus {
         if self.prompt.is_some() {
             Focus::Prompt
@@ -943,6 +978,8 @@ impl App {
             Focus::CompletionPopup
         } else if self.reference_view().is_some() || self.action_view().is_some() {
             Focus::ActionMenu
+        } else if self.agent.open && self.agent.focused {
+            Focus::Agent
         } else if self.explorer.open && self.explorer.focused {
             Focus::Sidebar
         } else {
@@ -1079,6 +1116,17 @@ impl App {
                 fingerprint,
                 result,
             } => self.finish_diff(tab_id, path, generation, fingerprint, result),
+            AppEvent::AgentDisk {
+                turn,
+                call_id,
+                result,
+                open,
+            } => {
+                if let Some(path) = open {
+                    self.open_path(path);
+                }
+                self.reply_tool(turn, call_id, result);
+            }
             _ => {}
         }
     }
@@ -1224,6 +1272,7 @@ impl App {
             files: self.file_prefs,
             keybindings: self.key_overrides.clone(),
             lsp: self.appearance.lsp.clone(),
+            ai: self.ai.clone(),
         };
         let (path, text) = file.document(&dir);
         self.settings_save_inflight = true;
@@ -1553,7 +1602,9 @@ impl App {
     /// Open windows, placed the way the screen draws them. A closed sidebar is absent.
     fn focus_surfaces(&self) -> Vec<(Surface, ratatui::layout::Rect)> {
         let area = ratatui::layout::Rect::new(0, 0, self.screen_width, self.screen_height);
-        let (sidebar, editors) = layout::body_rects(area, self.explorer.open, self.sidebar_width);
+        let agent = self.agent_rows();
+        let (sidebar, editors) =
+            layout::split_above(area, self.explorer.open, 1 + agent, self.sidebar_width);
         let mut surfaces = Vec::new();
         if self.explorer.open && sidebar.width > 0 && sidebar.height > 0 {
             surfaces.push((Surface::Sidebar, sidebar));
@@ -1566,6 +1617,13 @@ impl App {
                 .filter(|(_, rect)| rect.width > 0 && rect.height > 0)
                 .map(|(id, rect)| (Surface::Editor(id), rect)),
         );
+        if agent > 0 {
+            let y = editors.y.saturating_add(editors.height);
+            surfaces.push((
+                Surface::Agent,
+                ratatui::layout::Rect::new(area.x, y, area.width, agent),
+            ));
+        }
         surfaces
     }
 
@@ -1583,7 +1641,7 @@ impl App {
             return (0, 0);
         };
         match from {
-            Surface::Sidebar => (
+            Surface::Sidebar | Surface::Agent => (
                 rect.x.saturating_add(rect.width / 2),
                 rect.y.saturating_add(rect.height / 2),
             ),
@@ -1607,7 +1665,9 @@ impl App {
     /// `Ctrl` + arrow. Moves along the cursor's row or column to the nearest open
     /// window on that side. A closed sidebar is not a destination and is not opened.
     fn focus_adjacent(&mut self, direction: PaneDirection) {
-        let from = if self.explorer.open && self.explorer.focused {
+        let from = if self.agent.open && self.agent.focused {
+            Surface::Agent
+        } else if self.explorer.open && self.explorer.focused {
             Surface::Sidebar
         } else {
             Surface::Editor(self.active)
@@ -1619,9 +1679,18 @@ impl App {
         };
         match next {
             Surface::Sidebar if self.focus_mode => {}
-            Surface::Sidebar => self.explorer.focused = true,
+            Surface::Sidebar => {
+                self.agent.focused = false;
+                self.explorer.focused = true;
+            }
             Surface::Editor(id) => {
+                self.agent.focused = false;
                 self.active = id;
+                self.explorer.blur();
+                self.end_file_mode();
+            }
+            Surface::Agent => {
+                self.agent.focused = true;
                 self.explorer.blur();
                 self.end_file_mode();
             }
@@ -2021,6 +2090,8 @@ impl App {
             SemanticAction::Prompt(action) => self.handle_prompt(action),
             SemanticAction::Settings(action) => self.handle_settings(action),
             SemanticAction::CloseAbout => self.about = false,
+            SemanticAction::ToggleAgent => self.toggle_agent(),
+            SemanticAction::Agent(action) => self.handle_agent_input(action),
         }
     }
 
@@ -2044,6 +2115,14 @@ impl App {
         if self
             .settings
             .as_ref()
+            .is_some_and(|page| page.text.is_some())
+        {
+            self.edit_text_setting(action);
+            return;
+        }
+        if self
+            .settings
+            .as_ref()
             .is_some_and(|page| page.menu.is_some())
         {
             self.handle_choice_menu(action);
@@ -2058,6 +2137,10 @@ impl App {
             if let Some(page) = self.settings.as_mut() {
                 page.capture = true;
             }
+            return;
+        }
+        if let Some(id) = opens_menu.filter(|id| crate::settings::AiPrefs::is_text(*id)) {
+            self.begin_text_setting(id);
             return;
         }
         if let Some(id) = opens_menu {
@@ -2090,6 +2173,7 @@ impl App {
                 false
             }
             SettingsAction::Reset | SettingsAction::Assign(_) => false,
+            SettingsAction::Insert(_) | SettingsAction::DeleteChar => false,
         };
         if close {
             self.settings = None;
@@ -2152,6 +2236,82 @@ impl App {
                 }
             }
             SettingsAction::Reset | SettingsAction::Assign(_) => {}
+            SettingsAction::Insert(_) | SettingsAction::DeleteChar => {}
+        }
+    }
+
+    fn edit_text_setting(&mut self, action: SettingsAction) {
+        match action {
+            SettingsAction::Insert(text) => {
+                if let Some(draft) = self.settings.as_mut().and_then(|page| page.text.as_mut()) {
+                    let room = 512usize.saturating_sub(draft.value.chars().count());
+                    draft.value.extend(text.chars().take(room));
+                }
+            }
+            SettingsAction::DeleteChar => {
+                if let Some(draft) = self.settings.as_mut().and_then(|page| page.text.as_mut()) {
+                    draft.value.pop();
+                }
+            }
+            SettingsAction::Enter => self.commit_text_setting(),
+            SettingsAction::Back => {
+                if let Some(page) = self.settings.as_mut() {
+                    page.text = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn begin_text_setting(&mut self, id: crate::settings::SettingId) {
+        use crate::settings::SettingId;
+        let value = match id {
+            SettingId::AiServer => self.ai.endpoint(),
+            SettingId::AiModel => self.ai.model.clone(),
+            _ => return,
+        };
+        if let Some(page) = self.settings.as_mut() {
+            page.text = Some(crate::settings::TextDraft::new(value));
+        }
+    }
+
+    fn commit_text_setting(&mut self) {
+        use crate::settings::SettingId;
+        let Some(value) = self.settings.as_ref().and_then(|page| {
+            page.text
+                .as_ref()
+                .map(|draft| draft.value.trim().to_string())
+        }) else {
+            return;
+        };
+        let id = self
+            .settings
+            .as_ref()
+            .and_then(|page| page.section().items.get(page.row).map(|item| item.id));
+        let changed = match id {
+            Some(SettingId::AiServer) => {
+                let default = self.ai.provider.default_server();
+                let stored = if value == default {
+                    String::new()
+                } else {
+                    value
+                };
+                let changed = stored != self.ai.server;
+                self.ai.server = stored;
+                changed
+            }
+            Some(SettingId::AiModel) => {
+                let changed = value != self.ai.model;
+                self.ai.model = value;
+                changed
+            }
+            _ => false,
+        };
+        if let Some(page) = self.settings.as_mut() {
+            page.text = None;
+        }
+        if changed {
+            self.queue_settings_save();
         }
     }
 
@@ -2177,7 +2337,10 @@ impl App {
             | SettingId::PythonChecking) => {
                 self.appearance.lsp.set_choice(id, index);
             }
-            SettingId::Binding(_) => return,
+            id @ (SettingId::AiEnabled | SettingId::AiProvider) => {
+                self.ai.set_choice(id, index);
+            }
+            SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => return,
         }
         if let Some(menu) = self.settings.as_mut().and_then(|page| page.menu.as_mut()) {
             menu.index = index;
@@ -2206,7 +2369,10 @@ impl App {
             | SettingId::PythonChecking) => {
                 self.appearance.lsp.restore_choice(id, origin);
             }
-            SettingId::Binding(_) => {}
+            id @ (SettingId::AiEnabled | SettingId::AiProvider) => {
+                self.ai.restore_choice(id, origin);
+            }
+            SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => {}
         }
     }
 
@@ -2225,12 +2391,13 @@ impl App {
             | SettingId::CheckOnSave
             | SettingId::FormatOnSave
             | SettingId::PythonChecking) => self.appearance.lsp.choice_token(id),
-            SettingId::Binding(_) => String::new(),
+            id @ (SettingId::AiEnabled | SettingId::AiProvider) => self.ai.choice_token(id),
+            SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => String::new(),
         }
     }
 
     fn choice_state(&self, id: crate::settings::SettingId) -> Option<(usize, String, usize)> {
-        use crate::settings::{EditorPrefs, FilePrefs, LspPrefs, SettingId};
+        use crate::settings::{AiPrefs, EditorPrefs, FilePrefs, LspPrefs, SettingId};
         let (index, token, len) = match id {
             SettingId::ColorTheme => (
                 self.appearance.color_index(),
@@ -2260,7 +2427,12 @@ impl App {
                 self.appearance.lsp.choice_token(id),
                 LspPrefs::choice_names(id).len(),
             ),
-            SettingId::Binding(_) => return None,
+            id @ (SettingId::AiEnabled | SettingId::AiProvider) => (
+                self.ai.choice_index(id),
+                self.ai.choice_token(id),
+                AiPrefs::choice_names(id).len(),
+            ),
+            SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => return None,
         };
         Some((index, token, len))
     }
@@ -2292,6 +2464,7 @@ impl App {
         if let Some(page) = self.settings.as_mut() {
             page.capture = false;
             page.menu = None;
+            page.text = None;
         }
         if page.inside {
             if let Some(item) = page.section().items.get(page.row) {
@@ -2332,6 +2505,10 @@ impl App {
             SettingId::CheckOnSave => self.appearance.lsp.check_on_save = true,
             SettingId::FormatOnSave => self.appearance.lsp.format_on_save = false,
             SettingId::PythonChecking => self.appearance.lsp.python = PythonCheck::Basic,
+            id @ (SettingId::AiEnabled
+            | SettingId::AiProvider
+            | SettingId::AiServer
+            | SettingId::AiModel) => self.ai.reset(id),
         }
     }
 
@@ -2362,6 +2539,12 @@ impl App {
     }
 
     fn handle_command_bar(&mut self, action: CommandBarAction) {
+        if matches!(action, CommandBarAction::ToChat) {
+            self.command_bar = None;
+            self.cancel_resume();
+            self.focus_agent();
+            return;
+        }
         let ghost = if matches!(action, CommandBarAction::AcceptHint) {
             self.argument_ghost()
         } else {
@@ -2413,6 +2596,7 @@ impl App {
                 self.command_bar = None;
                 self.cancel_resume();
             }
+            CommandBarAction::ToChat => {}
         }
     }
 
@@ -3295,6 +3479,7 @@ impl App {
                 self.settings = None;
                 self.about = true;
             }
+            CommandId::Agent => self.toggle_agent(),
             CommandId::FilePicker => self.open_file_picker(),
             CommandId::Diff => self.toggle_diff(),
             CommandId::Focus => self.toggle_focus(),
@@ -3433,6 +3618,10 @@ impl App {
 
     fn note_buffer_change(&mut self) {
         let tab_id = self.active_tab_id();
+        self.note_tab_change(tab_id);
+    }
+
+    fn note_tab_change(&mut self, tab_id: TabId) {
         if let Some(tab) = self.find_tab_mut(tab_id) {
             tab.dirty = tab.buffer.fingerprint() != tab.saved_fingerprint;
         }
@@ -3969,11 +4158,20 @@ impl App {
     }
 
     fn open_path(&mut self, path: PathBuf) {
+        self.open_at(path, None);
+    }
+
+    /// Opens `path`. `line` is 1-based and moves the cursor when the file is already open.
+    /// A file that still has to load keeps the line in the load request.
+    fn open_at(&mut self, path: PathBuf, line: Option<usize>) {
         self.remember_file(&path);
         if let Some(tab_id) = self.tab_with_path(&path) {
             self.focus_tab(tab_id);
             self.explorer.blur();
             self.end_file_mode();
+            if let Some(line) = line.filter(|n| *n > 0) {
+                self.buffer_mut().goto_line(line - 1);
+            }
             return;
         }
         self.remember_sidebar();
@@ -3987,7 +4185,17 @@ impl App {
         } else {
             self.push_tab(pane)
         };
-        self.queue_load(pane, tab_id, path);
+        self.start_load(
+            pane,
+            tab_id,
+            path,
+            LoadKind::Open {
+                encoding: None,
+                place: line.filter(|n| *n > 0).map(|line| (line - 1, 0)),
+                focus: true,
+            },
+            false,
+        );
     }
 
     fn tab_with_path(&self, path: &Path) -> Option<TabId> {
@@ -5463,6 +5671,127 @@ mod tests {
         type_in_bar(&mut app, "42");
         bar(&mut app, CommandBarAction::Complete);
         assert_eq!(app.command_bar.as_ref().unwrap().input, "42");
+    }
+
+    #[test]
+    fn tab_switches_the_command_bar_and_the_assistant() {
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        app.handle(SemanticAction::OpenCommandBar);
+        assert_eq!(app.focus(), Focus::CommandBar);
+        bar(&mut app, CommandBarAction::ToChat);
+        assert!(app.command_bar.is_none());
+        assert!(app.agent.open && app.agent.focused);
+        assert_eq!(app.focus(), Focus::Agent);
+        app.handle(SemanticAction::OpenCommandBar);
+        assert_eq!(app.focus(), Focus::CommandBar);
+        assert!(app.agent.open);
+        bar(&mut app, CommandBarAction::ToChat);
+        assert_eq!(app.focus(), Focus::Agent);
+    }
+
+    #[test]
+    fn a_prompt_tells_the_model_the_cursor_line() {
+        let mut app = App::new(
+            Buffer::from_text("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n"),
+            Some(PathBuf::from("examples/lang/python.py")),
+        );
+        for _ in 0..7 {
+            app.handle(SemanticAction::Move {
+                movement: Movement::Down,
+                extend: false,
+            });
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.attach_agent(tx);
+        app.ai.model = "qwen".into();
+        app.agent.prompt = "add hello".into();
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Submit));
+        let crate::agent::AgentCommand::Turn { prompt, .. } = rx.try_recv().unwrap() else {
+            panic!("prompt was not sent");
+        };
+        assert!(prompt.starts_with("add hello\n"), "{prompt}");
+        assert!(prompt.contains("editor_state:"), "{prompt}");
+        assert!(prompt.contains("python.py"), "{prompt}");
+        assert!(prompt.contains("line: 8"), "{prompt}");
+        assert_eq!(app.agent.transcript.last().unwrap().text, "add hello");
+    }
+
+    #[test]
+    fn the_prompt_moves_and_shift_selects() {
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        let type_prompt = |app: &mut App, text: &str| {
+            app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+                text.into(),
+            )));
+        };
+        type_prompt(&mut app, "hello");
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Move {
+            right: false,
+            extend: false,
+        }));
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Move {
+            right: false,
+            extend: true,
+        }));
+        assert_eq!(app.agent.prompt, "hello");
+        assert_eq!(app.agent.cursor, 3);
+        assert_eq!(app.agent.anchor, 4);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Backspace));
+        assert_eq!(app.agent.prompt, "helo");
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Jump {
+            end: false,
+            extend: false,
+        }));
+        type_prompt(&mut app, "X");
+        assert_eq!(app.agent.prompt, "Xhelo");
+        assert_eq!(app.agent.cursor, 1);
+    }
+
+    #[test]
+    fn ctrl_up_reads_the_transcript_and_ctrl_down_returns() {
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Above));
+        assert!(app.agent.reading);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Line {
+            down: false,
+            extend: false,
+        }));
+        assert_eq!(app.agent.scroll, 1);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "x".into(),
+        )));
+        assert!(app.agent.prompt.is_empty());
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Below));
+        assert!(!app.agent.reading);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "x".into(),
+        )));
+        assert_eq!(app.agent.prompt, "x");
+    }
+
+    #[test]
+    fn the_prompt_steps_over_a_thai_cluster() {
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "ที่a".into(),
+        )));
+        assert_eq!(app.agent.cursor, 4);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Move {
+            right: false,
+            extend: false,
+        }));
+        assert_eq!(app.agent.cursor, 3);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Move {
+            right: false,
+            extend: false,
+        }));
+        assert_eq!(app.agent.cursor, 0);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Move {
+            right: true,
+            extend: false,
+        }));
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Backspace));
+        assert_eq!(app.agent.prompt, "a");
     }
 
     #[test]

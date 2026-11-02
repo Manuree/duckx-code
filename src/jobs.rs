@@ -148,6 +148,12 @@ pub enum Job {
         request: ParseInput,
     },
     /// Compare one buffer with `HEAD`. `text` is a rope clone, so the UI thread does not copy it.
+    /// Read, list, or edit a file that is not open. The result is the tool text.
+    AgentDisk {
+        turn: u64,
+        call_id: String,
+        task: crate::agent::DiskTask,
+    },
     GitDiff {
         tab_id: TabId,
         path: PathBuf,
@@ -238,6 +244,13 @@ pub enum AppEvent {
         generation: u64,
         fingerprint: u64,
         result: DiffResult,
+    },
+    AgentDisk {
+        turn: u64,
+        call_id: String,
+        result: String,
+        /// A file the assistant just created. The core opens it.
+        open: Option<PathBuf>,
     },
 }
 
@@ -362,6 +375,19 @@ pub fn run(job: Job) -> AppEvent {
             parsed: syntax::parse(request.language, &request.rope, request.old.as_ref()),
             tab_id,
         },
+        Job::AgentDisk {
+            turn,
+            call_id,
+            task,
+        } => {
+            let report = crate::agent::perform_disk(task);
+            AppEvent::AgentDisk {
+                result: report.message,
+                open: report.open,
+                turn,
+                call_id,
+            }
+        }
         Job::GitDiff {
             tab_id,
             path,

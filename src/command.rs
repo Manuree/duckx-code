@@ -93,6 +93,8 @@ pub enum CommandId {
     Settings,
     /// Open the about page.
     About,
+    /// Open, focus, or close the assistant panel.
+    Agent,
     /// Open the workspace file picker.
     FilePicker,
     /// Read the focused file from disk again.
@@ -522,6 +524,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: true,
     },
     CommandSpec {
+        id: CommandId::Agent,
+        name: "agent",
+        description: "Open the assistant panel",
+        shortcut: "F6",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
         id: CommandId::About,
         name: "about",
         description: "Show the version and logo",
@@ -652,6 +663,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::CloseView => 370,
         CommandId::CloseAll => 380,
         CommandId::Settings => 390,
+        CommandId::Agent => 392,
         CommandId::About => 395,
         CommandId::Quit => 400,
     }
@@ -972,6 +984,7 @@ mod tests {
                 "close-view",
                 "close-all",
                 "setting",
+                "agent",
                 "about",
                 "quit",
             ]

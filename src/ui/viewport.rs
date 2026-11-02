@@ -101,7 +101,7 @@ pub fn render(
         && row < text.height as usize
         && col < text.width as usize
     {
-        frame.set_cursor_position((text.x + col as u16, text.y + row as u16));
+        super::cursor::place(text.x + col as u16, text.y + row as u16);
     }
 }
 

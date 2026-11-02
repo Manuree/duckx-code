@@ -2,7 +2,7 @@
 name = "duckx-code"
 version = "0.1.0"
 edition = "2024"
-description = "Modern modeless CLI code editor built for 75% keyboard layouts"
+description = "Modern modeless CLI code editor for 75% keyboards, with local coding through Ollama or LM Studio"
 license = "MIT"
 
 [dependencies]
@@ -16,6 +16,7 @@ unicode-width = "0.2"
 encoding_rs = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 lsp-types = "0.97"
 futures = "0.3"
 ignore = "0.4"

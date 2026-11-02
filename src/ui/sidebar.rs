@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Position, Rect},
+    layout::{Alignment, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block, Paragraph},
@@ -80,10 +80,7 @@ fn render_filter(frame: &mut Frame, explorer: &Explorer, area: Rect, theme: &UiS
 
     if explorer.focused && explorer.file_query.is_none() {
         let col = cursor as u16;
-        frame.set_cursor_position(Position::new(
-            inner.x + col.min(inner.width.saturating_sub(1)),
-            inner.y,
-        ));
+        super::cursor::place(inner.x + col.min(inner.width.saturating_sub(1)), inner.y);
     }
 }
 

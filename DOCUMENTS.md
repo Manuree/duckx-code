@@ -86,7 +86,7 @@ Behavior while a selection is active:
 | Keys | No selection, or selection within one line | Selection across multiple lines |
 | :--- | :--- | :--- |
 | `Tab` | Inserts spaces up to the next tab stop (or replaces the selection) | Indents every selected line, skipping empty lines |
-| `Shift + Tab` | Outdents the current line by one level | Outdents every selected line by one level |
+| `Shift + Tab` | Outdents the line or the selection. Inside a snippet, moves to the previous placeholder. | Outdents every selected line. |
 
 * **Indent style is detected per file:** if more lines start with a tab than with spaces, `Tab` inserts a tab character; otherwise it uses 4 spaces.
 * **Partial-line rule:** a selection that ends at the very start of a line does not include that line.
@@ -206,7 +206,7 @@ The program must be on `PATH`. On Windows, npm's `.cmd` launchers (such as `type
 * **Python checking:** pyright and basedpyright are given `typeCheckingMode: basic` for open files. That reports an undefined name, such as a misspelled call. Left unset, those servers report syntax errors only. A `pyrightconfig.json` or `pyproject.toml` in the project still configures them. `pylsp` uses its own defaults.
 * **Diagnostics:** errors, warnings, infos, and hints from the server. The gutter shows `E`, `W`, `I`, or `H` in that color before the line number on the line where a diagnostic starts; the most severe one wins. The text it covers is drawn bold in that same color, the color of the diagnostic bar. Ranges move with your edits until the server sends fresh results. Editing the text a diagnostic covers, including typing at either edge of that token, clears that marker immediately. A result computed for an older version of the file is moved the same way, and dropped when that edit rewrote its range. rust-analyzer's compiler check runs when the file is saved. A type error you have not touched stays while you keep typing. Syntax errors follow the unsaved buffer: after a short pause the editor asks again, and a quote you already closed disappears without saving. That live result replaces the compiler's syntax error from the last save.
 * **Cursor line:** the most severe diagnostic under the cursor (or else on the cursor line) is a full-width bar just above the status bar. The bar uses that level's color, the message is on the left, and the number of diagnostics in the file is on the right. The status bar itself keeps only the per-level counts.
-* **Completion:** the menu shows the symbol kind, the detail, and one line of documentation when the server sends it. Accepting a snippet selects the first placeholder. `Tab` and `Shift+Tab` move through the placeholders, and `Esc` leaves the snippet. `(` and `,` ask for the function signature and show it above the cursor.
+* **Completion:** the menu shows the symbol kind, the detail, and one line of documentation when the server sends it. Accepting a snippet selects the first placeholder. `Tab` and `Shift + Tab` move through the placeholders, and `Esc` leaves the snippet. `(` and `,` ask for the function signature and show it above the cursor.
 * **Semantic tokens:** when the server offers them, those colors paint over the tree-sitter colors, so a built-in type, a macro, or a lifetime can differ from a name the grammar could not tell apart. A syntax theme may set `documentation`, `macro`, `builtin`, `escape`, and `lifetime`. Missing keys fall back to comment, function, type, constant, and attribute.
 * **Missing server:** the status bar says `No language server found. Install … for code diagnostics` once per session, and the file stays plain.
 * **Crash:** a server that stops after it was ready is restarted up to 3 times, waiting 1, 2, then 4 seconds. A server that stops before it is ready, or after the third restart, stays stopped until duckx-code restarts. The status bar shows the last line it printed.
@@ -231,7 +231,7 @@ The program must be on `PATH`. On Windows, npm's `.cmd` launchers (such as `type
 | `Ctrl + ]` or `match-bracket` | Jump to the bracket paired with the one under the cursor, or the one just before it. `Ctrl + Shift + ]` selects through that bracket. |
 | `Ctrl + O` or `jump-back` | Return to the place from before the last definition or references jump |
 | `Ctrl + Shift + O` or `jump-forward` | Go forward again after jump-back |
-| `Ctrl + Space` or `complete` | Open completions at the cursor. Typing a word or a character the server listed (such as `.`) opens the same list on its own. A snippet selects its first placeholder. `Tab` and `Shift + Tab` move between placeholders. `Esc` leaves the snippet. |
+| `Ctrl + Space` or `complete` | Open completions at the cursor. Typing a word or a character the server listed (such as `.`) opens the same list on its own. A snippet selects its first placeholder. `Tab` moves to the next placeholder and `Shift + Tab` to the previous one. `Esc` leaves the snippet. |
 
 With no diagnostics in the file, both diagnostic keys say `No diagnostics in this file`. With no references, `Shift + F12` says `No references`. A reference row shows the file and line, and the text of that line when the file is already open. `Ctrl + O` returns from that jump the same way it returns from a definition.
 
@@ -251,7 +251,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 | `F1` / `Ctrl + ;` / `Ctrl + Shift + :` | Open the Command Bar (fallbacks) |
 | Type | Filter commands in real time |
 | `Up` / `Down` (or `Shift + Tab` for up) | Move the highlight |
-| `Tab` | Complete the highlighted command name into the input |
+| `Tab` | Leave the bar and open the assistant. `Tab` in the assistant opens the bar again |
 | `Right` | Accept the dimmed file or folder name after the cursor |
 | `Enter` | Run the command |
 | `Esc` / `F1` | Close without running anything |
@@ -265,10 +265,10 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 
 ### 6.2 How Matching Works
 
-1. **The list is the focused surface.** Editor commands and explorer file commands are never mixed. A bare number goes to that line only while an editor is focused: typing `42` shows `goto 42` as the only hint, and `Enter` jumps there. `Tab` leaves the number as-is. In the explorer, a number matches nothing.
+1. **The list is the focused surface.** Editor commands and explorer file commands are never mixed. A bare number goes to that line only while an editor is focused: typing `42` shows `goto 42` as the only hint, and `Enter` jumps there. `Tab` leaves the bar and opens the assistant. In the explorer, a number matches nothing.
 2. **Name prefix matches come next:** `un` → `undo` in the editor, `del` → `delete-line` in the editor and `delete` in the explorer while FILE mode is on.
 3. **Then word matches:** commands where a word in the name or description starts with the input, so `line` in the editor → `goto`, `copy`, `cut`, `comment`, `indent`, `outdent`, `move-line-up`, `move-line-down`, `delete-line`, `duplicate-line-up`, `duplicate-line-down`.
-4. **Each of those groups follows importance.** An empty list in the editor starts `file-picker`, `find`, `replace`, `goto`, `save`, `undo`, `redo`, then clipboard, language tools, layout, `reveal`, `explorer`, `setting`, `about`, and `quit`. The explorer uses the same rank: `file-picker`, `find`, `replace`, `select`, then `move`, `delete`, and `rename` in FILE mode, then `reveal`, `explorer`, `setting`, `about`, and `quit`.
+4. **Each of those groups follows importance.** An empty list in the editor starts `file-picker`, `find`, `replace`, `goto`, `save`, `undo`, `redo`, then clipboard, language tools, layout, `reveal`, `explorer`, `setting`, `agent`, `about`, and `quit`. The explorer uses the same rank: `file-picker`, `find`, `replace`, `select`, then `move`, `delete`, and `rename` in FILE mode, then `reveal`, `explorer`, `setting`, `about`, and `quit`.
 5. **The most recent command on this surface is always first** when it is one of the matches, and marked with ★. That holds for an empty input and for a typed filter, including when the recent command only matches a later word. Opening the bar and pressing `Enter` immediately repeats it. A command last run in the editor is not pinned while the explorer is focused, and the reverse.
 
 ### 6.3 Running Commands
@@ -361,6 +361,7 @@ If no OS clipboard is available (e.g. a headless session), `copy`, `cut`, and `p
 | Command | Argument | Description | Shortcut |
 | :--- | :--- | :--- | :--- |
 | `setting` | — | Open the settings page. `config` is another name for the same command. | — |
+| `agent` | — | Open the assistant panel. It is drawn only while the prompt is focused. `F6` while the prompt is focused closes it. From the command bar, `Tab` opens it, and `Tab` in the prompt returns to the command bar and hides the panel. See [Assistant](#assistant). | `F6` |
 | `about` | — | Open the about page. It shows the duck logo, the name, and the version. `Esc` closes it. | — |
 | `quit` | — | Exit duckx-code. Asks before leaving unsaved changes | `Ctrl + Q` |
 
@@ -583,7 +584,8 @@ The choice is written to `settings.json`:
   "syntax_theme": "tokyo-night",
   "editor": { "tab_width": 4, "indent_with_spaces": true, "line_ending": "auto" },
   "files": { "trim_trailing_space": false, "final_newline": false },
-  "lsp": { "enabled": true, "check_on_save": true, "format_on_save": false, "python": "basic" }
+  "lsp": { "enabled": true, "check_on_save": true, "format_on_save": false, "python": "basic" },
+  "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "" }
 }
 ```
 
@@ -609,6 +611,15 @@ A color theme may add a `diagnostics` section with `error`, `warning`, `info`, a
 | Format on save | On, Off | On asks the language server to format the file before it is written. |
 | Python checking | Off, Basic, Standard | How strictly pyright checks an open Python file. Basic reports an undefined name. |
 
+**AI** holds the assistant. `Enter` on Assistant or Provider opens a list. `Enter` on Server or Model types that value: the block cursor sits after the text, printable keys change it, `Enter` keeps it, and `Esc` drops the draft. An empty server uses the provider's default address. The model starts empty; a turn asks for one until it is set. The choice is written to `settings.json` under `ai`.
+
+| Row | Values | Effect |
+| :--- | :--- | :--- |
+| Assistant | On, Off | Off refuses to send a prompt. |
+| Provider | Ollama, OpenAI | Ollama defaults to `http://127.0.0.1:11434/v1`. OpenAI defaults to `http://127.0.0.1:1234/v1` (LM Studio and any later server that speaks the same API). |
+| Server | text | Base address, including `/v1`. Both providers use `POST /v1/chat/completions`. |
+| Model | text | Model name sent as `model`. |
+
 Code uses the syntax theme's `text` color. The other syntax roles are stored for highlighting and are what the sample on the Syntax colors row shows.
 
 ---
@@ -618,6 +629,28 @@ Code uses the syntax theme's `text` color. The other syntax roles are stored for
 `about` opens a page over the editor and the sidebar. The status bar badge reads `ABOUT`. The page shows the duck logo, the name **duckx-code**, and the version from this build. `Esc`, `Backspace`, or `F1` closes it and returns to the surface that was focused. Printable keys do not insert while it is open. `Ctrl + Q` still quits.
 
 ---
+
+## Assistant
+
+`agent` or `F6` opens a panel under the editor, and the panel is drawn only while its prompt is focused. The editor above it keeps its own text; the panel does not cover those lines, and keys in the prompt do not move the editor cursor. `Tab` in the command bar closes the bar and shows the panel. `Tab` in the prompt opens the command bar and hides the panel. `Esc` leaves the prompt and hides the panel. `F6` from the editor shows it again, and `F6` while the prompt is focused closes it. `Ctrl + Down` moves into the panel only while it is showing. Inside the panel, `Ctrl + Up` reads the messages and `Ctrl + Down` returns to the prompt. `Up` and `Down` scroll those messages, and they move between wrapped rows while the prompt has the cursor.
+
+Messages and the prompt wrap onto the next row when they are wider than the panel. Printable keys edit the prompt. `Left` and `Right` move the cursor, and `Shift` with either key extends the selection. `Up` and `Down` move between wrapped rows. `Home` and `End` jump to the ends. `Backspace` and `Delete` remove the selection, or one character. `Enter` sends it. `Ctrl + Up` leaves the prompt to read the messages above it. `Up` and `Down` then scroll those messages, `Home` and `End` jump to the top and the latest line, and `Ctrl + Down` returns to the prompt. The model also receives the focused file, the cursor line and column, and any selection, and it is told to edit at that cursor unless the prompt names another place. The chat line stays the text you typed. The panel title reads `ready`, `waiting`, `running read_file` (or another tool), or the server error. While the assistant is waiting or running a tool, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` spins in front of that word. The same tool with the same arguments three times in a row stops the turn, and so does a 33rd tool call. A missing model, or Assistant set to Off, is a status-bar message.
+
+The assistant can run these tools. A path that climbs out of the workspace with `..` is refused.
+
+| Tool | What it does |
+| :--- | :--- |
+| `read_file` | Read a line range. An open file is read from the buffer. |
+| `list_dir` | List one directory. |
+| `editor_state` | Focused path, cursor line, and the selection. |
+| `diagnostics` | Errors and warnings for a file. |
+| `apply_edit` | Replace a line range, or one unique snippet. An open file is one undo step (`Ctrl + Z`). A closed file is written in the background. |
+| `create_file` | Write a new file and open it. A path that already exists is refused. |
+| `open_file` | Open a workspace file. |
+| `save` | Save an open file. |
+| `goto` | Move to a line. A path opens that file first. |
+
+There is no shell tool. Set the server and the model under [Settings](#10-settings), section AI, before the first prompt.
 
 ## 12. Planned
 

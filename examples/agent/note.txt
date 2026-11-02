@@ -1,0 +1,15 @@
+# Open the command bar with Shift+Space, then press Tab.
+# The panel opens at the bottom and hides again when Tab returns to the command bar.
+# F6 or agent opens the same panel from the editor.
+# Type a request and press Enter.
+# Left and Right move in the prompt. Shift with those keys selects text.
+# A long reply wraps. Ctrl+Up reads it, and Ctrl+Down returns to the prompt.
+# The assistant sees this file and the cursor line.
+# A spinner turns beside the status while the assistant is working.
+# An edit in an open file is one undo step. Ctrl+Z puts the old text back.
+# Esc leaves the prompt. F6 focuses the panel again, and F6 once more closes it.
+# Set the server and the model under Settings, section AI.
+
+fn greet() {
+    println!("hello");
+}

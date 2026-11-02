@@ -1,8 +1,8 @@
 # Duckx Code
 
-**CLI Code Editor For 75% keyboards. No vim motions.**
+**CLI Code Editor For 75% keyboards. No vim motions. Write code with Ollama or LM Studio.**
 
-duckx-code is a modeless terminal editor for a 75% keyboard. The cursor moves with the dedicated arrow keys, Home, End, Page Up, and Page Down. There are no vim motions: no `hjkl`, no `w`/`b`, and no operator-pending commands. Printable keys insert text immediately. Hold Shift with any navigation key to select.
+duckx-code is a modeless terminal editor for a 75% keyboard. The cursor moves with the dedicated arrow keys, Home, End, Page Up, and Page Down. There are no vim motions: no `hjkl`, no `w`/`b`, and no operator-pending commands. Printable keys insert text immediately. Hold Shift with any navigation key to select. `F6` opens an assistant that writes and edits code through a local model on Ollama or LM Studio.
 
 Keybindings and Command Bar commands are listed in [DOCUMENTS.md](DOCUMENTS.md). The design notes are in [DESIGN.md](DESIGN.md).
 
