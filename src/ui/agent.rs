@@ -25,7 +25,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         theme.sidebar_border
     };
-    let title = format!(" Assistant · {} ", fit(&status_label(app), 48));
+    let title = format!(" {} ", fit(&status_label(app), 56));
     let block = panel(&title).border_style(border).style(theme.sidebar);
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -252,17 +252,45 @@ fn prompt_line(
 
 fn status_label(app: &App) -> String {
     if app.agent.pending.is_some() {
-        return app.agent.status.clone();
+        return short_status(&app.agent.status);
     }
     if !app.agent.busy {
         let status = app.agent.status.as_str();
         if status.is_empty() || status == "ready" {
-            return "ready · Enter send · Shift+Enter newline".to_string();
+            return "ready".to_string();
         }
-        return app.agent.status.clone();
+        return short_status(status);
     }
     let frame = SPINNER[app.agent.spin as usize % SPINNER.len()];
-    format!("{frame} {}", app.agent.status)
+    if let Some(draft) = app.agent.thinking_draft.as_ref() {
+        if !draft.trim().is_empty() {
+            let snip = last_line_snip(draft, 40);
+            if snip.is_empty() {
+                return format!("{frame} thinking…");
+            }
+            return format!("{frame} thinking… · {snip}");
+        }
+    }
+    if app.agent.status == "thinking" || app.agent.status.starts_with("thinking") {
+        return format!("{frame} thinking…");
+    }
+    format!("{frame} {}", short_status(&app.agent.status))
+}
+
+/// Drop legacy "approve X · ←/→ Enter" chrome down to `approve X`.
+fn short_status(status: &str) -> String {
+    let trimmed = status.split(" · ").next().unwrap_or(status).trim();
+    trimmed.to_string()
+}
+
+fn last_line_snip(text: &str, max: usize) -> String {
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    fit(line, max)
 }
 
 fn fit(text: &str, width: usize) -> String {

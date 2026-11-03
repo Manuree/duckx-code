@@ -108,6 +108,7 @@ async fn run_turn(
 
     let mut trail = ToolTrail::default();
     let mut nudged = false;
+    let mut empty_thinking_nudged = false;
     loop {
         let Some(reply) = complete_or_cancel(
             client,
@@ -136,6 +137,22 @@ async fn run_turn(
                 messages.push(json!({
                     "role": "user",
                     "content": "Use a tool call now (create_file or apply_edit). Do not give steps or paste file contents as instructions. Approval is handled by the app."
+                }));
+                continue;
+            }
+            // Thinking-only reply (empty content): re-prompt once instead of error spam.
+            if reply.content.trim().is_empty()
+                && !reply.thinking.trim().is_empty()
+                && !empty_thinking_nudged
+            {
+                empty_thinking_nudged = true;
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": ""
+                }));
+                messages.push(json!({
+                    "role": "user",
+                    "content": "Your previous reply had reasoning but no visible answer. Reply with the final answer only (no thinking tags)."
                 }));
                 continue;
             }
@@ -307,11 +324,21 @@ async fn complete_or_cancel(
                 model,
                 messages,
                 options,
-                move |text| {
-                    let _ = events.send(AgentEvent::Delta {
-                        id,
-                        text: text.to_string(),
-                    });
+                move |kind, text| {
+                    match kind {
+                        provider::DeltaKind::Content => {
+                            let _ = events.send(AgentEvent::Delta {
+                                id,
+                                text: text.to_string(),
+                            });
+                        }
+                        provider::DeltaKind::Thinking => {
+                            let _ = events.send(AgentEvent::Thinking {
+                                id,
+                                text: text.to_string(),
+                            });
+                        }
+                    }
                 },
             )
             .await
