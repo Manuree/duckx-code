@@ -16,4 +16,5 @@ pub mod settings;
 pub mod snippet;
 pub mod syntax;
 pub mod theme;
+pub mod utf8;
 pub mod ui;

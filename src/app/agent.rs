@@ -686,10 +686,20 @@ impl App {
             return Some("apply_edit needs a line range or find".to_string());
         };
         if let Some(tab_id) = self.tab_with_path(&path) {
-            let result = self
-                .find_tab_mut(tab_id)
-                .map(|tab| agent::apply_to_buffer(&mut tab.buffer, &edit))
-                .unwrap_or_else(|| Err("File is not open".to_string()));
+            let result = match self.find_tab_mut(tab_id) {
+                Some(tab) => {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        agent::apply_to_buffer(&mut tab.buffer, &edit)
+                    })) {
+                        Ok(inner) => inner,
+                        Err(payload) => Err(format!(
+                            "Edit panicked: {}",
+                            crate::utf8::panic_message(payload)
+                        )),
+                    }
+                }
+                None => Err("File is not open".to_string()),
+            };
             return Some(match result {
                 Ok(summary) => {
                     self.note_tab_change(tab_id);

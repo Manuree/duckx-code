@@ -416,7 +416,10 @@ impl ContentThinkSplit {
                     continue;
                 }
                 let hold = longest_tag_prefix(&self.buf, "</think>");
-                let emit_len = self.buf.len().saturating_sub(hold);
+                let emit_len = crate::utf8::floor_char_boundary(
+                    &self.buf,
+                    self.buf.len().saturating_sub(hold),
+                );
                 if emit_len == 0 {
                     break;
                 }
@@ -447,7 +450,10 @@ impl ContentThinkSplit {
             }
             let hold = longest_tag_prefix(&self.buf, "<think>")
                 .max(longest_tag_prefix(&self.buf, "</think>"));
-            let emit_len = self.buf.len().saturating_sub(hold);
+            let emit_len = crate::utf8::floor_char_boundary(
+                &self.buf,
+                self.buf.len().saturating_sub(hold),
+            );
             if emit_len == 0 {
                 break;
             }
@@ -1057,7 +1063,9 @@ fn python_value(raw: &str) -> Option<Value> {
     if (raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2)
         || (raw.starts_with('\'') && raw.ends_with('\'') && raw.len() >= 2)
     {
-        let inner = &raw[1..raw.len() - 1];
+        // Quotes are ASCII; still floor so a corrupted input cannot panic.
+        let end = crate::utf8::floor_char_boundary(raw, raw.len() - 1);
+        let inner = &raw[1..end];
         return Some(Value::String(inner.to_string()));
     }
     if raw == "True" || raw == "true" {

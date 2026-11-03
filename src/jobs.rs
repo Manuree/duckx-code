@@ -409,10 +409,22 @@ pub fn run(job: Job) -> AppEvent {
             call_id,
             task,
         } => {
-            let report = crate::agent::perform_disk(task);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::agent::perform_disk(task)
+            }));
+            let (result, open) = match caught {
+                Ok(report) => (report.message, report.open),
+                Err(payload) => (
+                    format!(
+                        "Disk task panicked: {}",
+                        crate::utf8::panic_message(payload)
+                    ),
+                    None,
+                ),
+            };
             AppEvent::AgentDisk {
-                result: report.message,
-                open: report.open,
+                result,
+                open,
                 turn,
                 call_id,
             }
