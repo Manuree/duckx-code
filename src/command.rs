@@ -539,7 +539,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::Agent,
         name: "agent",
-        description: "Open the assistant panel (agent new clears chat)",
+        description: "Open the assistant panel",
         shortcut: "F6",
         arg: None,
         editor: true,

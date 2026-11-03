@@ -370,8 +370,8 @@ If no OS clipboard is available (e.g. a headless session), `copy`, `cut`, and `p
 | Command | Argument | Description | Shortcut |
 | :--- | :--- | :--- | :--- |
 | `setting` | — | Open the settings page. `config` is another name for the same command. | — |
-| `agent` | — | Open the assistant panel. It is drawn only while the prompt is focused. `F6` while the prompt is focused closes it. From the command bar, `Tab` opens it, and `Tab` in the prompt returns to the command bar and hides the panel. `agent new` clears chat memory. See [Assistant](#assistant). | `F6` |
-| `clear` | — | Start a new assistant chat (clears transcript and tool memory). Alias `agent-new`. | `Ctrl+L` (in panel) |
+| `agent` | — | Open the assistant panel. It is drawn only while the prompt is focused. `F6` while the prompt is focused closes it. From the command bar, `Tab` opens it, and `Tab` in the prompt (when no `/` or `@` popup is open) returns to the command bar and hides the panel. New chat is `/new` or `Ctrl+L` in the panel — bare `agent new` is no longer a command-bar argument. See [Assistant](#assistant). | `F6` |
+| `clear` | — | Start a new assistant chat (clears transcript and tool memory). Prefer `/new` or `/clear` in the assistant prompt. Alias `agent-new`. | `Ctrl+L` (in panel) |
 | `about` | — | Open the about page. It shows the duck logo, the name, and the version. `Esc` closes it. | — |
 | `quit` | — | Exit duckx-code. Asks before leaving unsaved changes | `Ctrl + Q` |
 
@@ -597,7 +597,7 @@ The choice is written to `settings.json`:
   "editor": { "tab_width": 4, "indent_with_spaces": true, "line_ending": "auto" },
   "files": { "trim_trailing_space": false, "final_newline": false },
   "lsp": { "enabled": true, "check_on_save": true, "format_on_save": false, "python": "basic" },
-  "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "", "auto_approve": false, "streaming": true, "context_size": "16384" }
+  "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "", "auto_approve": false, "streaming": true, "context_size": "16384", "think": true }
 }
 ```
 
@@ -648,7 +648,31 @@ Code uses the syntax theme's `text` color. The other syntax roles are stored for
 
 ## Assistant
 
-`agent` or `F6` opens a panel under the editor, and the panel is drawn only while its prompt is focused. The editor above it keeps its own text; the panel does not cover those lines, and keys in the prompt do not move the editor cursor. `Tab` in the command bar closes the bar and shows the panel. `Tab` in the prompt opens the command bar and hides the panel. `Esc` leaves the prompt and hides the panel. `F6` from the editor shows it again, and `F6` while the prompt is focused closes it. `Ctrl + Down` moves into the panel only while it is showing. Inside the panel, `Ctrl + Up` reads the messages and `Ctrl + Down` returns to the prompt. `Up` and `Down` scroll those messages, and they move between wrapped rows while the prompt has the cursor. `Ctrl + L` in the panel, or the commands `clear` / `agent new` / `agent-new`, starts a new chat: transcript and tool-trail memory are cleared so a long session cannot push the system prompt and tools out of a small context window.
+`agent` or `F6` opens a panel under the editor, and the panel is drawn only while its prompt is focused. The editor above it keeps its own text; the panel does not cover those lines, and keys in the prompt do not move the editor cursor. `Tab` in the command bar closes the bar and shows the panel. `Tab` in the prompt opens the command bar and hides the panel when no completion popup is open; with a `/` or `@` popup open, `Tab` completes the highlighted entry instead. `Esc` closes an open popup first, then leaves the prompt and hides the panel. `F6` from the editor shows it again, and `F6` while the prompt is focused closes it. `Ctrl + Down` moves into the panel only while it is showing. Inside the panel, `Ctrl + Up` reads the messages and `Ctrl + Down` returns to the prompt. `Up` and `Down` move a completion popup when one is open; otherwise they scroll messages or move between wrapped prompt rows. `Ctrl + L` in the panel, or the slash commands `/new` and `/clear`, starts a new chat: transcript and tool-trail memory are cleared so a long session cannot push the system prompt and tools out of a small context window. Bare prompt words `clear` / `agent new` are no longer treated as commands (they would collide with normal chat); the command-bar entry `clear` (alias `agent-new`) remains as a shortcut outside the prompt.
+
+### Slash commands
+
+A line is a slash command only when `/` is the first character of the prompt (position 0 — leading spaces do not count). Text such as `please /help` or a path like `/usr/bin` or `src/a.rs` is sent to the model as normal chat. Typing `/` at the start opens a popup above the prompt listing every command with a short description; further typing fuzzy-filters the list. `Up` / `Down` move the highlight, `Tab` completes the name (and leaves a trailing space for commands that take arguments), `Enter` completes and runs commands that need no argument (or shows status for `/model`, `/provider`, `/context`), and `Esc` closes the popup. An unknown `/xyz` shows an inline error in the transcript and is not sent to the model.
+
+| Command | Description |
+| :--- | :--- |
+| `/new` | Start a new chat (also `Ctrl+L`). |
+| `/clear` | Same as `/new`. |
+| `/help` | List slash commands and key hints. |
+| `/model [name]` | Show the current model, list models from the server (`/api/tags` or `/v1/models`), or switch to `name`. |
+| `/provider [ollama or openai]` | Show or switch the AI provider. |
+| `/context [n or auto]` | Show or set context size (`num_ctx`). |
+| `/stream on or off` | Toggle response streaming. |
+| `/auto-approve on or off` | Toggle tool auto-approve. |
+| `/think on or off` | Toggle sending `think: true` to Ollama when supported. |
+| `/stop` | Cancel the current assistant run. |
+| `/retry` | Resend the last user prompt. |
+| `/compact` | Drop older history messages to free context. |
+| `/settings` | Open Settings → AI. |
+
+### @file mentions
+
+Typing `@` at the start of the prompt or after whitespace opens a file popup (an email-like `a@b.com` does not). The list is fuzzy-matched against the workspace file index (up to about 10 rows), ranking basename matches and recent/open files first, and ignoring `.git` / `target` the same way the file picker does. `Tab` or `Enter` inserts `@relative/path` (quoted when the path contains spaces). Unicode names (including Thai) work. On send, each mentioned file is attached as context: read with the usual size limits under a shared attach budget (large files are truncated with a note), path-safety checks still apply, and the `@path` text stays visible in the transcript.
 
 Messages and the prompt wrap onto the next row when they are wider than the panel. The prompt holds multiple lines (up to 8 visible rows, then it scrolls). Printable keys edit the prompt. `Left` and `Right` move the cursor, and `Shift` with either key extends the selection. `Up` and `Down` move between wrapped rows. `Home` and `End` jump to the start or end of the current wrap row. `Backspace` and `Delete` remove the selection, or one character (Backspace at the start of a line joins it to the previous line). `Enter` sends the prompt. `Shift + Enter` inserts a newline. When the terminal cannot report Shift with Enter, `Alt + Enter` or `Ctrl + J` do the same. Bracketed paste keeps newlines (CRLF is normalized). While a mutating tool waits for approval, the prompt is replaced by `[ Yes ]` / `[ No ]` buttons (default Yes); Left/Right or Tab move the highlight and Enter confirms. Keys typed then do not edit the chat prompt. On terminals without bracketed paste (classic Windows conhost), a fast burst of keys treats Enter inside the burst as a newline so a multi-line paste is not sent as only the first line. `Ctrl + Up` leaves the prompt to read the messages above it. `Up` and `Down` then scroll those messages, `Home` and `End` jump to the top and the latest line, and `Ctrl + Down` returns to the prompt. The model also receives the focused file, the cursor line and column, and any selection, and it is told to edit at that cursor unless the prompt names another place. The chat line stays the text you typed. The panel title is only the status: `ready`, `waiting`, `running read_file` (or another tool), `approve apply_edit`, or a short server error — not the word Assistant and not key hints. Key hints stay in this document (`Enter` sends, `Shift + Enter` newline). While the model is reasoning, the title shows a spinner and `thinking…`, optionally with a short live snippet of the latest reasoning line (reasoning is not written into the transcript). While the assistant is waiting or running a tool, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` spins in front of that word. The same tool with the same arguments three times in a row stops the turn, and so does a 33rd tool call. A missing model, or Assistant set to Off, is a status-bar message.
 

@@ -170,6 +170,8 @@ pub enum AgentAction {
     Close,
     /// Clear transcript and tool memory (new chat).
     NewChat,
+    /// Tab: accept the `/` or `@` popup, else open the command bar.
+    Complete,
 }
 
 /// Keys that belong to the completion list. Typing is not one of these: it still edits the buffer.

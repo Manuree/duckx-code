@@ -151,13 +151,11 @@ impl App {
                     } else if key == "l" || key == "L" {
                         self.select_pending_allow(false);
                     }
-                    // Other keys must not leak into the prompt while approval is open.
                 }
                 AgentAction::Move { right, .. } => {
                     self.select_pending_allow(!right);
                 }
                 AgentAction::Jump { end, .. } => {
-                    // Home -> Yes, End -> No (also used while reading is false).
                     if self.agent.reading {
                         self.agent.scroll = if end { 0 } else { usize::MAX };
                     } else {
@@ -178,16 +176,47 @@ impl App {
                         self.agent.scroll = self.agent.scroll.saturating_add(1);
                     }
                 }
+                AgentAction::Complete => {}
                 _ => {}
             }
             return;
         }
+
+        // Popup navigation takes Up/Down/Tab/Enter/Esc before normal prompt keys.
+        if self.agent.popup.is_some() {
+            match action {
+                AgentAction::Line { down, .. } if !self.agent.reading => {
+                    self.nudge_agent_popup(down);
+                    return;
+                }
+                AgentAction::Complete | AgentAction::Submit if !self.agent.reading => {
+                    self.accept_agent_popup(matches!(action, AgentAction::Submit));
+                    return;
+                }
+                AgentAction::Close => {
+                    self.agent.popup = None;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match action {
-            AgentAction::Insert(text) if !self.agent.reading => self.edit_prompt(&text),
-            AgentAction::Backspace if !self.agent.reading => self.delete_prompt(false),
-            AgentAction::Delete if !self.agent.reading => self.delete_prompt(true),
+            AgentAction::Insert(text) if !self.agent.reading => {
+                self.edit_prompt(&text);
+                self.refresh_agent_popup();
+            }
+            AgentAction::Backspace if !self.agent.reading => {
+                self.delete_prompt(false);
+                self.refresh_agent_popup();
+            }
+            AgentAction::Delete if !self.agent.reading => {
+                self.delete_prompt(true);
+                self.refresh_agent_popup();
+            }
             AgentAction::Move { right, extend } if !self.agent.reading => {
                 self.slide_prompt(right, extend);
+                self.refresh_agent_popup();
             }
             AgentAction::Insert(_)
             | AgentAction::Backspace
@@ -205,6 +234,7 @@ impl App {
                 let row = prompt_row_for(&rows, cursor, len);
                 let at = if end { rows[row].1 } else { rows[row].0 };
                 self.place_prompt(at, extend);
+                self.refresh_agent_popup();
             }
             AgentAction::Line { down, extend } => {
                 if self.agent.reading {
@@ -215,6 +245,7 @@ impl App {
                     }
                 } else {
                     self.line_prompt(down, extend);
+                    self.refresh_agent_popup();
                 }
             }
             AgentAction::Above => {
@@ -229,12 +260,24 @@ impl App {
                 self.agent.reading = false;
             }
             AgentAction::Close => {
+                if self.agent.popup.take().is_some() {
+                    return;
+                }
                 if self.agent.busy {
                     self.cancel_agent();
                 }
                 self.agent.focused = false;
             }
             AgentAction::NewChat => self.clear_agent_chat(),
+            AgentAction::Complete if !self.agent.reading => {
+                if self.agent.popup.is_some() {
+                    self.accept_agent_popup(false);
+                } else {
+                    // Same as former Tab → command bar.
+                    self.open_command_bar_from_agent();
+                }
+            }
+            AgentAction::Complete => {}
             AgentAction::Submit if !self.agent.reading => self.submit_agent(),
             AgentAction::Submit => {}
         }
@@ -250,6 +293,7 @@ impl App {
         self.agent.transcript.clear();
         self.agent.stream_draft = None;
         self.agent.thinking_draft = None;
+        self.agent.popup = None;
         self.agent.scroll = 0;
         self.agent.reading = false;
         self.agent.status = "new chat".to_string();
@@ -259,10 +303,18 @@ impl App {
     }
 
     fn submit_agent(&mut self) {
-        let prompt = self.agent.prompt.trim().to_string();
-        if prompt.is_empty() || self.agent.busy {
+        let prompt = self.agent.prompt.to_string();
+        if prompt.trim().is_empty() || self.agent.busy {
             return;
         }
+        self.agent.popup = None;
+
+        // Slash commands: only when `/` is the very first character.
+        if let Some(parsed) = agent::parse_slash(&prompt) {
+            self.run_slash_command(parsed);
+            return;
+        }
+
         if !self.ai.enabled {
             self.message = Some("Assistant is off".to_string());
             self.agent.status = "off".to_string();
@@ -276,16 +328,25 @@ impl App {
             self.message = Some("Assistant is not running".to_string());
             return;
         };
+
+        let visible = prompt.clone();
+        let attached = self.attach_mentions(&prompt);
         let ctx = self.ai.resolved_context_size();
         self.agent.turn = self.agent.turn.saturating_add(1);
         let id = self.agent.turn;
-        self.push_line(true, prompt.clone());
-        let prompt = format!("{prompt}
-
-editor_state:
-{}", self.tool_state());
-        self.remember_user(&prompt);
-        let history = budget_memory(&self.agent.memory, ctx, &prompt);
+        self.agent.last_prompt = Some(visible.clone());
+        self.push_line(true, visible);
+        let mut model_prompt = if attached.is_empty() {
+            prompt
+        } else {
+            format!("{prompt}\n\n{attached}")
+        };
+        model_prompt = format!(
+            "{model_prompt}\n\neditor_state:\n{}",
+            self.tool_state()
+        );
+        self.remember_user(&model_prompt);
+        let history = budget_memory(&self.agent.memory, ctx, &model_prompt);
         self.agent.prompt.clear();
         self.agent.cursor = 0;
         self.agent.anchor = 0;
@@ -302,8 +363,9 @@ editor_state:
             stream: self.ai.streaming,
             num_ctx: Some(ctx),
             ollama_native,
+            think: self.ai.think,
             history,
-            prompt,
+            prompt: model_prompt,
         });
     }
 
@@ -728,6 +790,530 @@ editor_state:
 }
 
 impl App {
+    fn open_command_bar_from_agent(&mut self) {
+        // Mirror former Tab behavior: leave agent prompt for the command bar.
+        self.agent.focused = false;
+        self.agent.popup = None;
+        self.open_command_bar();
+    }
+
+    fn refresh_agent_popup(&mut self) {
+        if self.agent.pending.is_some() || self.agent.reading {
+            self.agent.popup = None;
+            return;
+        }
+        let prompt = self.agent.prompt.clone();
+        let cursor = self.agent.cursor;
+
+        if let Some(filter) = agent::slash_filter(&prompt) {
+            // Only while the cursor is still inside the `/cmd` token (no args yet, or editing name).
+            let name_end = 1 + filter.len();
+            if cursor <= name_end && !prompt[1..].chars().any(|c| c.is_whitespace()) {
+                let _ = agent::filter_commands(filter); // ensure module linked
+                self.agent.popup = Some(crate::agent::AgentPopup::Slash {
+                    filter: filter.to_string(),
+                    selected: self
+                        .agent
+                        .popup
+                        .as_ref()
+                        .and_then(|p| match p {
+                            crate::agent::AgentPopup::Slash { selected, .. } => Some(*selected),
+                            _ => None,
+                        })
+                        .unwrap_or(0),
+                });
+                if let Some(crate::agent::AgentPopup::Slash { selected, filter }) = self.agent.popup.as_mut() {
+                    let n = agent::filter_commands(filter).len();
+                    if n == 0 {
+                        // Keep popup to show "no matches" or close? Close when empty filter of unknown.
+                    } else if *selected >= n {
+                        *selected = n - 1;
+                    }
+                }
+                return;
+            }
+        }
+
+        if let Some(active) = agent::active_mention(&prompt, cursor) {
+            self.ensure_file_index();
+            let files = self
+                .file_index
+                .as_ref()
+                .map(|idx| idx.files.as_slice())
+                .unwrap_or(&[]);
+            let recent = self.recent_files();
+            let active_dir = self.active_relative_dir();
+            let rows = agent::suggest_files(files, &active.query, &recent, &active_dir);
+            let paths: Vec<String> = rows
+                .iter()
+                .filter_map(|i| files.get(*i as usize).map(|f| f.relative.clone()))
+                .collect();
+            let selected = self
+                .agent
+                .popup
+                .as_ref()
+                .and_then(|p| match p {
+                    crate::agent::AgentPopup::Mention { selected, .. } => Some(*selected),
+                    _ => None,
+                })
+                .unwrap_or(0)
+                .min(paths.len().saturating_sub(1));
+            self.agent.popup = Some(crate::agent::AgentPopup::Mention {
+                at: active.at,
+                query: active.query,
+                selected,
+                paths,
+            });
+            return;
+        }
+
+        self.agent.popup = None;
+    }
+
+    fn nudge_agent_popup(&mut self, down: bool) {
+        match self.agent.popup.as_mut() {
+            Some(crate::agent::AgentPopup::Slash { selected, filter }) => {
+                let n = agent::filter_commands(filter).len().max(1);
+                if down {
+                    *selected = (*selected + 1) % n;
+                } else {
+                    *selected = selected.checked_sub(1).unwrap_or(n - 1);
+                }
+            }
+            Some(crate::agent::AgentPopup::Mention {
+                selected, paths, ..
+            }) => {
+                let n = paths.len().max(1);
+                if down {
+                    *selected = (*selected + 1) % n;
+                } else {
+                    *selected = selected.checked_sub(1).unwrap_or(n - 1);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// `run_command` is true when Enter was pressed on a slash popup (execute).
+    fn accept_agent_popup(&mut self, run_command: bool) {
+        let Some(popup) = self.agent.popup.clone() else {
+            return;
+        };
+        match popup {
+            crate::agent::AgentPopup::Slash { filter, selected } => {
+                let hits = agent::filter_commands(&filter);
+                let Some(cmd) = hits.get(selected).copied() else {
+                    self.agent.popup = None;
+                    return;
+                };
+                // Replace `/filter` with `/name` (and a trailing space for args).
+                let replacement = if run_command && cmd.name != "model" && cmd.name != "provider"
+                    && cmd.name != "context" && cmd.name != "stream"
+                    && cmd.name != "auto-approve" && cmd.name != "think"
+                {
+                    format!("/{}", cmd.name)
+                } else {
+                    format!("/{} ", cmd.name)
+                };
+                self.agent.prompt = replacement.clone();
+                self.agent.cursor = self.agent.prompt.chars().count();
+                self.agent.anchor = self.agent.cursor;
+                self.agent.popup = None;
+                if run_command {
+                    // Commands that take no args (or optional) run immediately on Enter.
+                    if !matches!(
+                        cmd.name,
+                        "model" | "provider" | "context" | "stream" | "auto-approve" | "think"
+                    ) || self.agent.prompt.split_whitespace().nth(1).is_none()
+                        && matches!(cmd.name, "model" | "provider" | "context")
+                    {
+                        if let Some(parsed) = agent::parse_slash(&self.agent.prompt) {
+                            self.run_slash_command(parsed);
+                        }
+                    } else if matches!(cmd.name, "stream" | "auto-approve" | "think") {
+                        // Need on|off — leave prompt for typing.
+                        self.refresh_agent_popup();
+                    }
+                } else {
+                    // Tab: just complete the name.
+                    self.refresh_agent_popup();
+                }
+            }
+            crate::agent::AgentPopup::Mention {
+                at,
+                query,
+                selected,
+                paths,
+            } => {
+                let Some(path) = paths.get(selected).cloned() else {
+                    self.agent.popup = None;
+                    return;
+                };
+                let active = agent::ActiveMention {
+                    at,
+                    query,
+                    end: self.agent.cursor,
+                };
+                let (next, cursor) = agent::insert_mention(&self.agent.prompt, &active, &path);
+                self.agent.prompt = next;
+                self.agent.cursor = cursor;
+                self.agent.anchor = cursor;
+                self.agent.popup = None;
+            }
+        }
+    }
+
+    fn run_slash_command(&mut self, parsed: agent::ParsedSlash) {
+        self.agent.prompt.clear();
+        self.agent.cursor = 0;
+        self.agent.anchor = 0;
+        self.agent.popup = None;
+        let name = parsed.name.as_str();
+        let args = parsed.args.trim();
+        if name.is_empty() {
+            self.push_line(false, "Type a command after `/`. Try /help.".into());
+            return;
+        }
+        let Some(_) = agent::lookup(name) else {
+            self.push_line(
+                false,
+                format!("Unknown command /{name}. Try /help."),
+            );
+            return;
+        };
+        match name {
+            "new" | "clear" => self.clear_agent_chat(),
+            "help" => self.push_line(false, agent::help_text()),
+            "stop" => {
+                if self.agent.busy {
+                    self.cancel_agent();
+                    self.push_line(false, "Stopped.".into());
+                } else {
+                    self.push_line(false, "Nothing is running.".into());
+                }
+            }
+            "retry" => {
+                if let Some(last) = self.agent.last_prompt.clone() {
+                    self.agent.prompt = last;
+                    self.agent.cursor = self.agent.prompt.chars().count();
+                    self.agent.anchor = self.agent.cursor;
+                    self.submit_agent();
+                } else {
+                    self.push_line(false, "No previous prompt to retry.".into());
+                }
+            }
+            "compact" => {
+                let before = self.agent.memory.len();
+                let keep = 4.min(before);
+                if before > keep {
+                    let drain = before - keep;
+                    self.agent.memory.drain(0..drain);
+                }
+                self.push_line(
+                    false,
+                    format!(
+                        "Compacted history ({} → {} messages).",
+                        before,
+                        self.agent.memory.len()
+                    ),
+                );
+            }
+            "settings" => {
+                self.close_picker();
+                self.about = false;
+                self.settings = Some(crate::settings::Page::new());
+                // Prefer AI section when possible.
+                if let Some(page) = self.settings.as_mut() {
+                    let sections = crate::settings::sections();
+                    if let Some((idx, _)) = sections
+                        .iter()
+                        .enumerate()
+                        .find(|(_, s)| s.name.eq_ignore_ascii_case("AI"))
+                    {
+                        page.section = idx;
+                        page.row = 0;
+                    }
+                }
+                self.agent.focused = false;
+                self.push_line(false, "Opened Settings → AI.".into());
+            }
+            "model" => self.slash_model(args),
+            "provider" => self.slash_provider(args),
+            "context" => self.slash_context(args),
+            "stream" => self.slash_on_off("stream", args, true),
+            "auto-approve" => self.slash_on_off("auto-approve", args, false),
+            "think" => self.slash_on_off("think", args, true),
+            _ => self.push_line(false, format!("/{name} is not implemented.")),
+        }
+    }
+
+    fn slash_on_off(&mut self, which: &str, args: &str, default_on_label: bool) {
+        let _ = default_on_label;
+        let token = args.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        let set = match token.as_str() {
+            "" => None,
+            "on" | "true" | "1" => Some(true),
+            "off" | "false" | "0" => Some(false),
+            _ => {
+                self.push_line(false, format!("Usage: /{which} on|off"));
+                return;
+            }
+        };
+        match which {
+            "stream" => {
+                if let Some(v) = set {
+                    self.ai.streaming = v;
+                    self.persist_ai_prefs();
+                }
+                self.push_line(false, format!("stream {}", on_off(self.ai.streaming)));
+            }
+            "auto-approve" => {
+                if let Some(v) = set {
+                    self.ai.auto_approve = v;
+                    self.persist_ai_prefs();
+                }
+                self.push_line(
+                    false,
+                    format!("auto-approve {}", on_off(self.ai.auto_approve)),
+                );
+            }
+            "think" => {
+                if let Some(v) = set {
+                    self.ai.think = v;
+                    self.persist_ai_prefs();
+                }
+                self.push_line(false, format!("think {}", on_off(self.ai.think)));
+            }
+            _ => {}
+        }
+    }
+
+    fn slash_provider(&mut self, args: &str) {
+        let token = args.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        if !token.is_empty() {
+            match token.as_str() {
+                "ollama" => self.ai.provider = crate::settings::AiProvider::Ollama,
+                "openai" | "lmstudio" | "lm-studio" => {
+                    self.ai.provider = crate::settings::AiProvider::Openai
+                }
+                _ => {
+                    self.push_line(false, "Usage: /provider [ollama|openai]".into());
+                    return;
+                }
+            }
+            self.persist_ai_prefs();
+        }
+        self.push_line(
+            false,
+            format!(
+                "provider {} · server {}",
+                self.ai.provider.as_str(),
+                self.ai.endpoint()
+            ),
+        );
+    }
+
+    fn slash_context(&mut self, args: &str) {
+        let token = args.split_whitespace().next().unwrap_or("");
+        if !token.is_empty() {
+            if token.eq_ignore_ascii_case("auto") {
+                self.ai.context_size = "auto".into();
+            } else if let Ok(n) = token.parse::<u32>() {
+                if (1024..=262_144).contains(&n) {
+                    self.ai.context_size = n.to_string();
+                } else {
+                    self.push_line(false, "Context size must be 1024..=262144.".into());
+                    return;
+                }
+            } else {
+                self.push_line(false, "Usage: /context [n|auto]".into());
+                return;
+            }
+            self.persist_ai_prefs();
+        }
+        self.push_line(
+            false,
+            format!(
+                "context {} (resolved {})",
+                self.ai.context_size,
+                self.ai.resolved_context_size()
+            ),
+        );
+    }
+
+    fn slash_model(&mut self, args: &str) {
+        let name = args.trim();
+        if !name.is_empty() {
+            self.ai.model = name.to_string();
+            self.persist_ai_prefs();
+            self.push_line(false, format!("model set to {name}"));
+            return;
+        }
+        let current = if self.ai.model.trim().is_empty() {
+            "(none)".to_string()
+        } else {
+            self.ai.model.clone()
+        };
+        let listed = fetch_model_names(&self.ai.endpoint(), self.ai.provider);
+        if listed.is_empty() {
+            self.push_line(
+                false,
+                format!("model {current} · (could not list models from server)"),
+            );
+        } else {
+            let mut lines = vec![format!("model {current}"), "Available:".into()];
+            for m in listed.into_iter().take(30) {
+                lines.push(format!("  {m}"));
+            }
+            self.push_line(false, lines.join("\n"));
+        }
+    }
+
+    fn persist_ai_prefs(&mut self) {
+        self.queue_settings_save();
+    }
+
+    fn attach_mentions(&self, prompt: &str) -> String {
+        let mentions = agent::parse_mentions(prompt);
+        if mentions.is_empty() {
+            return String::new();
+        }
+        let mut budget = agent::ATTACH_BUDGET;
+        let mut parts = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for mention in mentions {
+            if !seen.insert(mention.path.clone()) {
+                continue;
+            }
+            if budget == 0 {
+                parts.push(format!("(attach budget reached; skipped @{})", mention.path));
+                break;
+            }
+            let path = match agent::within(&self.explorer.root, &mention.path) {
+                Ok(p) => p,
+                Err(err) => {
+                    parts.push(format!("@{}: {err}", mention.path));
+                    continue;
+                }
+            };
+            match read_attachment(&path, budget.min(agent::ATTACH_FILE_CAP)) {
+                Ok((body, truncated)) => {
+                    let used = body.chars().count();
+                    budget = budget.saturating_sub(used);
+                    let note = if truncated { " (truncated)" } else { "" };
+                    parts.push(format!(
+                        "Attached file @{}{note}:\n```\n{body}\n```",
+                        mention.path
+                    ));
+                }
+                Err(err) => parts.push(format!("@{}: {err}", mention.path)),
+            }
+        }
+        parts.join("\n\n")
+    }
+
+    fn ensure_file_index(&mut self) {
+        if self.file_index.is_none() {
+            // Kick the same indexing path the file picker uses.
+            self.queue_index();
+        }
+    }
+
+    fn recent_files(&self) -> Vec<String> {
+        // Prefer open tab paths relative to workspace.
+        let root = &self.explorer.root;
+        let mut out = Vec::new();
+        for editor in &self.editors {
+            for tab in editor.tabs() {
+                let Some(path) = tab.path.as_ref() else { continue };
+                let Ok(rel) = path.strip_prefix(root) else { continue };
+                let s = rel.to_string_lossy().replace('\\', "/");
+                if !s.is_empty() && !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        }
+        out
+    }
+
+    fn active_relative_dir(&self) -> String {
+        let root = &self.explorer.root;
+        let Some(path) = self.active_editor().tab().path.as_ref() else {
+            return String::new();
+        };
+        let Ok(rel) = path.strip_prefix(root) else {
+            return String::new();
+        };
+        rel.parent()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default()
+    }
+}
+
+fn on_off(v: bool) -> &'static str {
+    if v { "on" } else { "off" }
+}
+
+fn read_attachment(path: &std::path::Path, cap: usize) -> Result<(String, bool), String> {
+    crate::agent::check_file_size(path)?;
+    let bytes = std::fs::read(path).map_err(|err| format!("Cannot read: {err}"))?;
+    let (text, _enc, had_errors) = encoding_rs::UTF_8.decode(&bytes);
+    if had_errors {
+        // still use lossy
+    }
+    let mut truncated = false;
+    let body: String = if text.chars().count() > cap {
+        truncated = true;
+        text.chars().take(cap).collect()
+    } else {
+        text.into_owned()
+    };
+    Ok((body, truncated))
+}
+
+fn fetch_model_names(endpoint: &str, provider: crate::settings::AiProvider) -> Vec<String> {
+    let endpoint = endpoint.trim().trim_end_matches('/').to_string();
+    let url = match provider {
+        crate::settings::AiProvider::Ollama => {
+            let base = endpoint.strip_suffix("/v1").unwrap_or(&endpoint);
+            format!("{}/api/tags", base.trim_end_matches('/'))
+        }
+        crate::settings::AiProvider::Openai => format!("{endpoint}/models"),
+    };
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        rt.block_on(async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(4))
+                .build()
+                .ok()?;
+            let text = client.get(&url).send().await.ok()?.text().await.ok()?;
+            let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let mut names = Vec::new();
+            if let Some(arr) = value.get("models").and_then(|v| v.as_array()) {
+                for m in arr {
+                    if let Some(name) = m.get("name").and_then(|v| v.as_str()) {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+            if let Some(arr) = value.get("data").and_then(|v| v.as_array()) {
+                for m in arr {
+                    if let Some(name) = m.get("id").and_then(|v| v.as_str()) {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+            Some(names)
+        })
+    });
+    handle.join().ok().flatten().unwrap_or_default()
+}
+
+impl App {
     fn edit_prompt(&mut self, text: &str) {
         let mut chars: Vec<char> = self.agent.prompt.chars().collect();
         let (from, to) = self.prompt_span(chars.len());
@@ -820,6 +1406,7 @@ impl App {
         self.agent.prompt = chars.into_iter().collect();
         self.agent.cursor = cursor;
         self.agent.anchor = cursor;
+        self.refresh_agent_popup();
     }
 
     fn remember_user(&mut self, content: &str) {
