@@ -31,8 +31,13 @@ async fn run(
     mut commands: mpsc::UnboundedReceiver<AgentCommand>,
     events: mpsc::UnboundedSender<AgentEvent>,
 ) {
+    // Streaming a large create_file (full HTML) on a local 27B can take many
+    // minutes. A short total timeout makes reqwest drop the socket; LM Studio
+    // then logs "Client disconnected" / "Failed to generate a tool call" and
+    // returns empty tool_calls with only reasoning_content.
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(180))
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(60 * 30))
         .build()
     {
         Ok(client) => client,
@@ -171,7 +176,7 @@ async fn run_turn(
                 }));
                 messages.push(json!({
                     "role": "user",
-                    "content": "Your previous reply had reasoning but no visible answer. Reply with the final answer only (no thinking tags)."
+                    "content": "Your previous reply had reasoning but no tool call and no visible answer (the tool call may have been cut off). Call create_file or apply_edit now with complete JSON arguments. Do not put the file body only inside thinking."
                 }));
                 continue;
             }

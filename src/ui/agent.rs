@@ -395,19 +395,57 @@ fn status_label(app: &App) -> String {
         return short_status(status);
     }
     let frame = SPINNER[app.agent.spin as usize % SPINNER.len()];
+    let elapsed = busy_elapsed_label(app);
     if let Some(draft) = app.agent.thinking_draft.as_ref() {
         if !draft.trim().is_empty() {
-            let snip = last_line_snip(draft, 40);
+            let snip = last_line_snip(draft, 36);
+            let tok = rough_token_label(draft);
             if snip.is_empty() {
-                return format!("{frame} thinking…");
+                return format!("{frame} thinking…{elapsed}{tok}");
             }
-            return format!("{frame} thinking… · {snip}");
+            return format!("{frame} thinking…{elapsed}{tok} · {snip}");
         }
     }
     if app.agent.status == "thinking" || app.agent.status.starts_with("thinking") {
-        return format!("{frame} thinking…");
+        return format!("{frame} thinking…{elapsed}");
     }
-    format!("{frame} {}", short_status(&app.agent.status))
+    let status = short_status(&app.agent.status);
+    if elapsed.is_empty() {
+        format!("{frame} {status}")
+    } else {
+        format!("{frame} {status}{elapsed}")
+    }
+}
+
+fn busy_elapsed_label(app: &App) -> String {
+    let Some(started) = app.agent.busy_started else {
+        return String::new();
+    };
+    let secs = started.elapsed().as_secs();
+    if secs < 1 {
+        return String::new();
+    }
+    if secs < 60 {
+        format!(" {secs}s")
+    } else {
+        format!(" {}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
+fn rough_token_label(text: &str) -> String {
+    let chars = text.chars().count();
+    if chars < 80 {
+        return String::new();
+    }
+    // Rough Latin-ish estimate; title-only so precision does not matter.
+    let approx = (chars as f64 / 4.0).round() as usize;
+    if approx < 100 {
+        format!(" ~{approx}tok")
+    } else if approx < 1000 {
+        format!(" ~{approx}tok")
+    } else {
+        format!(" ~{:.1}ktok", approx as f64 / 1000.0)
+    }
 }
 
 /// Drop legacy "approve X · ←/→ Enter" chrome down to `approve X`.

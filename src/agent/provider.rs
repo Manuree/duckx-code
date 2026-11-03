@@ -59,6 +59,20 @@ impl Default for CompleteOptions<'static> {
     }
 }
 
+fn http_err(url: &str, err: reqwest::Error) -> String {
+    if err.is_timeout() {
+        return format!(
+            "Timed out talking to {url}. Local models (especially reasoning + large create_file) can take several minutes — raise the client timeout or wait; this is not a UTF-8 bug."
+        );
+    }
+    if err.is_connect() {
+        return format!(
+            "Cannot reach {url}: {err}. On Windows prefer http://127.0.0.1:1234/v1 over localhost if IPv6 ::1 is unbound."
+        );
+    }
+    format!("Cannot reach {url}: {err}")
+}
+
 pub fn completions_url(server: &str) -> String {
     format!("{}/chat/completions", server.trim().trim_end_matches('/'))
 }
@@ -78,7 +92,7 @@ pub fn request_body(model: &str, messages: &[Value], tools: &[Value], stream: bo
         "model": model,
         "messages": messages,
         "temperature": 0.2,
-        "max_tokens": 8192
+        "max_tokens": 16384
     });
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
@@ -99,7 +113,7 @@ pub fn ollama_request_body(
 ) -> Value {
     let mut options = json!({
         "temperature": 0.2,
-        "num_predict": 8192
+        "num_predict": 16384
     });
     if let Some(n) = num_ctx {
         options["num_ctx"] = json!(n);
@@ -314,12 +328,20 @@ fn finish_message_reply(raw: Value) -> Result<Reply, String> {
         thinking.push_str(&from_tags);
     }
     let mut calls = structured_calls(&raw);
-    // Tool calls only from visible content — never from reasoning / <think>.
+    // Prefer visible content; some reasoning models put textual tool calls in
+    // reasoning_content / <think> instead — recover those as a fallback.
     if calls.is_empty() {
         let (found, stripped) = extract_textual(&content);
         if !found.is_empty() {
             calls = found;
             content = stripped;
+        }
+    }
+    if calls.is_empty() {
+        let (found, stripped) = extract_textual(&thinking);
+        if !found.is_empty() {
+            calls = found;
+            thinking = stripped;
         }
     }
     Ok(reply_from_parts(content, thinking, calls))
@@ -645,7 +667,110 @@ pub fn normalize_tool_arguments(raw: &str) -> String {
             Value::Array(arr).to_string()
         }
         Ok(other) => json!({ "value": other }).to_string(),
-        Err(_) => "{}".to_string(),
+        // Truncated tool JSON (hit max_tokens / client abort mid-stream) used
+        // to become "{}". Try to close the object so create_file keeps path/content.
+        Err(_) => salvage_truncated_json_object(trimmed).unwrap_or_else(|| "{}".to_string()),
+    }
+}
+
+/// Best-effort repair when a streamed tool-call `arguments` string was cut off.
+fn salvage_truncated_json_object(raw: &str) -> Option<String> {
+    if !raw.starts_with('{') {
+        return None;
+    }
+    // Try common closers for a string value cut mid-flight.
+    for suffix in ["\"}", "\"\n}", "}", "\"]}", "\"}}"] {
+        let candidate = format!("{raw}{suffix}");
+        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&candidate) {
+            if !map.is_empty() {
+                return Some(Value::Object(map).to_string());
+            }
+        }
+    }
+    // At least recover a path so the app can report a useful error instead of
+    // "Path is empty".
+    let path = extract_json_string_field(raw, "path")?;
+    let mut obj = serde_json::Map::new();
+    obj.insert("path".into(), Value::String(path));
+    if let Some(content) = extract_json_string_field_unterminated(raw, "content")
+        .or_else(|| extract_json_string_field_unterminated(raw, "text"))
+    {
+        obj.insert("content".into(), Value::String(content.clone()));
+        obj.insert("text".into(), Value::String(content));
+    }
+    Some(Value::Object(obj).to_string())
+}
+
+fn extract_json_string_field(raw: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let at = raw.find(&needle)?;
+    let after_key = &raw[at + needle.len()..];
+    let colon = after_key.find(':')?;
+    let mut rest = after_key[colon + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    rest = &rest[1..];
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(match next {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '"' => '"',
+                    '\\' => '\\',
+                    other => other,
+                });
+            }
+            continue;
+        }
+        if ch == '"' {
+            return Some(out);
+        }
+        out.push(ch);
+    }
+    None
+}
+
+/// Like [`extract_json_string_field`] but keeps text when the closing quote never arrived.
+fn extract_json_string_field_unterminated(raw: &str, key: &str) -> Option<String> {
+    if let Some(s) = extract_json_string_field(raw, key) {
+        return Some(s);
+    }
+    let needle = format!("\"{key}\"");
+    let at = raw.find(&needle)?;
+    let after_key = &raw[at + needle.len()..];
+    let colon = after_key.find(':')?;
+    let mut rest = after_key[colon + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    rest = &rest[1..];
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(match next {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '"' => '"',
+                    '\\' => '\\',
+                    other => other,
+                });
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -1376,6 +1501,13 @@ impl StreamAssembler {
                 content = stripped;
             }
         }
+        if calls.is_empty() {
+            let (found, stripped) = extract_textual(&thinking);
+            if !found.is_empty() {
+                calls = found;
+                thinking = stripped;
+            }
+        }
         Ok(reply_from_parts(content, thinking, calls))
     }
 }
@@ -1483,7 +1615,7 @@ async fn complete_once(
         let response = request
             .send()
             .await
-            .map_err(|err| format!("Cannot reach {url}: {err}"))?;
+            .map_err(|err| http_err(&url, err))?;
         let status = response.status();
         let text = response
             .text()
@@ -1557,7 +1689,7 @@ where
         let response = request
             .send()
             .await
-            .map_err(|err| format!("Cannot reach {url}: {err}"))?;
+            .map_err(|err| http_err(&url, err))?;
         let status = response.status();
         if status.is_success() {
             break response;
@@ -1623,7 +1755,13 @@ where
     };
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|err| format!("Stream read failed: {err}"))?;
+        let chunk = chunk.map_err(|err| {
+            if err.is_timeout() {
+                format!("Stream timed out reading from the model (large tool args / slow local gen). Retry or raise the HTTP timeout.")
+            } else {
+                format!("Stream read failed: {err}")
+            }
+        })?;
         byte_buf.extend_from_slice(&chunk);
         let _ = append_valid_utf8(&mut line_buf, &mut byte_buf);
         while let Some(newline) = line_buf.find('\n') {
@@ -1728,7 +1866,7 @@ where
         let response = request
             .send()
             .await
-            .map_err(|err| format!("Cannot reach {url}: {err}"))?;
+            .map_err(|err| http_err(&url, err))?;
         let status = response.status();
         if status.is_success() {
             break response;
@@ -1764,7 +1902,13 @@ where
     let mut held = String::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|err| format!("Stream read failed: {err}"))?;
+        let chunk = chunk.map_err(|err| {
+            if err.is_timeout() {
+                format!("Stream timed out reading from the model (large tool args / slow local gen). Retry or raise the HTTP timeout.")
+            } else {
+                format!("Stream read failed: {err}")
+            }
+        })?;
         byte_buf.extend_from_slice(&chunk);
         let _ = append_valid_utf8(&mut line_buf, &mut byte_buf);
         while let Some(newline) = line_buf.find('\n') {
@@ -1906,7 +2050,7 @@ mod tests {
     #[test]
     fn request_names_the_tools() {
         let body = request_body("qwen", &[], &tool_specs(), false);
-        assert_eq!(body["max_tokens"], 8192);
+        assert_eq!(body["max_tokens"], 16384);
         assert!(body.get("stream").is_none());
         let streamed = request_body("qwen", &[], &tool_specs(), true);
         assert_eq!(streamed["stream"], true);
@@ -2541,6 +2685,83 @@ mod tests {
         assert_eq!(normalize_tool_arguments("{\"a\":"), "{}");
         assert_eq!(normalize_tool_arguments("{}"), "{}");
         assert_eq!(normalize_tool_arguments("{\"path\":\"a.rs\"}"), "{\"path\":\"a.rs\"}");
+    }
+
+    #[test]
+    fn truncated_create_file_args_are_salvaged() {
+        // Mid-stream abort / max_tokens cut inside the HTML body (em dash included).
+        let raw = "{\"path\":\"index.html\",\"content\":\"<!DOCTYPE html>\\n<!-- — Tailwind CSS";
+        let got = normalize_tool_arguments(raw);
+        let value: Value = serde_json::from_str(&got).expect(&got);
+        assert_eq!(value["path"], "index.html");
+        let body = value["content"]
+            .as_str()
+            .or_else(|| value["text"].as_str())
+            .unwrap();
+        assert!(body.contains("DOCTYPE"), "{body}");
+        assert!(body.contains('—'), "{body}");
+    }
+
+    #[test]
+    fn tool_call_inside_reasoning_content_is_recovered() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"Let me create the file.\n{\"name\":\"create_file\",\"arguments\":{\"path\":\"index.html\",\"text\":\"<p>hi—สวัสดี👋</p>\"}}"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.calls.len(), 1, "{reply:?}");
+        assert_eq!(reply.calls[0].name, "create_file");
+        assert!(
+            reply.calls[0].arguments.contains("index.html"),
+            "{}",
+            reply.calls[0].arguments
+        );
+    }
+
+    #[test]
+    fn think_tags_then_textual_tool_call_with_multibyte() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"<think>plan — สวัสดี 👋</think>\n{\"name\":\"create_file\",\"arguments\":{\"path\":\"i.html\",\"text\":\"ok\"}}"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.thinking, "plan — สวัสดี 👋");
+        assert_eq!(reply.calls.len(), 1, "{reply:?}");
+        assert_eq!(reply.calls[0].name, "create_file");
+    }
+
+    #[test]
+    fn stream_assembler_recovers_tool_call_from_reasoning_deltas() {
+        let mut assembler = StreamAssembler::default();
+        assembler.push_delta(&json!({
+            "reasoning_content": "Let me create the complete index.html file — "
+        }));
+        assembler.push_delta(&json!({
+            "reasoning_content": "now.\n{\"name\":\"create_file\",\"arguments\":{\"path\":\"index.html\",\"text\":\"x\"}}"
+        }));
+        let reply = assembler.into_reply().unwrap();
+        assert_eq!(reply.calls.len(), 1, "{reply:?}");
+        assert_eq!(reply.calls[0].name, "create_file");
+        assert!(reply.content.trim().is_empty());
+    }
+
+    #[test]
+    fn content_think_split_handles_multibyte_chunks_before_close() {
+        let mut split = ContentThinkSplit::default();
+        let mut thinking = String::new();
+        let mut content = String::new();
+        let mut emit = |kind: DeltaKind, piece: &str| match kind {
+            DeltaKind::Thinking => thinking.push_str(piece),
+            DeltaKind::Content => content.push_str(piece),
+        };
+        // Split tag / multibyte across pushes the way SSE chunks do.
+        split.push("<thi", &mut emit);
+        split.push("nk>plan — ", &mut emit);
+        split.push("สวัสดี", &mut emit);
+        split.push("</thi", &mut emit);
+        split.push(
+            "nk>{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}",
+            &mut emit,
+        );
+        split.finish(&mut emit);
+        assert!(thinking.contains("plan"), "{thinking}");
+        assert!(thinking.contains('—'), "{thinking}");
+        assert!(thinking.contains("สวัสดี"), "{thinking}");
+        assert!(content.contains("list_dir"), "{content}");
     }
 
     #[test]

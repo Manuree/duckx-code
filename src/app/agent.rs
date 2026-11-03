@@ -33,6 +33,7 @@ impl App {
                 self.remember_assistant(&text);
                 self.push_line(false, text);
                 self.agent.busy = false;
+                self.agent.busy_started = None;
                 self.agent.status = "ready".to_string();
             }
             AgentEvent::Delta { id, text } => {
@@ -68,6 +69,7 @@ impl App {
                 }
                 self.push_line(false, text.clone());
                 self.agent.busy = false;
+                self.agent.busy_started = None;
                 self.agent.status = clip(&text, 80);
             }
             AgentEvent::ResetMemory { id } => {
@@ -351,6 +353,7 @@ impl App {
         self.agent.cursor = 0;
         self.agent.anchor = 0;
         self.agent.busy = true;
+        self.agent.busy_started = Some(std::time::Instant::now());
         self.agent.stream_draft = None;
         self.agent.thinking_draft = None;
         self.agent.status = "waiting".to_string();
@@ -373,6 +376,7 @@ impl App {
         let id = self.agent.turn;
         self.agent.turn = self.agent.turn.saturating_add(1);
         self.agent.busy = false;
+        self.agent.busy_started = None;
         self.agent.pending = None;
         self.agent.stream_draft = None;
         self.agent.thinking_draft = None;
@@ -497,7 +501,11 @@ impl App {
                 }
             }
             "create_file" => {
-                let text = value.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let text = value
+                    .get("text")
+                    .or_else(|| value.get("content"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let parent_note = match agent::within(&self.explorer.root, path) {
                     Ok(full) => match agent::create_parent_plan(&full) {
                         Ok(plan) if plan.missing_dirs > 0 => format!(
@@ -725,8 +733,10 @@ impl App {
         let Some(raw) = value.get("path").and_then(|path| path.as_str()) else {
             return Some("Path is empty".to_string());
         };
+        // Models often send `content` (OpenAI-ish) instead of our `text` schema key.
         let text = value
             .get("text")
+            .or_else(|| value.get("content"))
             .and_then(|text| text.as_str())
             .unwrap_or("")
             .to_string();

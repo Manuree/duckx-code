@@ -89,6 +89,8 @@ pub struct Panel {
     pub transcript: Vec<TranscriptLine>,
     pub status: String,
     pub busy: bool,
+    /// When the current busy turn began (title elapsed time).
+    pub busy_started: Option<std::time::Instant>,
     /// Spinner frame while `busy` is set. The frames are `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`.
     pub spin: u8,
     pub turn: u64,
@@ -119,6 +121,7 @@ impl Default for Panel {
             transcript: Vec::new(),
             status: "ready".to_string(),
             busy: false,
+            busy_started: None,
             spin: 0,
             turn: 0,
             pending: None,
