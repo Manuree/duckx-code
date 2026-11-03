@@ -1,6 +1,9 @@
 //! OpenAI-compatible chat completions. Ollama and LM Studio both speak this.
 //! Streaming uses SSE (`data:` lines); a failed stream falls back to one JSON body.
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
 use futures::StreamExt;
 use serde_json::{Value, json};
 
@@ -44,14 +47,89 @@ pub fn request_body(model: &str, messages: &[Value], tools: &[Value], stream: bo
     let mut body = json!({
         "model": model,
         "messages": messages,
-        "tools": tools,
         "temperature": 0.2,
         "max_tokens": 8192
     });
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools.to_vec());
+    }
     if stream {
         body["stream"] = Value::Bool(true);
     }
     body
+}
+
+fn models_without_tools() -> &'static Mutex<HashSet<String>> {
+    static CELL: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn model_skips_tools(model: &str) -> bool {
+    models_without_tools()
+        .lock()
+        .map(|set| set.contains(model))
+        .unwrap_or(false)
+}
+
+fn remember_model_without_tools(model: &str) {
+    if let Ok(mut set) = models_without_tools().lock() {
+        set.insert(model.to_string());
+    }
+}
+
+fn tools_not_supported(status: reqwest::StatusCode, body: &str) -> bool {
+    if !status.is_client_error() {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("does not support tools")
+        || lower.contains("does not support tool")
+        || lower.contains("tool use is not supported")
+        || (lower.contains("tool")
+            && (lower.contains("unsupported")
+                || lower.contains("not support")
+                || lower.contains("unknown field")
+                || lower.contains("not enabled")))
+}
+
+/// When the server rejects `tools`, describe them in the system text so textual parsing still works.
+pub fn messages_with_tool_prompt(messages: &[Value]) -> Vec<Value> {
+    let catalog = tool_catalog_prompt();
+    let mut out = Vec::with_capacity(messages.len() + 1);
+    let mut injected = false;
+    for message in messages {
+        if !injected && message.get("role").and_then(|r| r.as_str()) == Some("system") {
+            let mut copy = message.clone();
+            let existing = copy.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            copy["content"] = Value::String(format!("{existing}
+
+{catalog}"));
+            out.push(copy);
+            injected = true;
+        } else {
+            out.push(message.clone());
+        }
+    }
+    if !injected {
+        out.insert(0, json!({"role": "system", "content": catalog}));
+    }
+    out
+}
+
+fn tool_catalog_prompt() -> String {
+    let mut lines = vec![
+        "You can call tools by emitting one of these forms (no other prose around the call):".into(),
+        r#"{"name":"<tool>","arguments":{...}}"#.into(),
+        "or ```json / ```tool_code fences, or <tool_call>...</tool_call>, or Python-style name(arg=value).".into(),
+        "Available tools:".into(),
+    ];
+    for tool in tool_specs() {
+        let name = tool["function"]["name"].as_str().unwrap_or("?");
+        let desc = tool["function"]["description"].as_str().unwrap_or("");
+        lines.push(format!("- {name}: {desc}"));
+    }
+    lines.join("
+")
 }
 
 fn apply_auth(request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
@@ -257,7 +335,30 @@ fn json_calls(calls: &[ToolCall]) -> Value {
 }
 
 /// Tool calls some local models write as text. The string is the reply with those calls removed.
+/// Model-agnostic across Ollama / LM Studio families: JSON in content, fences (`json` /
+/// `tool_code`), Hermes/Qwen `<tool_call>` / `<function=` tags, Llama `<|python_tag|>`,
+/// Mistral `[TOOL_CALLS]`, and Python-style `name(arg=...)`. Unknown shapes stay as reply text.
 fn extract_textual(text: &str) -> (Vec<ToolCall>, String) {
+    let text = strip_special_markers(text);
+    let (mut calls, after_tags) = extract_tag_calls(&text);
+    let (more, after_json) = extract_json_calls(&after_tags);
+    calls.extend(more);
+    let (py, stripped) = extract_python_calls(&after_json);
+    calls.extend(py);
+    (calls, stripped)
+}
+
+fn strip_special_markers(text: &str) -> String {
+    text.replace("<|python_tag|>", "")
+        .replace("<|tool_call|>", "")
+        .replace("<|tool_calls_section_begin|>", "")
+        .replace("<|tool_calls_section_end|>", "")
+        .replace("<|tool_call_begin|>", "")
+        .replace("<|tool_call_end|>", "")
+        .replace("[TOOL_CALLS]", "")
+}
+
+fn extract_tag_calls(text: &str) -> (Vec<ToolCall>, String) {
     let mut calls = Vec::new();
     let mut stripped = String::new();
     let mut cursor = 0;
@@ -300,6 +401,310 @@ fn extract_textual(text: &str) -> (Vec<ToolCall>, String) {
     (calls, stripped)
 }
 
+fn extract_json_calls(text: &str) -> (Vec<ToolCall>, String) {
+    let mut calls = Vec::new();
+    let mut stripped = String::new();
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let rest = &text[cursor..];
+        let fence_at = rest.find("```").map(|at| cursor + at);
+        let brace_at = rest.find('{').map(|at| cursor + at);
+        let bracket_at = rest.find('[').map(|at| cursor + at);
+        let Some(at) = [fence_at, brace_at, bracket_at]
+            .into_iter()
+            .flatten()
+            .min()
+        else {
+            stripped.push_str(&text[cursor..]);
+            break;
+        };
+        stripped.push_str(&text[cursor..at]);
+        if text[at..].starts_with("```") {
+            if let Some(end) = take_fence_tool_calls(&text[at..], &mut calls) {
+                cursor = at + end;
+                continue;
+            }
+            stripped.push_str("```");
+            cursor = at + 3;
+            continue;
+        }
+        if let Some((value, len)) = first_json_span(&text[at..]) {
+            if value_looks_like_tool_call(&value) {
+                let before = calls.len();
+                push_value_calls(&value, &mut calls);
+                if calls.len() > before {
+                    cursor = at + len;
+                    while cursor < text.len()
+                        && matches!(text.as_bytes()[cursor], b' ' | b'\t' | b'\n' | b'\r')
+                    {
+                        cursor += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+        let ch = text[at..].chars().next().unwrap_or('{');
+        stripped.push(ch);
+        cursor = at + ch.len_utf8();
+    }
+    (calls, stripped)
+}
+
+/// ` ```lang?\n...\n``` ` — JSON tool calls or Python-style `name(...)` (Gemma `tool_code`).
+fn take_fence_tool_calls(text: &str, calls: &mut Vec<ToolCall>) -> Option<usize> {
+    if !text.starts_with("```") {
+        return None;
+    }
+    let after_ticks = &text[3..];
+    let nl = after_ticks.find('\n')?;
+    let lang = after_ticks[..nl].trim().to_ascii_lowercase();
+    let body_start = 3 + nl + 1;
+    let close_rel = text[body_start..].find("```")?;
+    let body = text[body_start..body_start + close_rel].trim();
+    let before = calls.len();
+    if let Some(value) = first_json(body).filter(value_looks_like_tool_call) {
+        push_value_calls(&value, calls);
+    }
+    if calls.len() == before
+        && matches!(lang.as_str(), "tool_code" | "python" | "py" | "json" | "")
+    {
+        let (py, _) = extract_python_calls(body);
+        calls.extend(py);
+    }
+    if calls.len() == before {
+        return None;
+    }
+    Some(body_start + close_rel + 3)
+}
+
+/// Python-style tool lines: `editor_state()` / `read_file(path="a.rs", start_line=1)`.
+fn extract_python_calls(text: &str) -> (Vec<ToolCall>, String) {
+    let mut calls = Vec::new();
+    let mut stripped = String::new();
+    let mut any = false;
+    for (line_idx, line) in text.split_inclusive('\n').enumerate() {
+        let trimmed = line.trim();
+        let core = trimmed.strip_suffix(';').unwrap_or(trimmed).trim();
+        if let Some(call) = parse_python_style_call(core, calls.len() + line_idx) {
+            calls.push(call);
+            any = true;
+        } else {
+            stripped.push_str(line);
+        }
+    }
+    if !any {
+        return (calls, text.to_string());
+    }
+    (calls, stripped)
+}
+
+fn parse_python_style_call(line: &str, index: usize) -> Option<ToolCall> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let open = line.find('(')?;
+    let name = line[..open].trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        || !name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+    {
+        return None;
+    }
+    if !KNOWN_TOOL_NAMES.contains(&name) && !looks_like_tool_alias(name) {
+        return None;
+    }
+    if !line.ends_with(')') {
+        return None;
+    }
+    let inner = line[open + 1..line.len() - 1].trim();
+    let args = parse_python_args(inner)?;
+    Some(ToolCall {
+        id: format!("call-{index}"),
+        name: name.to_string(),
+        arguments: Value::Object(args).to_string(),
+    })
+}
+
+fn looks_like_tool_alias(name: &str) -> bool {
+    matches!(
+        name,
+        "write"
+            | "write_file"
+            | "save_file"
+            | "create"
+            | "read"
+            | "read_text"
+            | "read_text_file"
+            | "list"
+            | "list_files"
+            | "ls"
+            | "dir"
+            | "edit"
+            | "edit_file"
+            | "search_replace"
+            | "str_replace"
+            | "replace_in_file"
+            | "open"
+            | "goto_line"
+            | "bash"
+            | "shell"
+            | "run_command"
+    )
+}
+
+const KNOWN_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "list_dir",
+    "editor_state",
+    "diagnostics",
+    "apply_edit",
+    "create_file",
+    "write_file",
+    "search_replace",
+    "list_files",
+    "open_file",
+    "save",
+    "goto",
+];
+
+fn parse_python_args(inner: &str) -> Option<serde_json::Map<String, Value>> {
+    let mut map = serde_json::Map::new();
+    if inner.is_empty() {
+        return Some(map);
+    }
+    for part in split_python_args(inner) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let eq = part.find('=')?;
+        let key = part[..eq].trim();
+        if key.is_empty() {
+            return None;
+        }
+        let raw = part[eq + 1..].trim();
+        map.insert(key.to_string(), python_value(raw)?);
+    }
+    Some(map)
+}
+
+fn split_python_args(inner: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut in_string: Option<char> = None;
+    let mut escape = false;
+    for (idx, ch) in inner.char_indices() {
+        if let Some(quote) = in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == quote {
+                in_string = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => in_string = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(inner[start..idx].to_string());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(inner[start..].to_string());
+    parts
+}
+
+fn python_value(raw: &str) -> Option<Value> {
+    if (raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2)
+        || (raw.starts_with('\'') && raw.ends_with('\'') && raw.len() >= 2)
+    {
+        let inner = &raw[1..raw.len() - 1];
+        return Some(Value::String(inner.to_string()));
+    }
+    if raw == "True" || raw == "true" {
+        return Some(Value::Bool(true));
+    }
+    if raw == "False" || raw == "false" {
+        return Some(Value::Bool(false));
+    }
+    if raw == "None" || raw == "null" {
+        return Some(Value::Null);
+    }
+    if let Ok(n) = raw.parse::<i64>() {
+        return Some(json!(n));
+    }
+    if let Ok(n) = raw.parse::<f64>() {
+        return Some(json!(n));
+    }
+    if (raw.starts_with('{') && raw.ends_with('}')) || (raw.starts_with('[') && raw.ends_with(']'))
+    {
+        return serde_json::from_str(raw).ok();
+    }
+    Some(Value::String(raw.to_string()))
+}
+
+fn value_looks_like_tool_call(value: &Value) -> bool {
+    if let Some(list) = value.get("tool_calls").and_then(|list| list.as_array()) {
+        return !list.is_empty() && list.iter().all(value_looks_like_tool_call);
+    }
+    if let Some(list) = value.as_array() {
+        return !list.is_empty() && list.iter().all(value_looks_like_tool_call);
+    }
+    let name = value
+        .pointer("/function/name")
+        .and_then(|value| value.as_str())
+        .or_else(|| value.get("name").and_then(|value| value.as_str()))
+        .unwrap_or("")
+        .trim();
+    !name.is_empty()
+}
+
+/// True when streamed assistant text is likely a textual tool call, not chat.
+pub fn content_looks_like_tool_prefix(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('{')
+        || trimmed.starts_with('[')
+        || trimmed.starts_with("```")
+        || trimmed.starts_with("<tool_call")
+        || trimmed.starts_with("<function=")
+        || trimmed.starts_with("<|python_tag|>")
+        || trimmed.starts_with("<|tool_call")
+        || trimmed.starts_with("[TOOL_CALLS]")
+    {
+        return true;
+    }
+    // Python-style / Gemma tool_code: `editor_state(` or `read_file(`
+    if let Some(open) = trimmed.find('(') {
+        let name = trimmed[..open].trim();
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            && (KNOWN_TOOL_NAMES.contains(&name) || looks_like_tool_alias(name))
+            && trimmed[open..].starts_with('(')
+            && !name.chars().any(|ch| ch.is_whitespace())
+            && trimmed[..open]
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn push_block_calls(inner: &str, calls: &mut Vec<ToolCall>) {
     let trimmed = inner.trim();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
@@ -338,6 +743,10 @@ fn push_value_calls(value: &Value, calls: &mut Vec<ToolCall>) {
 }
 
 fn first_json(text: &str) -> Option<Value> {
+    first_json_span(text).map(|(value, _)| value)
+}
+
+fn first_json_span(text: &str) -> Option<(Value, usize)> {
     let start = text.find(['{', '['])?;
     let mut depth = 0i32;
     let mut in_string = false;
@@ -359,8 +768,10 @@ fn first_json(text: &str) -> Option<Value> {
             '}' | ']' => {
                 depth -= 1;
                 if depth == 0 {
-                    let raw = &text[start..start + offset + ch.len_utf8()];
-                    return serde_json::from_str(raw).ok();
+                    let end = start + offset + ch.len_utf8();
+                    let raw = &text[start..end];
+                    let value = serde_json::from_str(raw).ok()?;
+                    return Some((value, end));
                 }
             }
             _ => {}
@@ -443,6 +854,10 @@ struct PartialCall {
 }
 
 impl StreamAssembler {
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
     pub fn push_delta(&mut self, delta: &Value) {
         if let Some(text) = delta.get("content").and_then(|value| value.as_str()) {
             self.content.push_str(text);
@@ -538,15 +953,13 @@ pub async fn complete(
     messages: &[Value],
     options: CompleteOptions<'_>,
 ) -> Result<Reply, String> {
-    if options.stream {
-        match complete_stream(client, server, model, messages, options.api_key, |_| {}).await {
-            Ok(reply) => return Ok(reply),
-            Err(_) => {
-                // Fall through to a non-streaming request.
-            }
-        }
+    if options.stream
+        && let Ok(reply) =
+            complete_stream(client, server, model, messages, options.api_key, true, |_| {}).await
+    {
+        return Ok(reply);
     }
-    complete_once(client, server, model, messages, options.api_key, false).await
+    complete_once(client, server, model, messages, options.api_key, false, true).await
 }
 
 pub async fn complete_with_delta<F>(
@@ -561,14 +974,22 @@ where
     F: FnMut(&str),
 {
     if options.stream {
-        match complete_stream(client, server, model, messages, options.api_key, &mut on_delta)
-            .await
+        match complete_stream(
+            client,
+            server,
+            model,
+            messages,
+            options.api_key,
+            true,
+            &mut on_delta,
+        )
+        .await
         {
             Ok(reply) => return Ok(reply),
             Err(_) => {}
         }
     }
-    complete_once(client, server, model, messages, options.api_key, false).await
+    complete_once(client, server, model, messages, options.api_key, false, true).await
 }
 
 async fn complete_once(
@@ -578,24 +999,46 @@ async fn complete_once(
     messages: &[Value],
     api_key: &str,
     stream: bool,
+    allow_tools: bool,
 ) -> Result<Reply, String> {
     let url = completions_url(server);
-    let request = apply_auth(client.post(&url), api_key)
-        .json(&request_body(model, messages, &tool_specs(), stream));
-    let response = request
-        .send()
-        .await
-        .map_err(|err| format!("Cannot reach {url}: {err}"))?;
-    let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|err| format!("Cannot read the response: {err}"))?;
-    if !status.is_success() {
-        let snippet: String = text.chars().take(300).collect();
-        return Err(format!("Server returned {status}: {snippet}"));
+    let mut allow_tools = allow_tools;
+    loop {
+        let use_tools = allow_tools && !model_skips_tools(model);
+        let tools = if use_tools {
+            tool_specs()
+        } else {
+            Vec::new()
+        };
+        let owned;
+        let msgs = if use_tools {
+            messages
+        } else {
+            owned = messages_with_tool_prompt(messages);
+            &owned
+        };
+        let request = apply_auth(client.post(&url), api_key)
+            .json(&request_body(model, msgs, &tools, stream));
+        let response = request
+            .send()
+            .await
+            .map_err(|err| format!("Cannot reach {url}: {err}"))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|err| format!("Cannot read the response: {err}"))?;
+        if !status.is_success() {
+            if use_tools && tools_not_supported(status, &text) {
+                remember_model_without_tools(model);
+                allow_tools = false;
+                continue;
+            }
+            let snippet: String = text.chars().take(300).collect();
+            return Err(format!("Server returned {status}: {snippet}"));
+        }
+        return parse_reply(&text);
     }
-    parse_reply(&text)
 }
 
 async fn complete_stream<F>(
@@ -604,38 +1047,64 @@ async fn complete_stream<F>(
     model: &str,
     messages: &[Value],
     api_key: &str,
+    allow_tools: bool,
     mut on_delta: F,
 ) -> Result<Reply, String>
 where
     F: FnMut(&str),
 {
     let url = completions_url(server);
-    let request = apply_auth(client.post(&url), api_key)
-        .header("Accept", "text/event-stream")
-        .json(&request_body(model, messages, &tool_specs(), true));
-    let response = request
-        .send()
-        .await
-        .map_err(|err| format!("Cannot reach {url}: {err}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let text = response
-            .text()
+    let mut allow_tools = allow_tools;
+    let response = loop {
+        let use_tools = allow_tools && !model_skips_tools(model);
+        let tools = if use_tools {
+            tool_specs()
+        } else {
+            Vec::new()
+        };
+        let owned;
+        let msgs = if use_tools {
+            messages
+        } else {
+            owned = messages_with_tool_prompt(messages);
+            &owned
+        };
+        let request = apply_auth(client.post(&url), api_key)
+            .header("Accept", "text/event-stream")
+            .json(&request_body(model, msgs, &tools, true));
+        let response = request
+            .send()
             .await
-            .unwrap_or_default();
+            .map_err(|err| format!("Cannot reach {url}: {err}"))?;
+        let status = response.status();
+        if status.is_success() {
+            break response;
+        }
+        let text = response.text().await.unwrap_or_default();
+        if use_tools && tools_not_supported(status, &text) {
+            remember_model_without_tools(model);
+            allow_tools = false;
+            continue;
+        }
         let snippet: String = text.chars().take(300).collect();
         return Err(format!("Server returned {status}: {snippet}"));
-    }
+    };
     let mut assembler = StreamAssembler::default();
-    let mut buffer = String::new();
+    // Byte buffer so a multi-byte UTF-8 char split across TCP chunks is not lossy-decoded.
+    let mut byte_buf: Vec<u8> = Vec::new();
+    let mut line_buf = String::new();
     let mut saw_event = false;
+    let mut hold_deltas = false;
+    let mut held = String::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|err| format!("Stream read failed: {err}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(newline) = buffer.find('\n') {
-            let mut line = buffer[..newline].to_string();
-            buffer.drain(..=newline);
+        byte_buf.extend_from_slice(&chunk);
+        let consumed = append_valid_utf8(&mut line_buf, &mut byte_buf);
+        let _ = consumed;
+        while let Some(newline) = line_buf.find('\n') {
+            let mut line = line_buf[..newline].to_string();
+            line_buf.drain(..=newline);
             if line.ends_with('\r') {
                 line.pop();
             }
@@ -643,29 +1112,90 @@ where
                 continue;
             };
             saw_event = true;
+            assembler.push_delta(&delta);
             if let Some(text) = delta.get("content").and_then(|value| value.as_str()) {
                 if !text.is_empty() {
-                    on_delta(text);
+                    if !hold_deltas && content_looks_like_tool_prefix(assembler.content()) {
+                        hold_deltas = true;
+                    }
+                    if hold_deltas {
+                        held.push_str(text);
+                    } else {
+                        on_delta(text);
+                    }
                 }
             }
-            assembler.push_delta(&delta);
         }
     }
-    if !buffer.trim().is_empty() {
-        if let Some(delta) = sse_data_delta(buffer.trim())? {
+    if !byte_buf.is_empty() {
+        // Flush any remaining bytes with replacement only at end-of-stream.
+        line_buf.push_str(&String::from_utf8_lossy(&byte_buf));
+        byte_buf.clear();
+    }
+    if !line_buf.trim().is_empty() {
+        if let Some(delta) = sse_data_delta(line_buf.trim())? {
             saw_event = true;
+            assembler.push_delta(&delta);
             if let Some(text) = delta.get("content").and_then(|value| value.as_str()) {
                 if !text.is_empty() {
-                    on_delta(text);
+                    if !hold_deltas && content_looks_like_tool_prefix(assembler.content()) {
+                        hold_deltas = true;
+                    }
+                    if hold_deltas {
+                        held.push_str(text);
+                    } else {
+                        on_delta(text);
+                    }
                 }
             }
-            assembler.push_delta(&delta);
         }
     }
     if !saw_event {
         return Err("Stream produced no events".to_string());
     }
-    assembler.into_reply()
+    let reply = assembler.into_reply()?;
+    if hold_deltas {
+        if reply.calls.is_empty() {
+            if !held.is_empty() {
+                on_delta(&held);
+            }
+        } else if !reply.content.trim().is_empty() {
+            on_delta(&reply.content);
+        }
+    }
+    Ok(reply)
+}
+
+/// Move complete UTF-8 sequences from `bytes` into `out`. Incomplete trailing bytes stay in `bytes`.
+fn append_valid_utf8(out: &mut String, bytes: &mut Vec<u8>) -> usize {
+    let mut valid_up_to = bytes.len();
+    while valid_up_to > 0 {
+        match std::str::from_utf8(&bytes[..valid_up_to]) {
+            Ok(_) => break,
+            Err(err) => {
+                if err.error_len().is_some() {
+                    // Invalid sequence — skip one byte to avoid hanging.
+                    let start = err.valid_up_to();
+                    if start > 0 {
+                        out.push_str(std::str::from_utf8(&bytes[..start]).unwrap_or(""));
+                        bytes.drain(..start + 1);
+                        valid_up_to = bytes.len();
+                        continue;
+                    }
+                    bytes.drain(..1);
+                    valid_up_to = bytes.len();
+                    continue;
+                }
+                valid_up_to = err.valid_up_to();
+            }
+        }
+    }
+    if valid_up_to == 0 {
+        return 0;
+    }
+    out.push_str(std::str::from_utf8(&bytes[..valid_up_to]).unwrap());
+    bytes.drain(..valid_up_to);
+    valid_up_to
 }
 
 #[cfg(test)]
@@ -719,6 +1249,60 @@ mod tests {
         let reply = parse_reply(raw).unwrap();
         assert!(reply.calls.is_empty());
         assert_eq!(reply.content, "Use index.html");
+    }
+
+    #[test]
+    fn bare_json_content_tool_call_is_detected() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"{\"name\": \"editor_state\", \"arguments\": {}}"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.calls.len(), 1, "{reply:?}");
+        assert_eq!(reply.calls[0].name, "editor_state");
+        assert!(reply.content.trim().is_empty(), "{}", reply.content);
+        assert!(reply.message["content"].is_null());
+    }
+
+    #[test]
+    fn fenced_json_content_tool_call_is_detected() {
+        let raw = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"list_dir\\\",\\\"parameters\\\":{\\\"path\\\":\\\".\\\"}}\\n```\"}}]}";
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.calls.len(), 1);
+        assert_eq!(reply.calls[0].name, "list_dir");
+        assert!(
+            reply.calls[0].arguments.contains('.'),
+            "{}",
+            reply.calls[0].arguments
+        );
+        assert!(reply.content.trim().is_empty(), "{}", reply.content);
+    }
+
+    #[test]
+    fn json_array_of_tool_calls_in_content() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"[{\"name\":\"editor_state\",\"arguments\":{}},{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}]"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.calls.len(), 2);
+        assert_eq!(reply.calls[0].name, "editor_state");
+        assert_eq!(reply.calls[1].name, "list_dir");
+    }
+
+    #[test]
+    fn arguments_as_json_string_in_content_object() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.calls.len(), 1);
+        assert_eq!(reply.calls[0].name, "read_file");
+        assert_eq!(reply.calls[0].arguments, "{\"path\":\"a.rs\"}");
+    }
+
+    #[test]
+    fn streamed_assembler_parses_bare_json_content() {
+        let mut assembler = StreamAssembler::default();
+        for piece in ["{\"name\": ", "\"editor_state\", ", "\"arguments\": {}}"] {
+            assembler.push_delta(&json!({ "content": piece }));
+        }
+        let reply = assembler.into_reply().unwrap();
+        assert_eq!(reply.calls.len(), 1);
+        assert_eq!(reply.calls[0].name, "editor_state");
+        assert!(reply.content.trim().is_empty(), "{}", reply.content);
     }
 
     #[test]
@@ -915,6 +1499,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streams_qwen_style_tool_json_in_content_without_flashing_deltas() {
+        let (server_url, server) = spawn_mock(|request| {
+            assert!(request.contains("\"stream\":true"), "{request}");
+            let events = concat!(
+                "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"{\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"\\\"name\\\": \\\"editor_state\\\", \"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"\\\"arguments\\\": {}}\"}}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                events.len(),
+                events
+            )
+        });
+        let client = reqwest::Client::new();
+        let messages = [serde_json::json!({"role":"user","content":"สวัสดี"})];
+        let mut pieces = Vec::new();
+        let reply = complete_with_delta(
+            &client,
+            &server_url,
+            "qwen2.5-coder:7b",
+            &messages,
+            CompleteOptions {
+                api_key: "",
+                stream: true,
+            },
+            |text| pieces.push(text.to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            pieces.is_empty(),
+            "raw tool JSON must not stream into the UI: {pieces:?}"
+        );
+        assert_eq!(reply.calls.len(), 1, "{reply:?}");
+        assert_eq!(reply.calls[0].name, "editor_state");
+        assert!(reply.content.trim().is_empty(), "{}", reply.content);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_stream_qwen_style_tool_json_in_content() {
+        let (server_url, server) = spawn_mock(|_request| {
+            let body = r#"{"choices":[{"message":{"role":"assistant","content":"{\"name\": \"editor_state\", \"arguments\": {}}" }}]}"#;
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+        });
+        let client = reqwest::Client::new();
+        let messages = [serde_json::json!({"role":"user","content":"สวัสดี"})];
+        let reply = complete(
+            &client,
+            &server_url,
+            "qwen2.5-coder:7b",
+            &messages,
+            CompleteOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.calls.len(), 1);
+        assert_eq!(reply.calls[0].name, "editor_state");
+        assert!(reply.content.trim().is_empty(), "{}", reply.content);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn stream_failure_falls_back_to_non_streaming() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -962,5 +1615,244 @@ mod tests {
         .unwrap();
         assert_eq!(reply.content, "fallback");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn python_style_tool_call_is_detected() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"read_file(path=\"a.rs\", start_line=1)"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.calls.len(), 1, "{reply:?}");
+        assert_eq!(reply.calls[0].name, "read_file");
+        let args: Value = serde_json::from_str(&reply.calls[0].arguments).unwrap();
+        assert_eq!(args["path"], "a.rs");
+        assert_eq!(args["start_line"], 1);
+        assert!(reply.content.trim().is_empty(), "{}", reply.content);
+    }
+
+    #[test]
+    fn gemma_tool_code_fence_is_detected() {
+        let raw = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```tool_code\\neditor_state()\\n```\"}}]}";
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.calls.len(), 1, "{reply:?}");
+        assert_eq!(reply.calls[0].name, "editor_state");
+        assert!(reply.content.trim().is_empty(), "{}", reply.content);
+    }
+
+    #[test]
+    fn mistral_tool_calls_marker_then_json() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"[TOOL_CALLS]{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.calls.len(), 1);
+        assert_eq!(reply.calls[0].name, "list_dir");
+    }
+
+    #[test]
+    fn llama_python_tag_then_call() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"<|python_tag|>editor_state()"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.calls.len(), 1);
+        assert_eq!(reply.calls[0].name, "editor_state");
+    }
+
+    #[test]
+    fn unknown_text_shape_stays_as_reply_not_hang() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"Here is help: call the read tool somehow {{not json"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert!(reply.calls.is_empty());
+        assert!(reply.content.contains("Here is help"));
+    }
+
+    #[test]
+    fn incomplete_fence_stays_as_reply() {
+        let raw = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"name\\\":\\\"list_dir\\\"\"}}]}";
+        let reply = parse_reply(raw).unwrap();
+        assert!(reply.calls.is_empty());
+        assert!(reply.content.contains("```json"));
+    }
+
+    #[test]
+    fn request_body_omits_tools_when_empty() {
+        let body = request_body("tiny", &[], &[], false);
+        assert!(body.get("tools").is_none(), "{body}");
+    }
+
+    #[test]
+    fn messages_with_tool_prompt_appends_catalog() {
+        let messages = [json!({"role":"system","content":"Be brief."}), json!({"role":"user","content":"hi"})];
+        let out = messages_with_tool_prompt(&messages);
+        assert_eq!(out.len(), 2);
+        let sys = out[0]["content"].as_str().unwrap();
+        assert!(sys.contains("Be brief."));
+        assert!(sys.contains("read_file"));
+        assert!(sys.contains("Available tools"));
+    }
+
+    #[test]
+    fn content_prefix_detects_python_style() {
+        assert!(content_looks_like_tool_prefix("editor_state("));
+        assert!(content_looks_like_tool_prefix("read_file(path="));
+        assert!(!content_looks_like_tool_prefix("Hello editor_state("));
+        assert!(!content_looks_like_tool_prefix("Sure, I can help."));
+    }
+
+    #[test]
+    fn append_valid_utf8_holds_incomplete_trailing_bytes() {
+        let mut out = String::new();
+        let mut bytes = Vec::new();
+        // Thai ส = E0 B8 AA — split after first byte
+        bytes.extend_from_slice(&[0xE0]);
+        let n = append_valid_utf8(&mut out, &mut bytes);
+        assert_eq!(n, 0);
+        assert!(out.is_empty());
+        assert_eq!(bytes, vec![0xE0]);
+        bytes.extend_from_slice(&[0xB8, 0xAA, b'x']);
+        let n = append_valid_utf8(&mut out, &mut bytes);
+        assert_eq!(n, 4);
+        assert_eq!(out, "สx");
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn append_valid_utf8_skips_invalid_byte_without_hanging() {
+        let mut out = String::new();
+        let mut bytes = vec![0xFF, b'a'];
+        append_valid_utf8(&mut out, &mut bytes);
+        assert_eq!(out, "a");
+        assert!(bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tools_unsupported_retries_without_tools_and_remembers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let model = format!("no-tools-model-{}", addr.port());
+        let model_for_server = model.clone();
+        let server = thread::spawn(move || {
+            for round in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 65536];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                if round == 0 {
+                    assert!(request.contains("\"tools\":"), "{request}");
+                    let body = r#"{"error":{"message":"registry.ollama.ai/library/gemma2 does not support tools"}}"#;
+                    let response = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                } else if round == 1 {
+                    assert!(!request.contains("\"tools\":"), "retry must omit tools: {request}");
+                    assert!(request.contains("Available tools"), "{request}");
+                    assert!(request.contains(&model_for_server), "{request}");
+                    let body = r#"{"choices":[{"message":{"role":"assistant","content":"{\"name\":\"editor_state\",\"arguments\":{}}" }}]}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                } else {
+                    // Third call (new complete) must skip tools immediately because model was remembered.
+                    assert!(!request.contains("\"tools\":"), "remembered model must skip tools: {request}");
+                    let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            }
+        });
+        let client = reqwest::Client::new();
+        let server_url = format!("http://{addr}/v1");
+        let messages = [json!({"role":"system","content":"Be helpful."}), json!({"role":"user","content":"hi"})];
+        let reply = complete(
+            &client,
+            &server_url,
+            &model,
+            &messages,
+            CompleteOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.calls.len(), 1);
+        assert_eq!(reply.calls[0].name, "editor_state");
+        let reply2 = complete(
+            &client,
+            &server_url,
+            &model,
+            &messages,
+            CompleteOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply2.content, "ok");
+        server.join().unwrap();
+    }
+
+        #[test]
+    fn real_ollama_qwen_content_json_fixture() {
+        // Exact non-stream body shape from local Ollama + qwen2.5-coder:0.5b (greeting).
+        let raw = r#"{"id":"chatcmpl-337","choices":[{"message":{"role":"assistant","content":"{\"name\": \"editor_state\", \"arguments\": {\"file\": \"(none)\", \"line\": 1, \"col\": 1, \"selection\": \"none\"}}"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.calls.len(), 1);
+        assert_eq!(reply.calls[0].name, "editor_state");
+        assert!(reply.content.trim().is_empty(), "{}", reply.content);
+        let args: Value = serde_json::from_str(&reply.calls[0].arguments).unwrap();
+        assert_eq!(args["file"], "(none)");
+    }
+
+    #[tokio::test]
+    async fn live_ollama_stream_content_json_if_available() {
+        let client = reqwest::Client::new();
+        let ok = client
+            .get("http://127.0.0.1:11434/api/tags")
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if !ok {
+            return;
+        }
+        let messages = [serde_json::json!({
+            "role": "user",
+            "content": "สวัสดี\n\neditor_state: file=(none) line=1 col=1 selection=none"
+        })];
+        let mut pieces = Vec::new();
+        let reply = complete_with_delta(
+            &client,
+            "http://127.0.0.1:11434/v1",
+            "qwen2.5-coder:0.5b",
+            &messages,
+            CompleteOptions {
+                api_key: "",
+                stream: true,
+            },
+            |text| pieces.push(text.to_string()),
+        )
+        .await;
+        let Ok(reply) = reply else {
+            return;
+        };
+        // Tiny Qwen often emits editor_state as content JSON; we must not leave it as chat text.
+        if reply.calls.is_empty() {
+            assert!(
+                !reply.content.trim_start().starts_with('{'),
+                "raw tool JSON leaked as content: {}",
+                reply.content
+            );
+        } else {
+            assert!(
+                pieces.is_empty() || !pieces.join("").trim_start().starts_with('{'),
+                "stream flashed tool JSON: {pieces:?}"
+            );
+            assert!(
+                reply.calls.iter().any(|c| c.name.contains("editor_state") || !c.name.is_empty()),
+                "{reply:?}"
+            );
+        }
     }
 }

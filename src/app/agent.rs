@@ -61,7 +61,10 @@ impl App {
                     return;
                 }
                 if let Some(draft) = self.agent.stream_draft.take() {
-                    if !draft.trim().is_empty() {
+                    // Textual tool JSON may have been streamed before parse; do not show it as chat.
+                    if !draft.trim().is_empty()
+                        && !agent::content_looks_like_tool_prefix(&draft)
+                    {
                         self.remember_assistant(&draft);
                         self.push_line(false, draft);
                     }

@@ -11,6 +11,7 @@ mod wrap;
 pub use disk::{DiskTask, MAX_BYTES, check_file_size, create_parent_plan, perform as perform_disk};
 pub use edit::{FileEdit, apply_to_buffer, read_lines, read_lines_rope};
 pub use path::within;
+pub use provider::content_looks_like_tool_prefix;
 pub use worker::spawn;
 pub use wrap::{column_at, index_at, next_boundary, prev_boundary, rows as wrap_rows};
 
@@ -301,8 +302,9 @@ fn tool(name: &str, description: &str, parameters: Value) -> Value {
 
 pub const SYSTEM: &str = "\
 You are the assistant inside duckx-code. Use tools to read and change files in the workspace. \
+Answer ordinary greetings and short chat in plain text without tools. \
+Each user message already ends with editor_state (focused file, 1-based cursor, selection) — do not call the editor_state tool just to greet or to restate that. \
 Paths stay inside the workspace. apply_edit replaces a line range or one unique snippet, and an open file is one undo step. \
-Each user message ends with editor_state: the focused file, the 1-based cursor line and column, and any selection. \
 Edit at that cursor unless the user names another file or line. \
 create_file writes a new file and opens it. write_file is the same tool. Parent folders must already exist, or only one new folder level is allowed. \
 It refuses a path that already exists; change an existing file with apply_edit or search_replace. \
