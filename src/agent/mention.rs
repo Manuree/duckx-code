@@ -188,7 +188,10 @@ pub fn suggest_files(
     recent: &[String],
     active_dir: &str,
 ) -> Vec<u32> {
-    let ranked = picker::filter(files, query, recent, active_dir);
+    // File-picker filter becomes case-sensitive when the query has uppercase;
+    // @mentions should stay forgiving (`@Desi` → DESIGN.md).
+    let folded = query.to_ascii_lowercase();
+    let ranked = picker::filter(files, &folded, recent, active_dir);
     ranked.into_iter().take(MENTION_LIMIT).collect()
 }
 

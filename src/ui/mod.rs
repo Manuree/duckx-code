@@ -399,7 +399,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use crate::action::{CommandBarAction, SemanticAction, SidebarAction};
+    use crate::action::{AgentAction, CommandBarAction, SemanticAction, SidebarAction};
     use crate::buffer::Buffer;
     use crate::explorer::{Explorer, FileEntry};
     use crate::jobs::AppEvent;
@@ -495,6 +495,88 @@ mod tests {
         assert!(!screen.contains("Assistant"), "{screen}");
         assert!(screen.contains("fn main"), "{screen}");
         assert!(screen.contains("COMMAND"), "{screen}");
+    }
+
+    #[test]
+    fn assistant_slash_popup_shows_command_hints() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.set_screen_size(80, 24);
+        app.handle(SemanticAction::Agent(AgentAction::Insert("/".into())));
+        assert!(
+            matches!(app.agent.popup, Some(crate::agent::AgentPopup::Slash { .. })),
+            "popup state missing after typing /"
+        );
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("/new"), "missing /new\n{screen}");
+        assert!(screen.contains("/help"), "missing /help\n{screen}");
+        assert!(
+            screen.contains("Start a new chat") || screen.contains("new chat"),
+            "missing command summary\n{screen}"
+        );
+        assert!(screen.contains("> /") || screen.contains("/"), "{screen}");
+    }
+
+    #[test]
+    fn assistant_at_popup_lists_matching_files() {
+        use crate::picker::IndexedFile;
+
+        let mut app = App::new(Buffer::from_text("stay\n"), None);
+        app.explorer = Explorer::new(PathBuf::from("/work/duckx-web"));
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.set_screen_size(80, 24);
+        use std::sync::Arc;
+        app.file_index = Some(crate::app::CachedFiles {
+            root: PathBuf::from("/work/duckx-web"),
+            files: Arc::new(vec![
+                IndexedFile {
+                    relative: "DESIGN.md".into(),
+                    name_at: 0,
+                },
+                IndexedFile {
+                    relative: "AGENTS.md".into(),
+                    name_at: 0,
+                },
+                IndexedFile {
+                    relative: "src/main.rs".into(),
+                    name_at: 4,
+                },
+            ]),
+            truncated: false,
+        });
+        app.handle(SemanticAction::Agent(AgentAction::Insert(
+            "Create the web from @Desi".into(),
+        )));
+        assert!(
+            matches!(
+                &app.agent.popup,
+                Some(crate::agent::AgentPopup::Mention { paths, .. }) if paths.iter().any(|p| p.contains("DESIGN"))
+            ),
+            "popup paths: {:?}",
+            app.agent.popup
+        );
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("DESIGN.md"), "missing DESIGN.md\n{screen}");
+        assert!(
+            screen.contains("@Desi") || screen.contains("Desi"),
+            "prompt missing\n{screen}"
+        );
+    }
+
+    #[test]
+    fn assistant_slash_popup_visible_in_small_panel() {
+        let mut app = App::new(Buffer::from_text("x\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.set_screen_size(60, 12);
+        app.handle(SemanticAction::Agent(AgentAction::Insert("/".into())));
+        let screen = draw(&app, 60, 12);
+        assert!(
+            screen.contains("/new") || screen.contains("/help"),
+            "hints missing in small panel\n{screen}"
+        );
     }
 
     #[test]

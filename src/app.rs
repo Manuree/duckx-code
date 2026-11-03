@@ -467,7 +467,7 @@ pub struct App {
     /// File picker modal. `None` while it is closed.
     pub file_picker: Option<FilePicker>,
     /// Last workspace walk, reused so the next picker opens before the refresh finishes.
-    file_index: Option<CachedFiles>,
+    pub(crate) file_index: Option<CachedFiles>,
     index_generation: u64,
     /// Workspace-relative paths, most recently opened first.
     recent_files: Vec<String>,
@@ -556,10 +556,10 @@ struct TreeScan {
     dirty: bool,
 }
 
-struct CachedFiles {
-    root: PathBuf,
-    files: Arc<Vec<IndexedFile>>,
-    truncated: bool,
+pub(crate) struct CachedFiles {
+    pub(crate) root: PathBuf,
+    pub(crate) files: Arc<Vec<IndexedFile>>,
+    pub(crate) truncated: bool,
 }
 
 impl App {
@@ -1043,7 +1043,26 @@ impl App {
             .clamp(1, 8) as u16;
         // Keep the previous minimum panel size; grow when the prompt needs more rows.
         let grown = 3u16.saturating_add(prompt_lines);
-        grown.max(base).min(height.saturating_sub(6)).max(4)
+        // Slash / @ hints need rows above the prompt (command-bar style).
+        let hint_rows = match &self.agent.popup {
+            Some(crate::agent::AgentPopup::Slash { filter, .. }) => {
+                crate::agent::filter_commands(filter).len().clamp(1, 8) as u16
+            }
+            Some(crate::agent::AgentPopup::Mention { paths, .. }) => {
+                paths.len().clamp(1, 8) as u16
+            }
+            None => 0,
+        };
+        let with_hints = grown.max(base).saturating_add(hint_rows);
+        with_hints
+            .min(height.saturating_sub(6))
+            .max(4)
+            .max(if hint_rows > 0 {
+                // Border (2) + prompt (1) + at least one hint row.
+                3u16.saturating_add(hint_rows).max(4)
+            } else {
+                4
+            })
     }
 
     pub fn focus(&self) -> Focus {
@@ -1186,6 +1205,13 @@ impl App {
                         .as_ref()
                         .is_some_and(|picker| !picker.rows.is_empty());
                     self.queue_filter(!preserve);
+                }
+                // @file popup may have opened before the index finished.
+                if matches!(
+                    self.agent.popup,
+                    Some(crate::agent::AgentPopup::Mention { .. })
+                ) {
+                    self.refresh_agent_popup();
                 }
             }
             AppEvent::PickerFiltered {

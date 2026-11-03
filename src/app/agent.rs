@@ -797,7 +797,7 @@ impl App {
         self.open_command_bar();
     }
 
-    fn refresh_agent_popup(&mut self) {
+    pub(super) fn refresh_agent_popup(&mut self) {
         if self.agent.pending.is_some() || self.agent.reading {
             self.agent.popup = None;
             return;

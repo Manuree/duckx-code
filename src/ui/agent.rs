@@ -133,23 +133,23 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Popup sits above the prompt; approval buttons skip it (early return above).
+    // Hints sit in the rows above the prompt (command-bar style), even in a small panel.
     if let Some(popup) = app.agent.popup.as_ref() {
         let prompt_top = inner.y + transcript_room as u16;
-        render_popup(frame, app, popup, inner, prompt_top, theme.sidebar, theme.sidebar.bg(theme.sidebar_selected));
+        render_popup(frame, app, popup, inner, prompt_top, &theme);
     }
 }
 
 
 fn render_popup(
     frame: &mut Frame,
-    _app: &App,
+    app: &App,
     popup: &AgentPopup,
     area: Rect,
     prompt_top: u16,
-    base: Style,
-    marked: Style,
+    theme: &crate::theme::UiStyles,
 ) {
+    let _ = app;
     let rows: Vec<(String, String, bool)> = match popup {
         AgentPopup::Slash { filter, selected } => {
             let hits = filter_commands(filter);
@@ -188,82 +188,82 @@ fn render_popup(
         }
     };
 
-    let title = match popup {
-        AgentPopup::Slash { .. } => " commands ",
-        AgentPopup::Mention { .. } => " files ",
+    // Space above the prompt inside the panel. Always keep at least one hint row
+    // by borrowing from the prompt strip when the panel is tiny.
+    let available_above = prompt_top.saturating_sub(area.y) as usize;
+    let mut hint_rows = available_above.max(1).min(rows.len()).min(8);
+    if hint_rows == 0 {
+        return;
+    }
+    // Prefer drawing immediately above the prompt; if there is no room above,
+    // draw into the top of the inner area (over transcript / overlapping prompt top).
+    let y0 = if available_above > 0 {
+        prompt_top.saturating_sub(hint_rows as u16)
+    } else {
+        area.y
     };
+    // Clamp so we stay inside the panel and leave the last prompt row alone when possible.
+    let max_y = prompt_top.saturating_sub(1).max(area.y);
+    let y0 = y0.min(max_y);
+    let room = (prompt_top.saturating_sub(y0)).max(1) as usize;
+    hint_rows = hint_rows.min(room).min(rows.len()).max(1);
 
-    let max_rows = rows.len().clamp(1, 8);
-    let list_h = max_rows as u16;
-    let box_h = list_h.saturating_add(2); // borders
-    let box_w = area.width.min(72).max(20.min(area.width));
-    if box_w < 12 || area.height < 4 {
-        return;
-    }
-    // Prefer sitting just above the prompt; clamp into the panel.
-    let y = prompt_top
-        .saturating_sub(box_h)
-        .max(area.y);
-    // If that would cover the prompt almost entirely in a tiny panel, still draw.
-    let x = area.x;
-    let rect = Rect::new(x, y, box_w, box_h.min(area.height.saturating_sub(prompt_top.saturating_sub(area.y).max(1))));
-    if rect.height < 3 || rect.width < 12 {
-        return;
-    }
-
-    let block = super::panel(title)
-        .border_style(base)
-        .style(base);
-    let inner = block.inner(rect);
-    frame.render_widget(Clear, rect);
-    frame.render_widget(block, rect);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let scroll = match popup {
-        AgentPopup::Slash { selected, .. } | AgentPopup::Mention { selected, .. } => {
-            let visible = inner.height as usize;
-            selected.saturating_sub(visible.saturating_sub(1))
-        }
+    let selected = match popup {
+        AgentPopup::Slash { selected, .. } | AgentPopup::Mention { selected, .. } => *selected,
     };
+    let scroll = selected.saturating_sub(hint_rows.saturating_sub(1));
+    let width = area.width as usize;
 
-    for (offset, (left, right, selected)) in rows
+    for (offset, (left, right, is_sel)) in rows
         .iter()
         .enumerate()
         .skip(scroll)
-        .take(inner.height as usize)
+        .take(hint_rows)
     {
-        let style = if *selected { marked } else { base };
-        let gap = 2usize;
-        let left_w = left.width();
-        let avail = inner.width as usize;
-        let line = if right.is_empty() {
-            format!(" {}{}", left, " ".repeat(avail.saturating_sub(left_w.saturating_add(1))))
-        } else {
-            let right_budget = avail.saturating_sub(left_w.saturating_add(gap).saturating_add(1));
-            let right_shown = fit(right, right_budget);
-            let pad = avail
-                .saturating_sub(1 + left_w + gap + right_shown.width());
-            format!(
-                " {}{}{}{}",
-                left,
-                " ".repeat(gap + pad),
-                right_shown,
-                ""
-            )
-        };
-        let shown = fit(&line, avail);
-        // Pad to full width so selection highlight fills the row.
-        let mut padded = shown;
-        while padded.width() < avail {
-            padded.push(' ');
+        let y = y0 + (offset - scroll) as u16;
+        if y >= prompt_top && available_above > 0 {
+            break;
         }
-        let padded = fit(&padded, avail);
-        frame.render_widget(
-            Paragraph::new(Line::styled(padded, style)).style(base),
-            Rect::new(inner.x, inner.y + (offset - scroll) as u16, inner.width, 1),
-        );
+        if y < area.y || y >= area.y + area.height {
+            continue;
+        }
+        let base = if *is_sel { theme.hint_active } else { theme.hint };
+        let name_style = if *is_sel {
+            theme.hint_active_name
+        } else {
+            theme.hint_dim
+        };
+        let desc_style = if *is_sel {
+            theme.hint_active_dim
+        } else {
+            theme.hint_keys
+        };
+        let keys = if *is_sel { " ↑↓ tab enter esc" } else { "" };
+        let name = format!(" {left}");
+        let mut spans = vec![Span::styled(name.clone(), name_style)];
+        let mut used = name.width();
+        if !right.is_empty() {
+            let gap = "  ";
+            let budget = width.saturating_sub(used + gap.width() + keys.width());
+            if budget > 0 {
+                let shown = fit(right, budget);
+                spans.push(Span::styled(gap, base));
+                spans.push(Span::styled(shown.clone(), desc_style));
+                used += gap.width() + shown.width();
+            }
+        }
+        if !keys.is_empty() && used + keys.width() <= width {
+            let pad = " ".repeat(width.saturating_sub(used + keys.width()));
+            spans.push(Span::styled(pad, base));
+            spans.push(Span::styled(keys, desc_style));
+            used = width;
+        }
+        if used < width {
+            spans.push(Span::styled(" ".repeat(width - used), base));
+        }
+        let rect = Rect::new(area.x, y, area.width, 1);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(base), rect);
     }
 }
 
