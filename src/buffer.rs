@@ -12,6 +12,104 @@ pub fn fingerprint_bytes(bytes: &[u8]) -> u64 {
     fnv1a(FNV_OFFSET, bytes)
 }
 
+/// Non-overlapping literal matches of `query` in `rope`, as char spans.
+/// Case-sensitive. Empty query matches nothing. Chunk-safe across rope boundaries.
+///
+/// Searches each rope chunk in place (no full-buffer `to_string`). Matches that
+/// straddle two chunks are found via a small overlap window of `query.len()-1`
+/// bytes. Char indices advance incrementally so dense hits stay O(n).
+pub fn find_spans_in_rope(rope: &Rope, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let query_chars = query.chars().count();
+    let query_bytes = query.len();
+    let overlap = query_bytes.saturating_sub(1);
+    let mut spans = Vec::new();
+    let mut next_char = 0usize;
+    let mut chars_before = 0usize;
+    let mut prev_tail = String::new();
+
+    for chunk in rope.chunks() {
+        if overlap > 0 && !prev_tail.is_empty() {
+            let mut boundary = String::with_capacity(prev_tail.len() + overlap + 4);
+            boundary.push_str(&prev_tail);
+            let take = overlap.min(chunk.len());
+            let mut end = take;
+            while end < chunk.len() && !chunk.is_char_boundary(end) {
+                end += 1;
+            }
+            boundary.push_str(&chunk[..end]);
+            let tail_chars = prev_tail.chars().count();
+            let base = chars_before - tail_chars;
+            let mut from = 0usize;
+            let mut chars_at_from = 0usize;
+            while let Some(rel) = boundary[from..].find(query) {
+                let at_byte = from + rel;
+                if at_byte >= prev_tail.len() {
+                    break;
+                }
+                chars_at_from += boundary[from..at_byte].chars().count();
+                let at_char = base + chars_at_from;
+                if at_char >= next_char {
+                    spans.push((at_char, at_char + query_chars));
+                    next_char = at_char + query_chars;
+                }
+                // Step one byte so overlapping candidates are still considered;
+                // `next_char` drops duplicates that would re-cover a prior match.
+                from = at_byte + 1;
+                while from < boundary.len() && !boundary.is_char_boundary(from) {
+                    from += 1;
+                }
+                chars_at_from = boundary[..from].chars().count();
+            }
+        }
+
+        let mut from = 0usize;
+        let mut chars_at_from = 0usize;
+        while let Some(rel) = chunk[from..].find(query) {
+            let at_byte = from + rel;
+            chars_at_from += chunk[from..at_byte].chars().count();
+            let at_char = chars_before + chars_at_from;
+            if at_char >= next_char {
+                spans.push((at_char, at_char + query_chars));
+                next_char = at_char + query_chars;
+                from = at_byte + query_bytes;
+                chars_at_from += query_chars;
+            } else {
+                from = at_byte + 1;
+                while from < chunk.len() && !chunk.is_char_boundary(from) {
+                    from += 1;
+                }
+                chars_at_from = chunk[..from].chars().count();
+            }
+        }
+
+        chars_before += chunk.chars().count();
+        if overlap == 0 {
+            prev_tail.clear();
+        } else if chunk.len() <= overlap {
+            prev_tail.push_str(chunk);
+            if prev_tail.len() > overlap {
+                let mut cut = prev_tail.len() - overlap;
+                while cut < prev_tail.len() && !prev_tail.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                prev_tail.drain(..cut);
+            }
+        } else {
+            let mut cut = chunk.len() - overlap;
+            while cut < chunk.len() && !chunk.is_char_boundary(cut) {
+                cut += 1;
+            }
+            prev_tail.clear();
+            prev_tail.push_str(&chunk[cut..]);
+        }
+    }
+    spans
+}
+
+
 fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
     for &byte in bytes {
         hash ^= u64::from(byte);
@@ -529,24 +627,9 @@ impl Buffer {
 
     /// Non-overlapping literal matches of `query`, in order. Case-sensitive.
     /// An empty query matches nothing.
+    /// Searches rope chunks so the UI thread does not allocate the whole buffer.
     pub fn find_spans(&self, query: &str) -> Vec<(usize, usize)> {
-        if query.is_empty() {
-            return Vec::new();
-        }
-        let text = self.rope.to_string();
-        let query_chars = query.chars().count();
-        let mut spans = Vec::new();
-        let mut from_byte = 0;
-        let mut from_char = 0;
-        while let Some(rel) = text[from_byte..].find(query) {
-            let start_byte = from_byte + rel;
-            let start = from_char + text[from_byte..start_byte].chars().count();
-            let end = start + query_chars;
-            spans.push((start, end));
-            from_byte = start_byte + query.len();
-            from_char = end;
-        }
-        spans
+        find_spans_in_rope(&self.rope, query)
     }
 
     /// Selects `[start, end)`. The cursor sits on the first character.
@@ -1843,6 +1926,49 @@ mod tests {
         assert_eq!(crlf.find_spans("ab"), vec![(0, 2), (7, 9)]);
         assert_eq!(Buffer::literal_match_count("aaa", "aa"), 1);
         assert_eq!(Buffer::literal_match_count("Cat", "cat"), 0);
+    }
+
+    #[test]
+    fn find_spans_match_across_rope_chunk_boundaries() {
+        // A rope that ends in `X`, then an insert that starts with `Y`, puts `XY`
+        // across a chunk boundary (ropey keeps the old leaf and adds a new one).
+        let mut rope = ropey::Rope::from_str(&format!("{}X", "a".repeat(5000)));
+        // Large right-hand insert keeps `X|Y` on a leaf boundary; a tiny insert can coalesce.
+        rope.insert(rope.len_chars(), &format!("Y{}", "b".repeat(5000)));
+        rope.insert(rope.len_chars(), "QQXYQQ");
+        assert!(rope.chunks().count() > 1, "expected multiple chunks, got {}", rope.chunks().count());
+        // Confirm at least one hit straddles a leaf.
+        let text = rope.to_string();
+        let first_xy = text.find("XY").expect("XY");
+        let mut pos = 0usize;
+        let mut straddles = false;
+        for chunk in rope.chunks() {
+            let end = pos + chunk.len();
+            if end == first_xy + 1 {
+                straddles = true;
+                break;
+            }
+            pos = end;
+        }
+        assert!(straddles, "expected first XY to straddle a chunk boundary");
+        let from_rope = find_spans_in_rope(&rope, "XY");
+        let from_string = {
+            let mut spans = Vec::new();
+            let mut from_byte = 0;
+            let mut from_char = 0;
+            let query = "XY";
+            let query_chars = query.chars().count();
+            while let Some(rel) = text[from_byte..].find(query) {
+                let start_byte = from_byte + rel;
+                let start = from_char + text[from_byte..start_byte].chars().count();
+                spans.push((start, start + query_chars));
+                from_byte = start_byte + query.len();
+                from_char = start + query_chars;
+            }
+            spans
+        };
+        assert_eq!(from_rope, from_string);
+        assert_eq!(from_rope.len(), 2, "{from_rope:?}");
     }
 
     #[test]

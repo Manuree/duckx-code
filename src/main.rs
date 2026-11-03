@@ -215,9 +215,17 @@ async fn drive(
     let mut fs_due: Option<tokio::time::Instant> = None;
     let mut watch = tokio::time::interval(Duration::from_secs(1));
     watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // First frame and every input/job/LSP/agent/fs/spinner change must redraw.
+    // Idle ticks that queue nothing must not.
+    let mut needs_draw = true;
+    let mut last_explorer_height: Option<usize> = None;
     while !app.should_quit {
         sync_folder_watch(&mut folder_watch, &app.explorer.root, &fs_tx, &mut fs_due);
-        for job in app.take_jobs() {
+        let queued = app.take_jobs();
+        if !queued.is_empty() {
+            needs_draw = true;
+        }
+        for job in queued {
             let job_results = job_results.clone();
             tokio::task::spawn_blocking(move || {
                 let _ = job_results.send(jobs::run(job));
@@ -227,20 +235,27 @@ async fn drive(
             lsp.send(request);
         }
 
-        let size = terminal.size()?;
-        app.set_screen_size(size.width, size.height);
-        let area = Rect::new(0, 0, size.width, size.height);
-        let layout = ui::frame_layout(&app, area);
-        app.resize_panes(
-            &layout
-                .panes
-                .iter()
-                .map(|pane| (pane.id, pane.text.width, pane.text.height))
-                .collect::<Vec<_>>(),
-        );
-        app.explorer.height = ui::sidebar_tree_height(layout.sidebar);
-        app.explorer.scroll_into_view();
-        ui::draw(terminal, &app)?;
+        if needs_draw {
+            let size = terminal.size()?;
+            app.set_screen_size(size.width, size.height);
+            let area = Rect::new(0, 0, size.width, size.height);
+            let layout = ui::frame_layout(app, area);
+            app.resize_panes(
+                &layout
+                    .panes
+                    .iter()
+                    .map(|pane| (pane.id, pane.text.width, pane.text.height))
+                    .collect::<Vec<_>>(),
+            );
+            let tree_height = ui::sidebar_tree_height(layout.sidebar);
+            app.explorer.height = tree_height;
+            if last_explorer_height != Some(tree_height) {
+                app.explorer.scroll_into_view();
+                last_explorer_height = Some(tree_height);
+            }
+            ui::draw(terminal, app)?;
+            needs_draw = false;
+        }
 
         tokio::select! {
             event = events.next() => {
@@ -259,50 +274,82 @@ async fn drive(
                     )
                 {
                     app.handle(action);
+                    needs_draw = true;
                 }
             }
-            Some(event) = job_events.recv() => app.handle_event(event),
-            Some(event) = lsp_events.recv() => app.handle_lsp(event),
-            Some(event) = agent_events.recv() => app.handle_agent(event),
-            Some(event) = fs_events.recv() => match event {
-                AppEvent::FsChanged { root } => {
-                    let live = folder_watch.as_ref().is_some_and(|watch| {
-                        !watch.failed && session::same_directory(&watch.root, &root)
-                    });
-                    if live {
-                        fs_due = Some(tokio::time::Instant::now() + Duration::from_millis(200));
-                    }
+            Some(event) = job_events.recv() => {
+                app.handle_event(event);
+                while let Ok(more) = job_events.try_recv() {
+                    app.handle_event(more);
                 }
-                AppEvent::FsWatchFailed { root } => {
-                    if folder_watch
-                        .as_ref()
-                        .is_some_and(|watch| session::same_directory(&watch.root, &root))
-                    {
-                        if let Some(watch) = folder_watch.as_mut() {
-                            watch.watcher = None;
-                            watch.failed = true;
+                needs_draw = true;
+            }
+            Some(event) = lsp_events.recv() => {
+                app.handle_lsp(event);
+                while let Ok(more) = lsp_events.try_recv() {
+                    app.handle_lsp(more);
+                }
+                needs_draw = true;
+            }
+            Some(event) = agent_events.recv() => {
+                app.handle_agent(event);
+                while let Ok(more) = agent_events.try_recv() {
+                    app.handle_agent(more);
+                }
+                needs_draw = true;
+            }
+            Some(event) = fs_events.recv() => {
+                match event {
+                    AppEvent::FsChanged { root } => {
+                        let live = folder_watch.as_ref().is_some_and(|watch| {
+                            !watch.failed && session::same_directory(&watch.root, &root)
+                        });
+                        if live {
+                            fs_due = Some(tokio::time::Instant::now() + Duration::from_millis(200));
                         }
-                        fs_due = None;
+                    }
+                    AppEvent::FsWatchFailed { root } => {
+                        if folder_watch
+                            .as_ref()
+                            .is_some_and(|watch| session::same_directory(&watch.root, &root))
+                        {
+                            if let Some(watch) = folder_watch.as_mut() {
+                                watch.watcher = None;
+                                watch.failed = true;
+                            }
+                            fs_due = None;
+                        }
+                    }
+                    other => {
+                        app.handle_event(other);
+                        needs_draw = true;
                     }
                 }
-                other => app.handle_event(other),
-            },
+            }
             _ = tokio::time::sleep_until(
                 fs_due.unwrap_or(tokio::time::Instant::now() + Duration::from_secs(86_400)),
             ), if fs_due.is_some() => {
                 fs_due = None;
                 let root = app.explorer.root.clone();
                 app.note_fs_changed(&root);
+                // Queued ScanTree/GitStatus must paint (loading / new rows) without a keypress.
+                needs_draw = true;
             }
             _ = watch.tick() => {
-                app.watch_files();
+                let stats = app.watch_files();
+                let mut tree = false;
                 if folder_watch.as_ref().is_some_and(|watch| watch.failed) {
                     let root = app.explorer.root.clone();
                     app.note_fs_changed(&root);
+                    tree = true;
+                }
+                if stats > 0 || tree {
+                    needs_draw = true;
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(80)), if app.agent.busy => {
                 app.advance_agent_spin();
+                needs_draw = true;
             }
         }
     }

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,7 +10,8 @@ use crate::action::{
     CommandBarAction, CompletionAction, FindAction, Focus, PaneDirection, PickerAction,
     PromptAction, ReplaceAction, SemanticAction, SettingsAction, SidebarAction,
 };
-use crate::buffer::{Buffer, Movement, fingerprint_bytes};
+use ropey::Rope;
+use crate::buffer::{Buffer, Movement};
 use crate::command::{
     CommandBar, CommandContext, CommandId, CommandSpec, NameSource, find_command, ghost_suffix,
     is_known_name, is_line_number, name_prefix, name_source, spec, suggestions, unavailable_reason,
@@ -114,6 +116,16 @@ impl View {
     }
 }
 
+/// Cached visible syntax spans for one paint range.
+#[derive(Debug, Clone)]
+struct HighlightCache {
+    generation: u64,
+    version: u64,
+    start_line: usize,
+    end_line: usize,
+    spans: Vec<(usize, usize, SyntaxRole)>,
+}
+
 /// One open document. Several tabs share a pane, and each keeps its own cursor.
 #[derive(Debug)]
 pub struct Tab {
@@ -148,6 +160,8 @@ pub struct Tab {
     syntax: Option<SyntaxState>,
     /// Bumped when the buffer is replaced or the language changes, so an older parse is ignored.
     syntax_generation: u64,
+    /// Last `highlights` result for the visible range. Cleared when the tree or range changes.
+    highlight_cache: RefCell<Option<HighlightCache>>,
     /// Edits not yet sent to the language server.
     lsp_edits: Vec<crate::buffer::ByteEdit>,
     /// Last comparison with `HEAD`. Kept while a newer one is in flight so the gutter does not blink.
@@ -156,17 +170,45 @@ pub struct Tab {
 
 impl Tab {
     /// Syntax roles for `start_line..end_line`. Empty until a parse has landed.
+    /// Tree-sitter spans are cached for the same generation/version/range; semantic tokens merge each call.
     pub fn highlights(
         &self,
         start_line: usize,
         end_line: usize,
         semantic: &[(usize, usize, SyntaxRole)],
     ) -> Vec<(usize, usize, SyntaxRole)> {
-        let mut spans = self
-            .syntax
-            .as_ref()
-            .map(|state| syntax::highlight_range(state, self.buffer.rope(), start_line, end_line))
-            .unwrap_or_default();
+        let generation = self.syntax.as_ref().map(|s| s.generation()).unwrap_or(0);
+        let version = self.syntax.as_ref().map(|s| s.version()).unwrap_or(0);
+        let tree_spans = {
+            let cache = self.highlight_cache.borrow();
+            let reuse = cache.as_ref().is_some_and(|cache| {
+                cache.generation == generation
+                    && cache.version == version
+                    && cache.start_line == start_line
+                    && cache.end_line == end_line
+            });
+            if reuse {
+                cache.as_ref().unwrap().spans.clone()
+            } else {
+                drop(cache);
+                let spans = self
+                    .syntax
+                    .as_ref()
+                    .map(|state| {
+                        syntax::highlight_range(state, self.buffer.rope(), start_line, end_line)
+                    })
+                    .unwrap_or_default();
+                *self.highlight_cache.borrow_mut() = Some(HighlightCache {
+                    generation,
+                    version,
+                    start_line,
+                    end_line,
+                    spans: spans.clone(),
+                });
+                spans
+            }
+        };
+        let mut spans = tree_spans;
         let rope = self.buffer.rope();
         for &(start, end, role) in semantic {
             let Ok(start) = rope.try_byte_to_char(start.min(rope.len_bytes())) else {
@@ -251,6 +293,7 @@ fn fresh_tab(id: TabId, buffer: Buffer, path: Option<PathBuf>) -> Tab {
         replace_text: String::new(),
         syntax: None,
         syntax_generation: 0,
+        highlight_cache: RefCell::new(None),
         lsp_edits: Vec::new(),
         diff: None,
     }
@@ -642,9 +685,10 @@ impl App {
     }
 
     /// Queues a stamp check for every open file that is not already being read, saved, or checked.
-    pub fn watch_files(&mut self) {
+    /// Returns how many checks were queued so the UI loop can skip a redraw when nothing changed.
+    pub fn watch_files(&mut self) -> usize {
         if self.prompt.is_some() {
-            return;
+            return 0;
         }
         let mut jobs = Vec::new();
         for editor in &mut self.editors {
@@ -666,7 +710,9 @@ impl App {
                 });
             }
         }
+        let n = jobs.len();
         self.jobs.extend(jobs);
+        n
     }
 
     pub fn buffer_mut(&mut self) -> &mut Buffer {
@@ -1270,6 +1316,7 @@ impl App {
         if tab.buffer.rope().len_bytes() > syntax::MAX_HIGHLIGHT_BYTES {
             return None;
         }
+        // Rope::clone is O(1) (shared chunks); no to_string on the UI thread.
         Some(syntax::ParseInput {
             language: state.language(),
             generation: state.generation(),
@@ -2942,7 +2989,7 @@ impl App {
         self.file_find_query = query.clone();
         self.file_find_generation = self.file_find_generation.wrapping_add(1);
         let generation = self.file_find_generation;
-        let texts = self.open_file_texts();
+        let texts = self.open_file_ropes();
         let files = self
             .explorer
             .entries()
@@ -3017,7 +3064,7 @@ impl App {
         };
         self.file_find_generation = self.file_find_generation.wrapping_add(1);
         let generation = self.file_find_generation;
-        let texts = self.open_file_texts();
+        let texts = self.open_file_ropes();
         let files = self
             .explorer
             .entries()
@@ -3037,8 +3084,10 @@ impl App {
         });
     }
 
-    /// Text of open files, keyed by path relative to the explorer root.
-    fn open_file_texts(&self) -> HashMap<PathBuf, String> {
+    /// Open buffers keyed by path relative to the explorer root.
+    /// Rope clones are cheap; the FindFiles worker stringifies or scans chunks.
+    /// Includes every open file so project search matches the buffer (dirty or not).
+    fn open_file_ropes(&self) -> HashMap<PathBuf, Rope> {
         let mut texts = HashMap::new();
         for editor in &self.editors {
             for tab in editor.tabs() {
@@ -3048,7 +3097,7 @@ impl App {
                 let Some(rel) = self.relative_to_root(path) else {
                     continue;
                 };
-                texts.insert(rel, tab.buffer.rope().to_string());
+                texts.insert(rel, tab.buffer.rope().clone());
             }
         }
         texts
@@ -4082,8 +4131,8 @@ impl App {
         };
         let encoding = tab.encoding;
         tab.buffer.prepare_for_save(forced, trim, final_newline);
-        let text = tab.buffer.rope().to_string();
-        let fingerprint = fingerprint_bytes(text.as_bytes());
+        let fingerprint = tab.buffer.fingerprint();
+        let text = tab.buffer.rope().clone();
         let epoch = tab.epoch;
         tab.saving = true;
         tab.path = Some(path.clone());
@@ -6469,6 +6518,75 @@ mod tests {
             [Job::ScanTree(root.clone()), Job::GitStatus(root)]
         );
     }
+
+    /// Regression: disk create / delete / rename must refresh the open Explorer
+    /// through note_fs_changed → ScanTree → TreeScanned → set_entries without
+    /// closing and reopening the sidebar (commit 517ca8a).
+    #[test]
+    fn disk_create_delete_rename_refresh_open_explorer_without_reopen() {
+        let (dir, _guard) = temp_dir();
+        std::fs::write(dir.join("keep.txt"), "keep\n").unwrap();
+        std::fs::write(dir.join("gone.txt"), "gone\n").unwrap();
+
+        let mut app = App::new(Buffer::new(), None);
+        app.explorer = Explorer::new(dir.clone());
+        app.explorer.open = true;
+        // Seed the tree the way a first scan would.
+        let first = crate::jobs::run(Job::ScanTree(dir.clone()));
+        app.handle_event(first);
+        app.take_jobs();
+        let names: Vec<_> = app
+            .explorer
+            .entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(names.contains(&"keep.txt"), "{names:?}");
+        assert!(names.contains(&"gone.txt"), "{names:?}");
+
+        // Create, delete, and rename on disk while the sidebar stays open.
+        std::fs::write(dir.join("fresh.txt"), "fresh\n").unwrap();
+        std::fs::remove_file(dir.join("gone.txt")).unwrap();
+        std::fs::rename(dir.join("keep.txt"), dir.join("kept.txt")).unwrap();
+
+        app.note_fs_changed(&dir);
+        let jobs = app.take_jobs();
+        assert!(
+            jobs.iter().any(|j| matches!(j, Job::ScanTree(_))),
+            "disk change must queue ScanTree while Explorer is open: {jobs:?}"
+        );
+        let scan = jobs
+            .into_iter()
+            .find(|j| matches!(j, Job::ScanTree(_)))
+            .expect("ScanTree");
+        let event = crate::jobs::run(scan);
+        app.handle_event(event);
+
+        let names: Vec<_> = app
+            .explorer
+            .entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"fresh.txt"),
+            "create must appear without reopening Explorer: {names:?}"
+        );
+        assert!(
+            names.contains(&"kept.txt"),
+            "rename must appear without reopening Explorer: {names:?}"
+        );
+        assert!(
+            !names.contains(&"gone.txt"),
+            "delete must disappear without reopening Explorer: {names:?}"
+        );
+        assert!(
+            !names.contains(&"keep.txt"),
+            "old rename source must be gone: {names:?}"
+        );
+        assert!(app.explorer.open, "sidebar must stay open");
+    }
+
 
     #[test]
     fn focus_shows_one_buffer_and_leaves_the_rest_in_place() {

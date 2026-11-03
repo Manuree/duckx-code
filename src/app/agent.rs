@@ -496,16 +496,16 @@ Parent folder exists".to_string(),
         if items.is_empty() {
             return "No diagnostics".to_string();
         }
-        let rope = self
-            .tab_with_path(&path)
-            .and_then(|id| self.find_tab(id))
-            .map(|tab| tab.buffer.rope().clone());
         let mut lines = Vec::new();
         for item in items.iter().take(30) {
-            let line = rope.as_ref().map(|rope| {
-                let at = item.start.min(rope.len_bytes());
-                rope.byte_to_line(at) + 1
-            });
+            let line = self
+                .tab_with_path(&path)
+                .and_then(|id| self.find_tab(id))
+                .map(|tab| {
+                    let rope = tab.buffer.rope();
+                    let at = item.start.min(rope.len_bytes());
+                    rope.byte_to_line(at) + 1
+                });
             let where_ = line
                 .map(|line| line.to_string())
                 .unwrap_or_else(|| "?:?".to_string());
