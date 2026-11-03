@@ -22,6 +22,8 @@ pub struct Reply {
     pub calls: Vec<ToolCall>,
     /// The assistant message, sent back before each tool result.
     pub message: Value,
+    /// True when this completion retried after flattening poisoned tool history.
+    pub history_flattened: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -186,6 +188,7 @@ fn reply_from_parts(content: String, calls: Vec<ToolCall>) -> Reply {
         content,
         calls,
         message,
+        history_flattened: false,
     }
 }
 
@@ -311,27 +314,147 @@ fn tool_call_from_value(value: &Value, index: usize) -> Option<ToolCall> {
 
 fn arguments_string(value: &Value) -> String {
     match value {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
+        Value::String(text) => normalize_tool_arguments(text),
+        Value::Null => "{}".to_string(),
+        other => normalize_tool_arguments(&other.to_string()),
     }
 }
 
-fn json_calls(calls: &[ToolCall]) -> Value {
+/// OpenAI / Ollama require `function.arguments` to be a JSON-encoded object string.
+/// Empty or invalid input becomes `"{}"` so history never poisons the next turn.
+pub fn normalize_tool_arguments(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "{}".to_string();
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(Value::Object(_)) => trimmed.to_string(),
+        Ok(Value::Null) => "{}".to_string(),
+        Ok(Value::Array(arr)) => {
+            // Some models wrap args; keep a valid JSON string.
+            Value::Array(arr).to_string()
+        }
+        Ok(other) => json!({ "value": other }).to_string(),
+        Err(_) => "{}".to_string(),
+    }
+}
+
+/// Build OpenAI-shaped tool_calls with `arguments` always a valid JSON string.
+pub fn json_calls(calls: &[ToolCall]) -> Value {
     Value::Array(
         calls
             .iter()
-            .map(|call| {
+            .enumerate()
+            .map(|(index, call)| {
+                let id = if call.id.trim().is_empty() {
+                    format!("call-{index}")
+                } else {
+                    call.id.clone()
+                };
                 json!({
-                    "id": call.id,
+                    "id": id,
                     "type": "function",
                     "function": {
                         "name": call.name,
-                        "arguments": call.arguments
+                        "arguments": normalize_tool_arguments(&call.arguments)
                     }
                 })
             })
             .collect(),
     )
+}
+
+/// Assert / sanitize one assistant tool_calls message for the OpenAI wire format.
+pub fn sanitize_tool_message(message: &Value) -> Value {
+    let mut out = message.clone();
+    let Some(calls) = out.get("tool_calls").and_then(|v| v.as_array()).cloned() else {
+        return out;
+    };
+    let mut fixed = Vec::with_capacity(calls.len());
+    for (index, call) in calls.iter().enumerate() {
+        let id = call
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("call-{index}"));
+        let name = call
+            .pointer("/function/name")
+            .and_then(|v| v.as_str())
+            .or_else(|| call.get("name").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let args = call
+            .pointer("/function/arguments")
+            .cloned()
+            .or_else(|| call.get("arguments").cloned())
+            .unwrap_or(Value::String(String::new()));
+        let args = match args {
+            Value::String(s) => normalize_tool_arguments(&s),
+            other => normalize_tool_arguments(&other.to_string()),
+        };
+        fixed.push(json!({
+            "id": id,
+            "type": "function",
+            "function": { "name": name, "arguments": args }
+        }));
+    }
+    out["tool_calls"] = Value::Array(fixed);
+    out
+}
+
+/// Turn tool_calls / tool messages into plain chat so a poisoned history can recover.
+pub fn flatten_tool_history(messages: &[Value]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(messages.len());
+    for message in messages {
+        let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        match role {
+            "assistant" if message.get("tool_calls").is_some() => {
+                let mut text = message_text(&message["content"]);
+                if let Some(calls) = message["tool_calls"].as_array() {
+                    for call in calls {
+                        let name = call
+                            .pointer("/function/name")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| call.get("name").and_then(|v| v.as_str()))
+                            .unwrap_or("tool");
+                        let args = call
+                            .pointer("/function/arguments")
+                            .cloned()
+                            .unwrap_or(Value::String("{}".into()));
+                        let args = match args {
+                            Value::String(s) => normalize_tool_arguments(&s),
+                            other => other.to_string(),
+                        };
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(&format!("Called {name}({args})"));
+                    }
+                }
+                out.push(json!({"role": "assistant", "content": text}));
+            }
+            "tool" => {
+                let content = message
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                out.push(json!({
+                    "role": "user",
+                    "content": format!("Tool result:\n{content}")
+                }));
+            }
+            _ => out.push(sanitize_tool_message(message)),
+        }
+    }
+    out
+}
+
+fn invalid_tool_call_arguments(status: reqwest::StatusCode, body: &str) -> bool {
+    status.as_u16() == 400
+        && body
+            .to_ascii_lowercase()
+            .contains("invalid tool call arguments")
 }
 
 /// Tool calls some local models write as text. The string is the reply with those calls removed.
@@ -914,7 +1037,7 @@ impl StreamAssembler {
             calls.push(ToolCall {
                 id,
                 name: name.to_string(),
-                arguments: partial.arguments,
+                arguments: normalize_tool_arguments(&partial.arguments),
             });
         }
         if calls.is_empty() {
@@ -1003,6 +1126,8 @@ async fn complete_once(
 ) -> Result<Reply, String> {
     let url = completions_url(server);
     let mut allow_tools = allow_tools;
+    let mut flattened = false;
+    let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     loop {
         let use_tools = allow_tools && !model_skips_tools(model);
         let tools = if use_tools {
@@ -1012,10 +1137,10 @@ async fn complete_once(
         };
         let owned;
         let msgs = if use_tools {
-            messages
+            working.as_slice()
         } else {
-            owned = messages_with_tool_prompt(messages);
-            &owned
+            owned = messages_with_tool_prompt(&working);
+            owned.as_slice()
         };
         let request = apply_auth(client.post(&url), api_key)
             .json(&request_body(model, msgs, &tools, stream));
@@ -1034,10 +1159,17 @@ async fn complete_once(
                 allow_tools = false;
                 continue;
             }
+            if !flattened && invalid_tool_call_arguments(status, &text) {
+                working = flatten_tool_history(&working);
+                flattened = true;
+                continue;
+            }
             let snippet: String = text.chars().take(300).collect();
             return Err(format!("Server returned {status}: {snippet}"));
         }
-        return parse_reply(&text);
+        let mut reply = parse_reply(&text)?;
+        reply.history_flattened = flattened;
+        return Ok(reply);
     }
 }
 
@@ -1055,6 +1187,8 @@ where
 {
     let url = completions_url(server);
     let mut allow_tools = allow_tools;
+    let mut flattened = false;
+    let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     let response = loop {
         let use_tools = allow_tools && !model_skips_tools(model);
         let tools = if use_tools {
@@ -1064,10 +1198,10 @@ where
         };
         let owned;
         let msgs = if use_tools {
-            messages
+            working.as_slice()
         } else {
-            owned = messages_with_tool_prompt(messages);
-            &owned
+            owned = messages_with_tool_prompt(&working);
+            owned.as_slice()
         };
         let request = apply_auth(client.post(&url), api_key)
             .header("Accept", "text/event-stream")
@@ -1086,10 +1220,17 @@ where
             allow_tools = false;
             continue;
         }
+        if !flattened && invalid_tool_call_arguments(status, &text) {
+            working = flatten_tool_history(&working);
+            flattened = true;
+            continue;
+        }
         let snippet: String = text.chars().take(300).collect();
         return Err(format!("Server returned {status}: {snippet}"));
     };
-    let mut assembler = StreamAssembler::default();
+    // Stash flattened flag for after assembly.
+    let history_flattened = flattened;
+let mut assembler = StreamAssembler::default();
     // Byte buffer so a multi-byte UTF-8 char split across TCP chunks is not lossy-decoded.
     let mut byte_buf: Vec<u8> = Vec::new();
     let mut line_buf = String::new();
@@ -1153,7 +1294,8 @@ where
     if !saw_event {
         return Err("Stream produced no events".to_string());
     }
-    let reply = assembler.into_reply()?;
+    let mut reply = assembler.into_reply()?;
+    reply.history_flattened = history_flattened;
     if hold_deltas {
         if reply.calls.is_empty() {
             if !held.is_empty() {
@@ -1793,7 +1935,86 @@ mod tests {
         server.join().unwrap();
     }
 
-        #[test]
+    
+    #[test]
+    fn normalize_tool_arguments_empty_and_invalid_become_object() {
+        assert_eq!(normalize_tool_arguments(""), "{}");
+        assert_eq!(normalize_tool_arguments("   "), "{}");
+        assert_eq!(normalize_tool_arguments("{\"a\":"), "{}");
+        assert_eq!(normalize_tool_arguments("{}"), "{}");
+        assert_eq!(normalize_tool_arguments("{\"path\":\"a.rs\"}"), "{\"path\":\"a.rs\"}");
+    }
+
+    #[test]
+    fn json_calls_always_emit_string_arguments() {
+        let formats = [
+            parse_reply(r#"{"choices":[{"message":{"role":"assistant","content":"{\"name\":\"editor_state\",\"arguments\":{}}"}}]}"#).unwrap(),
+            parse_reply(r#"{"choices":[{"message":{"role":"assistant","content":"read_file(path=\"a.rs\")"}}]}"#).unwrap(),
+            parse_reply("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"```tool_code\\neditor_state()\\n```\"}}]}").unwrap(),
+            parse_reply(r#"{"choices":[{"message":{"role":"assistant","content":"<tool_call>\n{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}\n</tool_call>"}}]}"#).unwrap(),
+            parse_reply(r#"{"choices":[{"message":{"role":"assistant","content":"[TOOL_CALLS]{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}"}}]}"#).unwrap(),
+            parse_reply(r#"{"choices":[{"message":{"role":"assistant","content":"<|python_tag|>editor_state()"}}]}"#).unwrap(),
+            parse_reply(r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"1","type":"function","function":{"name":"editor_state","arguments":""}}]}}]}"#).unwrap(),
+        ];
+        for reply in formats {
+            assert!(!reply.calls.is_empty(), "{reply:?}");
+            let wire = json_calls(&reply.calls);
+            for call in wire.as_array().unwrap() {
+                assert_eq!(call["type"], "function");
+                assert!(call["id"].as_str().is_some_and(|s| !s.is_empty()));
+                let args = call["function"]["arguments"].as_str().expect("arguments must be a JSON string");
+                let parsed: Value = serde_json::from_str(args).expect(args);
+                assert!(parsed.is_object(), "{args}");
+            }
+            // Message embedded for history must match the same shape.
+            let msg_calls = reply.message["tool_calls"].as_array().unwrap();
+            for call in msg_calls {
+                let args = call["function"]["arguments"].as_str().unwrap();
+                assert!(serde_json::from_str::<Value>(args).unwrap().is_object());
+            }
+        }
+    }
+
+    #[test]
+    fn sanitize_repairs_empty_and_object_arguments() {
+        let bad = json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "",
+                "function": { "name": "editor_state", "arguments": "" }
+            }, {
+                "name": "list_dir",
+                "arguments": {"path": "."}
+            }]
+        });
+        let fixed = sanitize_tool_message(&bad);
+        let calls = fixed["tool_calls"].as_array().unwrap();
+        assert_eq!(calls[0]["id"], "call-0");
+        assert_eq!(calls[0]["type"], "function");
+        assert_eq!(calls[0]["function"]["arguments"], "{}");
+        assert_eq!(calls[1]["function"]["arguments"].as_str().unwrap(), "{\"path\":\".\"}");
+    }
+
+    #[test]
+    fn flatten_tool_history_removes_tool_calls() {
+        let messages = vec![
+            json!({"role":"user","content":"hi"}),
+            json!({
+                "role":"assistant",
+                "content": null,
+                "tool_calls":[{"id":"c1","type":"function","function":{"name":"editor_state","arguments":""}}]
+            }),
+            json!({"role":"tool","tool_call_id":"c1","content":"ok"}),
+            json!({"role":"user","content":"next"}),
+        ];
+        let flat = flatten_tool_history(&messages);
+        assert!(flat.iter().all(|m| m.get("tool_calls").is_none()));
+        assert!(flat.iter().all(|m| m["role"] != "tool"));
+        assert!(flat.iter().any(|m| m["content"].as_str().unwrap_or("").contains("Called editor_state")));
+    }
+
+    #[test]
     fn real_ollama_qwen_content_json_fixture() {
         // Exact non-stream body shape from local Ollama + qwen2.5-coder:0.5b (greeting).
         let raw = r#"{"id":"chatcmpl-337","choices":[{"message":{"role":"assistant","content":"{\"name\": \"editor_state\", \"arguments\": {\"file\": \"(none)\", \"line\": 1, \"col\": 1, \"selection\": \"none\"}}"}}]}"#;
@@ -1803,6 +2024,54 @@ mod tests {
         assert!(reply.content.trim().is_empty(), "{}", reply.content);
         let args: Value = serde_json::from_str(&reply.calls[0].arguments).unwrap();
         assert_eq!(args["file"], "(none)");
+    }
+
+
+    #[tokio::test]
+    async fn live_ollama_rejects_empty_args_but_sanitize_recovers() {
+        let client = reqwest::Client::new();
+        let ok = client
+            .get("http://127.0.0.1:11434/api/tags")
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if !ok {
+            return;
+        }
+        // Poisoned history shape that Ollama returns as "invalid tool call arguments".
+        let poisoned = vec![
+            json!({"role": "user", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": { "name": "editor_state", "arguments": "" }
+                }]
+            }),
+            json!({"role": "tool", "tool_call_id": "call-1", "content": "file=(none)"}),
+            json!({"role": "user", "content": "say ready"}),
+        ];
+        let reply = complete(
+            &client,
+            "http://127.0.0.1:11434/v1",
+            "qwen2.5-coder:0.5b",
+            &poisoned,
+            CompleteOptions::default(),
+        )
+        .await;
+        assert!(
+            reply.is_ok(),
+            "sanitize/flatten must recover from empty tool arguments: {reply:?}"
+        );
+        // Sanitized outbound path: empty args become "{}".
+        let sanitized: Vec<_> = poisoned.iter().map(sanitize_tool_message).collect();
+        let args = sanitized[1]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert_eq!(args, "{}");
     }
 
     #[tokio::test]

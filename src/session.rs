@@ -137,11 +137,14 @@ fn parse_store(text: &str) -> Option<Vec<Session>> {
     Some(vec![session])
 }
 
-/// True when both paths are the same directory. Windows compares without case.
+/// True when both paths are the same directory. Windows compares without case
+/// and ignores a `\\?\` verbatim prefix from canonicalize.
 pub fn same_directory(a: &Path, b: &Path) -> bool {
     let (Ok(a), Ok(b)) = (std::path::absolute(a), std::path::absolute(b)) else {
         return false;
     };
+    let a = dunce::simplified(&a).to_path_buf();
+    let b = dunce::simplified(&b).to_path_buf();
     let left: Vec<_> = a.components().collect();
     let right: Vec<_> = b.components().collect();
     if left.len() != right.len() {

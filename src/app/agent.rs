@@ -47,9 +47,18 @@ impl App {
                     return;
                 }
                 self.agent.stream_draft = None;
+                if text.to_ascii_lowercase().contains("invalid tool call arguments") {
+                    self.agent.memory.clear();
+                }
                 self.push_line(false, text.clone());
                 self.agent.busy = false;
                 self.agent.status = clip(&text, 80);
+            }
+            AgentEvent::ResetMemory { id } => {
+                if id != self.agent.turn {
+                    return;
+                }
+                self.agent.memory.clear();
             }
             AgentEvent::Tool {
                 id,
@@ -771,7 +780,12 @@ impl App {
     }
 
     fn remember_tool_call(&mut self, call_id: &str, name: &str, arguments: &str) {
-        let args = clip(arguments, MEMORY_TOOL_CLIP);
+        let call_id = if call_id.trim().is_empty() {
+            format!("call-{}", self.agent.memory.len())
+        } else {
+            call_id.to_string()
+        };
+        let args = compact_arguments_for_memory(arguments);
         self.agent.memory.push(serde_json::json!({
             "role": "assistant",
             "content": serde_json::Value::Null,
@@ -788,26 +802,108 @@ impl App {
         self.agent.memory.push(serde_json::json!({
             "role": "tool",
             "tool_call_id": call_id,
-            "content": clip(content, MEMORY_TOOL_CLIP)
+            "content": summarize_tool_result(content)
         }));
         trim_memory(&mut self.agent.memory);
     }
 }
 
 fn budget_memory(memory: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    let mut out = memory.to_vec();
+    let mut out: Vec<_> = memory.iter().map(sanitize_memory_message).collect();
     trim_memory(&mut out);
     let keep = HISTORY.saturating_mul(2).max(4);
     if out.len() > keep {
+        // Drop whole messages from the front; never slice inside arguments JSON.
         out.drain(0..out.len() - keep);
     }
+    // Keep tool_call / tool result pairs coherent when possible.
+    reconcile_tool_pairs(&mut out);
     out
+}
+
+fn sanitize_memory_message(message: &serde_json::Value) -> serde_json::Value {
+    let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("");
+    if role != "assistant" || message.get("tool_calls").is_none() {
+        return message.clone();
+    }
+    let mut out = message.clone();
+    let Some(calls) = out.get("tool_calls").and_then(|v| v.as_array()).cloned() else {
+        return out;
+    };
+    let mut fixed = Vec::with_capacity(calls.len());
+    for (index, call) in calls.iter().enumerate() {
+        let id = call
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("call-{index}"));
+        let name = call
+            .pointer("/function/name")
+            .and_then(|v| v.as_str())
+            .or_else(|| call.get("name").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let args = call
+            .pointer("/function/arguments")
+            .cloned()
+            .or_else(|| call.get("arguments").cloned())
+            .unwrap_or(serde_json::Value::String(String::new()));
+        let args = match args {
+            serde_json::Value::String(s) => compact_arguments_for_memory(&s),
+            other => compact_arguments_for_memory(&other.to_string()),
+        };
+        fixed.push(serde_json::json!({
+            "id": id,
+            "type": "function",
+            "function": { "name": name, "arguments": args }
+        }));
+    }
+    out["tool_calls"] = serde_json::Value::Array(fixed);
+    out
+}
+
+fn reconcile_tool_pairs(memory: &mut Vec<serde_json::Value>) {
+    // Drop leading orphan tool results (no preceding assistant tool_calls).
+    while memory
+        .first()
+        .and_then(|m| m.get("role"))
+        .and_then(|r| r.as_str())
+        == Some("tool")
+    {
+        memory.remove(0);
+    }
+}
+
+/// Keep arguments a valid JSON object string. Summarize huge string fields instead of
+/// truncating mid-JSON (which Ollama rejects as invalid tool call arguments).
+fn compact_arguments_for_memory(arguments: &str) -> String {
+    let normalized = agent::normalize_tool_arguments(arguments);
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&normalized) else {
+        return "{}".to_string();
+    };
+    if let Some(obj) = value.as_object_mut() {
+        for (_key, val) in obj.iter_mut() {
+            if let serde_json::Value::String(text) = val {
+                if text.chars().count() > MEMORY_TOOL_CLIP {
+                    let clipped: String = text.chars().take(MEMORY_TOOL_CLIP).collect();
+                    *val = serde_json::Value::String(format!("{clipped}…"));
+                }
+            }
+        }
+    }
+    value.to_string()
+}
+
+fn summarize_tool_result(content: &str) -> String {
+    clip(content, MEMORY_TOOL_CLIP)
 }
 
 fn trim_memory(memory: &mut Vec<serde_json::Value>) {
     while memory_chars(memory) > MEMORY_BUDGET && !memory.is_empty() {
         memory.remove(0);
     }
+    reconcile_tool_pairs(memory);
 }
 
 fn memory_chars(memory: &[serde_json::Value]) -> usize {

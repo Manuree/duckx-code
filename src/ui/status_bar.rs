@@ -185,6 +185,7 @@ fn file_line(app: &App, label: &'static str, badge: Style, badge_bg: Color) -> V
     ));
     match app.path() {
         Some(path) => {
+            let path = crate::agent::strip_verbatim(path);
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
                 spans.push(Span::styled(
                     format!("{}{MAIN_SEPARATOR}", parent.display()),

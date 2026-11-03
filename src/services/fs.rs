@@ -258,7 +258,7 @@ fn guard(root: &Path, path: &Path, allow_root: bool) -> Result<PathBuf, String> 
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
+    match (crate::agent::canonicalize(a), crate::agent::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
