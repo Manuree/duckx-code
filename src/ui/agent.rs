@@ -37,9 +37,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let content = width.saturating_sub(3).max(1);
     let prompt_rows = wrap_rows(&app.agent.prompt, content);
     let prompt_limit = (inner.height as usize).saturating_sub(1).max(1);
+    // Grow with content, cap at 8 rows, scroll within that window.
     let prompt_height = prompt_rows
         .len()
-        .clamp(1, prompt_limit.min(inner.height as usize));
+        .clamp(1, 8.min(prompt_limit).min(inner.height as usize));
     let cursor_row = row_for(
         &prompt_rows,
         app.agent.cursor,
@@ -207,6 +208,10 @@ fn status_label(app: &App) -> String {
         return app.agent.status.clone();
     }
     if !app.agent.busy {
+        let status = app.agent.status.as_str();
+        if status.is_empty() || status == "ready" {
+            return "ready · Enter send · Shift+Enter newline".to_string();
+        }
         return app.agent.status.clone();
     }
     let frame = SPINNER[app.agent.spin as usize % SPINNER.len()];

@@ -150,7 +150,7 @@ pub enum AgentAction {
         right: bool,
         extend: bool,
     },
-    /// Jump to the start or the end of the prompt.
+    /// Jump to the start or the end of the current wrap row (or the prompt while reading).
     Jump {
         end: bool,
         extend: bool,

@@ -61,6 +61,7 @@ fn setup_terminal() -> io::Result<Tui> {
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
             )
         );
     }
@@ -219,6 +220,7 @@ async fn drive(
     // Idle ticks that queue nothing must not.
     let mut needs_draw = true;
     let mut last_explorer_height: Option<usize> = None;
+    let mut paste_burst = duckx_code::agent::PasteBurst::default();
     while !app.should_quit {
         sync_folder_watch(&mut folder_watch, &app.explorer.root, &fs_tx, &mut fs_due);
         let queued = app.take_jobs();
@@ -271,6 +273,7 @@ async fn drive(
                         app.keys(),
                         app.capturing(),
                         app.drafting(),
+                        &mut paste_burst,
                     )
                 {
                     app.handle(action);

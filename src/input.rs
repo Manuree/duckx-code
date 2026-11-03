@@ -7,6 +7,7 @@ use crate::action::{
 use crate::buffer::Movement;
 
 pub fn route(event: &Event, focus: Focus, selecting: bool) -> Option<SemanticAction> {
+    let mut burst = crate::agent::PasteBurst::default();
     route_flags(
         event,
         focus,
@@ -15,6 +16,7 @@ pub fn route(event: &Event, focus: Focus, selecting: bool) -> Option<SemanticAct
         &crate::keys::KeyMap::defaults(),
         false,
         false,
+        &mut burst,
     )
 }
 
@@ -28,13 +30,14 @@ pub fn route_flags(
     keys: &crate::keys::KeyMap,
     capturing: bool,
     drafting: bool,
+    burst: &mut crate::agent::PasteBurst,
 ) -> Option<SemanticAction> {
     match focus {
         Focus::Editor => route_editor(event, keys),
         Focus::Sidebar => route_sidebar(event, selecting, filtering, keys),
         Focus::Prompt => route_prompt(event),
         Focus::Settings => route_settings(event, capturing, drafting),
-        Focus::Agent => route_agent(event, keys),
+        Focus::Agent => route_agent(event, keys, burst),
         Focus::About => route_about(event),
         Focus::Find => route_find(event),
         Focus::Replace => route_replace(event),
@@ -364,10 +367,15 @@ fn route_settings_text(event: &Event) -> Option<SemanticAction> {
     (!text.is_empty()).then_some(SemanticAction::Settings(SettingsAction::Insert(text)))
 }
 
-fn route_agent(event: &Event, keys: &crate::keys::KeyMap) -> Option<SemanticAction> {
+fn route_agent(
+    event: &Event,
+    keys: &crate::keys::KeyMap,
+    burst: &mut crate::agent::PasteBurst,
+) -> Option<SemanticAction> {
     let key = match event {
         Event::Paste(text) => {
-            let text: String = text.chars().filter(|c| !c.is_control()).collect();
+            burst.reset();
+            let text = crate::agent::normalize_paste(text);
             return (!text.is_empty()).then_some(SemanticAction::Agent(AgentAction::Insert(text)));
         }
         Event::Key(key) if key.kind != KeyEventKind::Release => key,
@@ -375,6 +383,17 @@ fn route_agent(event: &Event, keys: &crate::keys::KeyMap) -> Option<SemanticActi
     };
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    // Ctrl+J inserts a newline (fallback when Shift+Enter is invisible).
+    if ctrl && !alt && matches!(key.code, KeyCode::Char('j') | KeyCode::Char('J')) {
+        burst.note();
+        return Some(SemanticAction::Agent(AgentAction::Insert("\n".into())));
+    }
+    // Alt+Enter inserts a newline (another fallback for terminals without Shift+Enter).
+    if alt && !ctrl && matches!(key.code, KeyCode::Enter) {
+        burst.note();
+        return Some(SemanticAction::Agent(AgentAction::Insert("\n".into())));
+    }
     if ctrl && !alt {
         match key.code {
             KeyCode::Left => {
@@ -397,10 +416,26 @@ fn route_agent(event: &Event, keys: &crate::keys::KeyMap) -> Option<SemanticActi
     if ctrl || alt {
         return None;
     }
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    // Track printable / navigation keys for the conhost paste-burst heuristic.
+    let tracks_burst = matches!(
+        key.code,
+        KeyCode::Char(_)
+            | KeyCode::Enter
+            | KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Tab
+    );
+    if tracks_burst {
+        burst.note();
+    } else {
+        burst.reset();
+    }
     match key.code {
         KeyCode::Tab => Some(SemanticAction::OpenCommandBar),
         KeyCode::Esc => Some(SemanticAction::Agent(AgentAction::Close)),
+        KeyCode::Enter if shift || burst.enter_as_newline() => {
+            Some(SemanticAction::Agent(AgentAction::Insert("\n".into())))
+        }
         KeyCode::Enter => Some(SemanticAction::Agent(AgentAction::Submit)),
         KeyCode::Left => Some(SemanticAction::Agent(AgentAction::Move {
             right: false,
@@ -768,15 +803,19 @@ mod tests {
             Some(SemanticAction::Find(FindAction::Files))
         );
         assert_eq!(
-            route_flags(
-                &key(KeyCode::Char(' '), KeyModifiers::NONE),
-                Focus::Sidebar,
-                false,
-                true,
-                &crate::keys::KeyMap::defaults(),
-                false,
-                false,
-            ),
+            {
+                let mut burst = crate::agent::PasteBurst::default();
+                route_flags(
+                    &key(KeyCode::Char(' '), KeyModifiers::NONE),
+                    Focus::Sidebar,
+                    false,
+                    true,
+                    &crate::keys::KeyMap::defaults(),
+                    false,
+                    false,
+                    &mut burst,
+                )
+            },
             Some(SemanticAction::Sidebar(SidebarAction::Mark))
         );
         assert_eq!(
@@ -856,7 +895,10 @@ mod tests {
         let mut overrides = BTreeMap::new();
         crate::keys::assign(&mut overrides, "save", "ctrl+shift+s").unwrap();
         let map = crate::keys::KeyMap::resolve(&overrides);
-        let route = |event| route_flags(&event, Focus::Editor, false, false, &map, false, false);
+        let route = |event| {
+            let mut burst = crate::agent::PasteBurst::default();
+            route_flags(&event, Focus::Editor, false, false, &map, false, false, &mut burst)
+        };
         assert_eq!(route(key(KeyCode::Char('s'), KeyModifiers::CONTROL)), None);
         assert_eq!(
             route(key(
@@ -941,6 +983,64 @@ mod tests {
         );
         assert_eq!(bar(key(KeyCode::Right, KeyModifiers::CONTROL)), None);
         assert_eq!(bar(Event::Paste("\n".into())), None);
+    }
+
+    #[test]
+    fn agent_paste_keeps_newlines_and_normalizes_crlf() {
+        assert_eq!(
+            route(&Event::Paste("a\r\nb\nc".into()), Focus::Agent, false),
+            Some(SemanticAction::Agent(AgentAction::Insert("a\nb\nc".into())))
+        );
+    }
+
+    #[test]
+    fn agent_shift_enter_and_fallbacks_insert_newline() {
+        assert_eq!(
+            route(&key(KeyCode::Enter, KeyModifiers::SHIFT), Focus::Agent, false),
+            Some(SemanticAction::Agent(AgentAction::Insert("\n".into())))
+        );
+        assert_eq!(
+            route(&key(KeyCode::Enter, KeyModifiers::ALT), Focus::Agent, false),
+            Some(SemanticAction::Agent(AgentAction::Insert("\n".into())))
+        );
+        assert_eq!(
+            route(&key(KeyCode::Char('j'), KeyModifiers::CONTROL), Focus::Agent, false),
+            Some(SemanticAction::Agent(AgentAction::Insert("\n".into())))
+        );
+        assert_eq!(
+            route(&key(KeyCode::Enter, KeyModifiers::NONE), Focus::Agent, false),
+            Some(SemanticAction::Agent(AgentAction::Submit))
+        );
+    }
+
+    #[test]
+    fn agent_burst_enter_inserts_newline() {
+        let mut burst = crate::agent::PasteBurst::default();
+        let map = crate::keys::KeyMap::defaults();
+        let note = |burst: &mut crate::agent::PasteBurst, code| {
+            route_flags(
+                &key(code, KeyModifiers::NONE),
+                Focus::Agent,
+                false,
+                false,
+                &map,
+                false,
+                false,
+                burst,
+            )
+        };
+        assert_eq!(
+            note(&mut burst, KeyCode::Char('a')),
+            Some(SemanticAction::Agent(AgentAction::Insert("a".into())))
+        );
+        assert_eq!(
+            note(&mut burst, KeyCode::Char('b')),
+            Some(SemanticAction::Agent(AgentAction::Insert("b".into())))
+        );
+        assert_eq!(
+            note(&mut burst, KeyCode::Enter),
+            Some(SemanticAction::Agent(AgentAction::Insert("\n".into())))
+        );
     }
 
     #[test]
