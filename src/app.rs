@@ -2171,6 +2171,10 @@ impl App {
                 }
             }
             SemanticAction::OpenCommandBar => {
+                if self.agent.pending.is_some() {
+                    self.toggle_pending_allow();
+                    return;
+                }
                 self.dismiss_lsp_popups();
                 self.open_command_bar();
             }
@@ -6289,6 +6293,72 @@ mod tests {
         });
         assert!(app.agent.pending.is_none());
         assert_eq!(app.buffer().rope().to_string(), "hey\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn approval_buttons_move_with_keys_and_enter_confirms_selection() {
+        let root = std::env::temp_dir().join(format!(
+            "duckx-approve-btn-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("demo.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let mut app = App::new(Buffer::from_text("hello\n"), Some(file.clone()));
+        app.explorer = crate::explorer::Explorer::new(root.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.attach_agent(tx);
+        app.ai.model = "qwen".into();
+        app.agent.busy = true;
+        app.agent.turn = 1;
+        let args = format!(
+            r#"{{"path":"{}","find":"hello","replace":"hi"}}"#,
+            file.display()
+        );
+        app.handle_agent(crate::agent::AgentEvent::Tool {
+            id: 1,
+            call_id: "c1".into(),
+            name: "apply_edit".into(),
+            arguments: args,
+        });
+        let pending = app.agent.pending.as_ref().expect("pending");
+        assert!(pending.allow_selected, "Yes is the default selection");
+        assert!(pending.summary.contains("apply_edit"), "{}", pending.summary);
+        assert!(pending.summary.contains("- hello"), "{}", pending.summary);
+        assert!(pending.summary.contains("+ hi"), "{}", pending.summary);
+        assert!(!pending.summary.contains("[y]"), "buttons are separate from the card");
+
+        // Typing into the prompt must not leak while approval is open.
+        let before = app.agent.prompt.clone();
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "leak".into(),
+        )));
+        assert_eq!(app.agent.prompt, before);
+
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Move {
+            right: true,
+            extend: false,
+        }));
+        assert!(!app.agent.pending.as_ref().unwrap().allow_selected);
+        app.handle(SemanticAction::OpenCommandBar); // Tab toggles
+        assert!(app.agent.pending.as_ref().unwrap().allow_selected);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "l".into(),
+        )));
+        assert!(!app.agent.pending.as_ref().unwrap().allow_selected);
+        // Enter confirms No.
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Submit));
+        let crate::agent::AgentCommand::ToolResult { content, .. } = rx.try_recv().unwrap() else {
+            panic!("deny must reply");
+        };
+        assert!(content.contains("denied"), "{content}");
+        assert!(app.agent.pending.is_none());
+        assert_eq!(app.buffer().rope().to_string(), "hello\n");
         let _ = std::fs::remove_dir_all(&root);
     }
 
