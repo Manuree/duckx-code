@@ -2377,6 +2377,7 @@ impl App {
         let value = match id {
             SettingId::AiServer => self.ai.endpoint(),
             SettingId::AiModel => self.ai.model.clone(),
+            SettingId::AiApiKey => self.ai.api_key.clone(),
             _ => return,
         };
         if let Some(page) = self.settings.as_mut() {
@@ -2414,6 +2415,11 @@ impl App {
                 self.ai.model = value;
                 changed
             }
+            Some(SettingId::AiApiKey) => {
+                let changed = value != self.ai.api_key;
+                self.ai.api_key = value;
+                changed
+            }
             _ => false,
         };
         if let Some(page) = self.settings.as_mut() {
@@ -2446,10 +2452,10 @@ impl App {
             | SettingId::PythonChecking) => {
                 self.appearance.lsp.set_choice(id, index);
             }
-            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiProvider) => {
+            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
                 self.ai.set_choice(id, index);
             }
-            SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => return,
+            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::Binding(_) => return,
         }
         if let Some(menu) = self.settings.as_mut().and_then(|page| page.menu.as_mut()) {
             menu.index = index;
@@ -2478,10 +2484,10 @@ impl App {
             | SettingId::PythonChecking) => {
                 self.appearance.lsp.restore_choice(id, origin);
             }
-            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiProvider) => {
+            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
                 self.ai.restore_choice(id, origin);
             }
-            SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => {}
+            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::Binding(_) => {}
         }
     }
 
@@ -2500,8 +2506,8 @@ impl App {
             | SettingId::CheckOnSave
             | SettingId::FormatOnSave
             | SettingId::PythonChecking) => self.appearance.lsp.choice_token(id),
-            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiProvider) => self.ai.choice_token(id),
-            SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => String::new(),
+            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => self.ai.choice_token(id),
+            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::Binding(_) => String::new(),
         }
     }
 
@@ -2536,12 +2542,12 @@ impl App {
                 self.appearance.lsp.choice_token(id),
                 LspPrefs::choice_names(id).len(),
             ),
-            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiProvider) => (
+            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => (
                 self.ai.choice_index(id),
                 self.ai.choice_token(id),
                 AiPrefs::choice_names(id).len(),
             ),
-            SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => return None,
+            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::Binding(_) => return None,
         };
         Some((index, token, len))
     }
@@ -2616,9 +2622,11 @@ impl App {
             SettingId::PythonChecking => self.appearance.lsp.python = PythonCheck::Basic,
             id @ (SettingId::AiEnabled
             | SettingId::AiAutoApprove
+            | SettingId::AiStreaming
             | SettingId::AiProvider
             | SettingId::AiServer
-            | SettingId::AiModel) => self.ai.reset(id),
+            | SettingId::AiModel
+            | SettingId::AiApiKey) => self.ai.reset(id),
         }
     }
 

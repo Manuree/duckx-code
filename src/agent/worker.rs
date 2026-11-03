@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use super::provider::{self, Reply};
+use super::provider::{self, CompleteOptions, Reply};
 use super::{AgentCommand, AgentEvent, SYSTEM};
 
 /// Same tool and the same arguments, this many times in a row, ends the turn.
@@ -52,6 +52,8 @@ async fn run(
                 id,
                 server,
                 model,
+                api_key,
+                stream,
                 history,
                 prompt,
             } => {
@@ -62,6 +64,8 @@ async fn run(
                     id,
                     &server,
                     &model,
+                    &api_key,
+                    stream,
                     history,
                     prompt,
                 )
@@ -82,20 +86,30 @@ async fn run_turn(
     id: u64,
     server: &str,
     model: &str,
-    history: Vec<(String, String)>,
+    api_key: &str,
+    stream: bool,
+    history: Vec<Value>,
     prompt: String,
 ) -> Result<(), String> {
     let mut messages = Vec::new();
     messages.push(json!({"role": "system", "content": SYSTEM}));
-    for (role, content) in history {
-        messages.push(json!({"role": role, "content": content}));
-    }
+    messages.extend(history);
     messages.push(json!({"role": "user", "content": prompt}));
 
     let mut trail = ToolTrail::default();
     loop {
-        let Some(reply) =
-            complete_or_cancel(client, commands, id, server, model, &messages).await?
+        let Some(reply) = complete_or_cancel(
+            client,
+            commands,
+            events,
+            id,
+            server,
+            model,
+            api_key,
+            stream,
+            &messages,
+        )
+        .await?
         else {
             return Ok(());
         };
@@ -166,12 +180,36 @@ impl ToolTrail {
 async fn complete_or_cancel(
     client: &reqwest::Client,
     commands: &mut mpsc::UnboundedReceiver<AgentCommand>,
+    events: &mpsc::UnboundedSender<AgentEvent>,
     id: u64,
     server: &str,
     model: &str,
+    api_key: &str,
+    stream: bool,
     messages: &[Value],
 ) -> Result<Option<Reply>, String> {
-    let request = provider::complete(client, server, model, messages);
+    let options = CompleteOptions { api_key, stream };
+    let events = events.clone();
+    let request = async move {
+        if stream {
+            provider::complete_with_delta(
+                client,
+                server,
+                model,
+                messages,
+                options,
+                move |text| {
+                    let _ = events.send(AgentEvent::Delta {
+                        id,
+                        text: text.to_string(),
+                    });
+                },
+            )
+            .await
+        } else {
+            provider::complete(client, server, model, messages, options).await
+        }
+    };
     tokio::pin!(request);
     loop {
         tokio::select! {

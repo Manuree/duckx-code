@@ -94,12 +94,66 @@ fn read_text_capped(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|err| format!("Cannot read {}: {err}", path.display()))
 }
 
+/// How many directory components may be created for a new file (parent must mostly exist).
+pub const MAX_NEW_DIRS: usize = 1;
+
+/// Refuses create_file paths whose missing parents are deeper than [`MAX_NEW_DIRS`].
+pub fn create_parent_plan(path: &Path) -> Result<CreateParentPlan, String> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let Some(parent) = parent else {
+        return Ok(CreateParentPlan {
+            parent: PathBuf::from("."),
+            missing_dirs: 0,
+        });
+    };
+    if parent.exists() {
+        return Ok(CreateParentPlan {
+            parent: parent.to_path_buf(),
+            missing_dirs: 0,
+        });
+    }
+    let mut missing = 0usize;
+    let mut cursor = parent.to_path_buf();
+    while !cursor.exists() {
+        missing += 1;
+        if missing > MAX_NEW_DIRS {
+            return Err(format!(
+                "Parent directory does not exist (refusing to create deep path): {}",
+                parent.display()
+            ));
+        }
+        match cursor.parent() {
+            Some(next) if !next.as_os_str().is_empty() => cursor = next.to_path_buf(),
+            _ => break,
+        }
+    }
+    Ok(CreateParentPlan {
+        parent: parent.to_path_buf(),
+        missing_dirs: missing,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateParentPlan {
+    pub parent: PathBuf,
+    pub missing_dirs: usize,
+}
+
 fn create_file(path: PathBuf, text: String) -> DiskReport {
     if text.len() > MAX_BYTES {
         return report("File is too large".to_string());
     }
     if path.exists() {
         return report(format!("File already exists: {}", path.display()));
+    }
+    let plan = match create_parent_plan(&path) {
+        Ok(plan) => plan,
+        Err(err) => return report(err),
+    };
+    if plan.missing_dirs > 0 {
+        if let Err(err) = std::fs::create_dir_all(&plan.parent) {
+            return report(format!("Cannot create {}: {err}", plan.parent.display()));
+        }
     }
     match fs::write_atomic(&path, &text) {
         Ok(()) => DiskReport {
@@ -134,7 +188,7 @@ fn list_dir(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiskTask, MAX_BYTES, check_file_size, perform};
+    use super::{DiskTask, MAX_BYTES, check_file_size, create_parent_plan, perform};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -204,4 +258,35 @@ mod tests {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&over);
     }
+
+    #[test]
+    fn create_file_refuses_deep_missing_parents() {
+        let root = temp_file("deep-root");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let deep = root.join("a").join("b").join("c").join("file.txt");
+        let err = create_parent_plan(&deep).unwrap_err();
+        assert!(err.contains("deep path") || err.contains("does not exist"), "{err}");
+        let report = perform(DiskTask::Create {
+            path: deep,
+            text: "nope".into(),
+        });
+        assert!(report.open.is_none());
+        assert!(
+            report.message.contains("does not exist") || report.message.contains("deep"),
+            "{}",
+            report.message
+        );
+        let shallow = root.join("only").join("file.txt");
+        let plan = create_parent_plan(&shallow).unwrap();
+        assert_eq!(plan.missing_dirs, 1);
+        let made = perform(DiskTask::Create {
+            path: shallow.clone(),
+            text: "ok\n".into(),
+        });
+        assert!(made.open.is_some(), "{}", made.message);
+        assert_eq!(fs::read_to_string(&shallow).unwrap(), "ok\n");
+        let _ = fs::remove_dir_all(&root);
+    }
+
 }

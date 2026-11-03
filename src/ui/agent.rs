@@ -139,6 +139,21 @@ fn transcript_lines(app: &App, content: usize) -> Vec<DrawnLine> {
             });
         }
     }
+    if let Some(draft) = app.agent.stream_draft.as_ref() {
+        let chars: Vec<char> = draft.chars().collect();
+        for (index, (start, end)) in wrap_rows(draft, content).into_iter().enumerate() {
+            let body: String = chars
+                .get(start..end.min(chars.len()))
+                .unwrap_or(&[])
+                .iter()
+                .collect();
+            let mark = if index == 0 { " " } else { " " };
+            lines.push(DrawnLine {
+                user: false,
+                text: format!(" {mark} {body}"),
+            });
+        }
+    }
     lines
 }
 

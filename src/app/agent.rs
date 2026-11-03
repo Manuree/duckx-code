@@ -9,6 +9,8 @@ use crate::jobs::Job;
 use super::App;
 
 const HISTORY: usize = 12;
+const MEMORY_BUDGET: usize = 6_000;
+const MEMORY_TOOL_CLIP: usize = 400;
 
 impl App {
     /// Next frame of the wait spinner. Idle turns stay on the current frame.
@@ -24,14 +26,27 @@ impl App {
                 if id != self.agent.turn || !self.agent.busy {
                     return;
                 }
+                self.agent.stream_draft = None;
+                self.remember_assistant(&text);
                 self.push_line(false, text);
                 self.agent.busy = false;
                 self.agent.status = "ready".to_string();
+            }
+            AgentEvent::Delta { id, text } => {
+                if id != self.agent.turn || !self.agent.busy {
+                    return;
+                }
+                match self.agent.stream_draft.as_mut() {
+                    Some(draft) => draft.push_str(&text),
+                    None => self.agent.stream_draft = Some(text),
+                }
+                self.agent.status = "streaming".to_string();
             }
             AgentEvent::Failed { id, text } => {
                 if id != self.agent.turn || !self.agent.busy {
                     return;
                 }
+                self.agent.stream_draft = None;
                 self.push_line(false, text.clone());
                 self.agent.busy = false;
                 self.agent.status = clip(&text, 80);
@@ -45,6 +60,13 @@ impl App {
                 if id != self.agent.turn || !self.agent.busy {
                     return;
                 }
+                if let Some(draft) = self.agent.stream_draft.take() {
+                    if !draft.trim().is_empty() {
+                        self.remember_assistant(&draft);
+                        self.push_line(false, draft);
+                    }
+                }
+                self.remember_tool_call(&call_id, &name, &arguments);
                 self.agent.status = format!("running {name}");
                 self.run_tool(id, call_id, &name, &arguments);
             }
@@ -180,33 +202,27 @@ impl App {
             self.message = Some("Assistant is not running".to_string());
             return;
         };
-        let history: Vec<(String, String)> = self
-            .agent
-            .transcript
-            .iter()
-            .rev()
-            .take(HISTORY)
-            .map(|line| {
-                let role = if line.user { "user" } else { "assistant" };
-                (role.to_string(), line.text.clone())
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+        let history = budget_memory(&self.agent.memory);
         self.agent.turn = self.agent.turn.saturating_add(1);
         let id = self.agent.turn;
         self.push_line(true, prompt.clone());
-        let prompt = format!("{prompt}\n\neditor_state:\n{}", self.tool_state());
+        let prompt = format!("{prompt}
+
+editor_state:
+{}", self.tool_state());
+        self.remember_user(&prompt);
         self.agent.prompt.clear();
         self.agent.cursor = 0;
         self.agent.anchor = 0;
         self.agent.busy = true;
+        self.agent.stream_draft = None;
         self.agent.status = "waiting".to_string();
         let _ = tx.send(AgentCommand::Turn {
             id,
             server: self.ai.endpoint(),
             model: self.ai.model.trim().to_string(),
+            api_key: self.ai.api_key.clone(),
+            stream: self.ai.streaming,
             history,
             prompt,
         });
@@ -217,6 +233,7 @@ impl App {
         self.agent.turn = self.agent.turn.saturating_add(1);
         self.agent.busy = false;
         self.agent.pending = None;
+        self.agent.stream_draft = None;
         self.agent.status = "ready".to_string();
         if let Some(tx) = &self.agent_tx {
             let _ = tx.send(AgentCommand::Cancel { id });
@@ -236,6 +253,7 @@ impl App {
         if turn != self.agent.turn || !self.agent.busy {
             return;
         }
+        self.remember_tool_result(&call_id, &content);
         self.agent.status = "waiting".to_string();
         if let Some(tx) = &self.agent_tx {
             let _ = tx.send(AgentCommand::ToolResult {
@@ -332,14 +350,30 @@ impl App {
             }
             "create_file" => {
                 let text = value.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let parent_note = match agent::within(&self.explorer.root, path) {
+                    Ok(full) => match agent::create_parent_plan(&full) {
+                        Ok(plan) if plan.missing_dirs > 0 => format!(
+                            "
+Will create {} new folder(s) under {}",
+                            plan.missing_dirs,
+                            plan.parent.display()
+                        ),
+                        Ok(_) => "
+Parent folder exists".to_string(),
+                        Err(err) => format!("
+{err}"),
+                    },
+                    Err(err) => format!("
+{err}"),
+                };
                 format!(
-                    "Allow create_file {path}?
+                    "Allow create_file {path}?{parent_note}
 {}
 [y] Allow  [n] Deny",
                     clip(text, 160)
                 )
             }
-            "save" => format!("Allow save {path}?
+                        "save" => format!("Allow save {path}?
 [y] Allow  [n] Deny"),
             _ => format!("Allow {name} on {path}?
 [y] Allow  [n] Deny"),
@@ -389,11 +423,12 @@ impl App {
         let start = args.start_line.max(1);
         let end = args.end_line;
         if let Some(tab_id) = self.tab_with_path(&path) {
-            let text = self
-                .find_tab(tab_id)
-                .map(|tab| tab.buffer.rope().to_string())
-                .unwrap_or_default();
-            return Some(agent::read_lines(&text, start, end).unwrap_or_else(|err| err));
+            return Some(
+                self.find_tab(tab_id)
+                    .map(|tab| agent::read_lines_rope(tab.buffer.rope(), start, end))
+                    .unwrap_or_else(|| Err("File is not open".to_string()))
+                    .unwrap_or_else(|err| err),
+            );
         }
         self.jobs.push(Job::AgentDisk {
             turn,
@@ -712,6 +747,71 @@ impl App {
         self.agent.cursor = cursor;
         self.agent.anchor = cursor;
     }
+
+    fn remember_user(&mut self, content: &str) {
+        self.agent.memory.push(serde_json::json!({
+            "role": "user",
+            "content": clip(content, MEMORY_BUDGET)
+        }));
+        trim_memory(&mut self.agent.memory);
+    }
+
+    fn remember_assistant(&mut self, content: &str) {
+        if content.trim().is_empty() {
+            return;
+        }
+        self.agent.memory.push(serde_json::json!({
+            "role": "assistant",
+            "content": clip(content, MEMORY_TOOL_CLIP * 4)
+        }));
+        trim_memory(&mut self.agent.memory);
+    }
+
+    fn remember_tool_call(&mut self, call_id: &str, name: &str, arguments: &str) {
+        let args = clip(arguments, MEMORY_TOOL_CLIP);
+        self.agent.memory.push(serde_json::json!({
+            "role": "assistant",
+            "content": serde_json::Value::Null,
+            "tool_calls": [{
+                "id": call_id,
+                "type": "function",
+                "function": { "name": name, "arguments": args }
+            }]
+        }));
+        trim_memory(&mut self.agent.memory);
+    }
+
+    fn remember_tool_result(&mut self, call_id: &str, content: &str) {
+        self.agent.memory.push(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": clip(content, MEMORY_TOOL_CLIP)
+        }));
+        trim_memory(&mut self.agent.memory);
+    }
+}
+
+fn budget_memory(memory: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut out = memory.to_vec();
+    trim_memory(&mut out);
+    let keep = HISTORY.saturating_mul(2).max(4);
+    if out.len() > keep {
+        out.drain(0..out.len() - keep);
+    }
+    out
+}
+
+fn trim_memory(memory: &mut Vec<serde_json::Value>) {
+    while memory_chars(memory) > MEMORY_BUDGET && !memory.is_empty() {
+        memory.remove(0);
+    }
+}
+
+fn memory_chars(memory: &[serde_json::Value]) -> usize {
+    memory
+        .iter()
+        .map(|value| value.to_string().chars().count())
+        .sum()
 }
 
 fn clip(text: &str, max: usize) -> String {

@@ -14,3 +14,6 @@
 fn greet() {
     println!("hello");
 }
+# Streaming shows tokens as they arrive (Settings → AI → Streaming).
+# An API key is optional; leave it empty for Ollama and LM Studio.
+# create_file needs the parent folder, or only one new folder level.
