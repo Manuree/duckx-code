@@ -300,11 +300,8 @@ pub fn query_window(query: &str, cursor: usize, columns: usize) -> (usize, usize
     (start, end)
 }
 
-fn floor_boundary(text: &str, mut index: usize) -> usize {
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
+fn floor_boundary(text: &str, index: usize) -> usize {
+    crate::utf8::floor_char_boundary(text, index)
 }
 
 fn suffix_start(text: &str, columns: usize) -> usize {

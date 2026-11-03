@@ -1,7 +1,9 @@
 //! HTTP loop. Tool calls come back to the core, which replies on the same channel.
 
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
+use futures::FutureExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -60,7 +62,9 @@ async fn run(
                 history,
                 prompt,
             } => {
-                if let Err(text) = run_turn(
+                // Catch panics so a bug in parsing/streaming does not kill the agent task
+                // (and leave the TUI unable to start another turn).
+                let result = AssertUnwindSafe(run_turn(
                     &client,
                     &events,
                     &mut commands,
@@ -74,13 +78,24 @@ async fn run(
                     think,
                     history,
                     prompt,
-                )
-                .await
-                {
-                    if text.to_ascii_lowercase().contains("invalid tool call arguments") {
-                        let _ = events.send(AgentEvent::ResetMemory { id });
+                ))
+                .catch_unwind()
+                .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(text)) => {
+                        if text.to_ascii_lowercase().contains("invalid tool call arguments") {
+                            let _ = events.send(AgentEvent::ResetMemory { id });
+                        }
+                        let _ = events.send(AgentEvent::Failed { id, text });
                     }
-                    let _ = events.send(AgentEvent::Failed { id, text });
+                    Err(payload) => {
+                        let detail = crate::utf8::panic_message(payload);
+                        let _ = events.send(AgentEvent::Failed {
+                            id,
+                            text: format!("Agent worker panicked: {detail}"),
+                        });
+                    }
                 }
             }
             AgentCommand::Cancel { .. } | AgentCommand::ToolResult { .. } => {}

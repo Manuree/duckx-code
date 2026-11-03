@@ -194,7 +194,9 @@ fn find_unique_span(rope: &Rope, find: &str) -> Result<(usize, usize), String> {
         if hay.len() <= overlap {
             prefix = hay;
         } else {
-            let cut = hay.len() - overlap;
+            // Overlap is a byte length; ceil so we never slice mid-character
+            // (em dash, Thai, emoji) when carrying the window to the next chunk.
+            let cut = crate::utf8::ceil_char_boundary(&hay, hay.len() - overlap);
             chars_before += hay[..cut].chars().count();
             prefix = hay[cut..].to_string();
         }
@@ -258,5 +260,69 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("more than once"), "{err}");
+    }
+
+    /// Regression: overlap cut used to land inside '—' and panic (Windows / LM Studio).
+    #[test]
+    fn snippet_edit_survives_em_dash_overlap_cut() {
+        let find = "UNIQUE_FIND_TOKEN";
+        let overlap = find.len() - 1;
+        let mut text = String::new();
+        text.push_str(find);
+        text.push_str(&"x".repeat(80));
+        text.push('—'); // 3-byte em dash; cut = len - overlap lands inside it
+        text.push_str(&"y".repeat(overlap - 1));
+        text.push('\n');
+        let mut buffer = Buffer::from_text(&text);
+        apply_to_buffer(
+            &mut buffer,
+            &FileEdit::Snippet {
+                find: find.into(),
+                replace: "REPLACED".into(),
+            },
+        )
+        .unwrap();
+        assert!(buffer.rope().to_string().starts_with("REPLACED"));
+        assert!(buffer.rope().to_string().contains('—'));
+    }
+
+    #[test]
+    fn snippet_edit_survives_thai_and_emoji_near_overlap() {
+        for marker in ['ส', '👋', '—'] {
+            let find = "NEEDLE_TOKEN_XX";
+            let overlap = find.len() - 1;
+            let mut text = String::new();
+            text.push_str(find);
+            text.push_str(&"a".repeat(40));
+            text.push(marker);
+            text.push_str(&"b".repeat(overlap - 1));
+            text.push('\n');
+            let mut buffer = Buffer::from_text(&text);
+            apply_to_buffer(
+                &mut buffer,
+                &FileEdit::Snippet {
+                    find: find.into(),
+                    replace: "OK".into(),
+                },
+            )
+            .expect("multibyte overlap cut must not panic");
+            assert!(buffer.rope().to_string().starts_with("OK"));
+        }
+    }
+
+    #[test]
+    fn snippet_edit_html_comment_with_em_dashes() {
+        let text = "<!-- — Tailwind CSS via CDN —>\n<div>hi</div>\n";
+        let mut buffer = Buffer::from_text(text);
+        apply_to_buffer(
+            &mut buffer,
+            &FileEdit::Snippet {
+                find: "Tailwind CSS via CDN".into(),
+                replace: "UnoCSS".into(),
+            },
+        )
+        .unwrap();
+        assert!(buffer.rope().to_string().contains("UnoCSS"));
+        assert!(buffer.rope().to_string().contains('—'));
     }
 }

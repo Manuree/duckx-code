@@ -35,10 +35,7 @@ pub fn find_spans_in_rope(rope: &Rope, query: &str) -> Vec<(usize, usize)> {
             let mut boundary = String::with_capacity(prev_tail.len() + overlap + 4);
             boundary.push_str(&prev_tail);
             let take = overlap.min(chunk.len());
-            let mut end = take;
-            while end < chunk.len() && !chunk.is_char_boundary(end) {
-                end += 1;
-            }
+            let end = crate::utf8::ceil_char_boundary(chunk, take);
             boundary.push_str(&chunk[..end]);
             let tail_chars = prev_tail.chars().count();
             let base = chars_before - tail_chars;
@@ -57,10 +54,7 @@ pub fn find_spans_in_rope(rope: &Rope, query: &str) -> Vec<(usize, usize)> {
                 }
                 // Step one byte so overlapping candidates are still considered;
                 // `next_char` drops duplicates that would re-cover a prior match.
-                from = at_byte + 1;
-                while from < boundary.len() && !boundary.is_char_boundary(from) {
-                    from += 1;
-                }
+                from = crate::utf8::ceil_char_boundary(&boundary, at_byte + 1);
                 chars_at_from = boundary[..from].chars().count();
             }
         }
@@ -77,10 +71,7 @@ pub fn find_spans_in_rope(rope: &Rope, query: &str) -> Vec<(usize, usize)> {
                 from = at_byte + query_bytes;
                 chars_at_from += query_chars;
             } else {
-                from = at_byte + 1;
-                while from < chunk.len() && !chunk.is_char_boundary(from) {
-                    from += 1;
-                }
+                from = crate::utf8::ceil_char_boundary(chunk, at_byte + 1);
                 chars_at_from = chunk[..from].chars().count();
             }
         }
@@ -91,17 +82,11 @@ pub fn find_spans_in_rope(rope: &Rope, query: &str) -> Vec<(usize, usize)> {
         } else if chunk.len() <= overlap {
             prev_tail.push_str(chunk);
             if prev_tail.len() > overlap {
-                let mut cut = prev_tail.len() - overlap;
-                while cut < prev_tail.len() && !prev_tail.is_char_boundary(cut) {
-                    cut += 1;
-                }
+                let cut = crate::utf8::ceil_char_boundary(&prev_tail, prev_tail.len() - overlap);
                 prev_tail.drain(..cut);
             }
         } else {
-            let mut cut = chunk.len() - overlap;
-            while cut < chunk.len() && !chunk.is_char_boundary(cut) {
-                cut += 1;
-            }
+            let cut = crate::utf8::ceil_char_boundary(chunk, chunk.len() - overlap);
             prev_tail.clear();
             prev_tail.push_str(&chunk[cut..]);
         }
@@ -1969,6 +1954,24 @@ mod tests {
         };
         assert_eq!(from_rope, from_string);
         assert_eq!(from_rope.len(), 2, "{from_rope:?}");
+    }
+
+    #[test]
+    fn find_spans_survives_multibyte_overlap_window() {
+        // Overlap cut of query.len()-1 must not slice inside em dash / Thai / emoji.
+        for marker in ['—', 'ส', '👋'] {
+            let query = "UNIQUE_Q_TOKEN";
+            let overlap = query.len() - 1;
+            let mut text = String::new();
+            text.push_str(query);
+            text.push_str(&"x".repeat(60));
+            text.push(marker);
+            text.push_str(&"y".repeat(overlap - 1));
+            let rope = ropey::Rope::from_str(&text);
+            let spans = find_spans_in_rope(&rope, query);
+            assert_eq!(spans.len(), 1, "marker {marker:?}");
+            assert_eq!(spans[0], (0, query.chars().count()));
+        }
     }
 
     #[test]
