@@ -7,9 +7,13 @@
 # The assistant sees this file and the cursor line.
 # A spinner turns beside the status while the assistant is working.
 # An edit in an open file is one undo step. Ctrl+Z puts the old text back.
+# apply_edit, create_file, and save ask Allow (y/Enter) or Deny (n/Esc) first.
 # Esc leaves the prompt. F6 focuses the panel again, and F6 once more closes it.
 # Set the server and the model under Settings, section AI.
 
 fn greet() {
     println!("hello");
 }
+# Streaming shows tokens as they arrive (Settings → AI → Streaming).
+# An API key is optional; leave it empty for Ollama and LM Studio.
+# create_file needs the parent folder, or only one new folder level.

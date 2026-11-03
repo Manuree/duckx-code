@@ -44,7 +44,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         .then(|| page.section().items.get(page.row).map(|item| item.id))
         .flatten();
     let binding = matches!(row_id, Some(SettingId::Binding(_)));
-    let text_row = matches!(row_id, Some(SettingId::AiServer | SettingId::AiModel));
+    let text_row = matches!(row_id, Some(SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey));
     let footer = if page.text.is_some() {
         " type    enter save    esc cancel"
     } else if page.capture {
@@ -276,7 +276,7 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool, drafting:
         | SettingId::PythonChecking) => {
             format!("{} {mark}", app.appearance.lsp.choice_label(id))
         }
-        id @ (SettingId::AiEnabled | SettingId::AiProvider) => {
+        id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
             format!("{} {mark}", app.ai.choice_label(id))
         }
         SettingId::AiServer => {
@@ -291,6 +291,13 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool, drafting:
                 "(not set)".to_string()
             } else {
                 app.ai.model.clone()
+            }
+        }
+        SettingId::AiApiKey => {
+            if app.ai.api_key.trim().is_empty() {
+                "(not set)".to_string()
+            } else {
+                "••••••••".to_string()
             }
         }
     }
@@ -332,10 +339,10 @@ fn paint_menu(
         | SettingId::CheckOnSave
         | SettingId::FormatOnSave
         | SettingId::PythonChecking) => crate::settings::LspPrefs::choice_names(id),
-        id @ (SettingId::AiEnabled | SettingId::AiProvider) => {
+        id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
             crate::settings::AiPrefs::choice_names(id)
         }
-        SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => return,
+        SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::Binding(_) => return,
     };
     if names.is_empty() || width < 8 || footer_row == 0 {
         return;

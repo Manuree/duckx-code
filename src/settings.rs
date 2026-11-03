@@ -41,6 +41,12 @@ pub enum SettingId {
     AiServer,
     /// Model name sent as `model`.
     AiModel,
+    /// Mutating tools run without asking Allow / Deny.
+    AiAutoApprove,
+    /// Optional Bearer token for OpenAI-compatible servers.
+    AiApiKey,
+    /// Stream assistant tokens with SSE; falls back when the server cannot.
+    AiStreaming,
 }
 
 /// How a new line is ended. `Auto` keeps the ending detected in the file.
@@ -238,7 +244,7 @@ impl AiProvider {
     pub fn label(self) -> &'static str {
         match self {
             Self::Ollama => "Ollama",
-            Self::Openai => "OpenAI",
+            Self::Openai => "OpenAI-compatible / LM Studio",
         }
     }
 
@@ -284,6 +290,15 @@ pub struct AiPrefs {
     pub server: String,
     #[serde(default)]
     pub model: String,
+    /// Optional Bearer token. Empty means no Authorization header.
+    #[serde(default)]
+    pub api_key: String,
+    /// When true, apply_edit / create_file / save run without asking.
+    #[serde(default)]
+    pub auto_approve: bool,
+    /// Try SSE streaming first (default on).
+    #[serde(default = "enabled")]
+    pub streaming: bool,
 }
 
 impl Default for AiPrefs {
@@ -293,13 +308,16 @@ impl Default for AiPrefs {
             provider: AiProvider::Ollama,
             server: String::new(),
             model: String::new(),
+            api_key: String::new(),
+            auto_approve: false,
+            streaming: true,
         }
     }
 }
 
 impl AiPrefs {
     pub fn is_text(id: SettingId) -> bool {
-        matches!(id, SettingId::AiServer | SettingId::AiModel)
+        matches!(id, SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey)
     }
 
     /// URL the assistant posts to, including `/v1`.
@@ -314,8 +332,10 @@ impl AiPrefs {
 
     pub fn choice_names(id: SettingId) -> Vec<String> {
         match id {
-            SettingId::AiEnabled => vec!["On".into(), "Off".into()],
-            SettingId::AiProvider => vec!["Ollama".into(), "OpenAI".into()],
+            SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming => {
+                vec!["On".into(), "Off".into()]
+            }
+            SettingId::AiProvider => vec![AiProvider::Ollama.label().into(), AiProvider::Openai.label().into()],
             _ => Vec::new(),
         }
     }
@@ -323,6 +343,8 @@ impl AiPrefs {
     pub fn choice_index(&self, id: SettingId) -> usize {
         match id {
             SettingId::AiEnabled => usize::from(!self.enabled),
+            SettingId::AiAutoApprove => usize::from(!self.auto_approve),
+            SettingId::AiStreaming => usize::from(!self.streaming),
             SettingId::AiProvider => self.provider.index(),
             _ => 0,
         }
@@ -331,6 +353,8 @@ impl AiPrefs {
     pub fn choice_token(&self, id: SettingId) -> String {
         match id {
             SettingId::AiEnabled => on_off(self.enabled),
+            SettingId::AiAutoApprove => on_off(self.auto_approve),
+            SettingId::AiStreaming => on_off(self.streaming),
             SettingId::AiProvider => self.provider.as_str().to_string(),
             _ => String::new(),
         }
@@ -346,6 +370,8 @@ impl AiPrefs {
     pub fn set_choice(&mut self, id: SettingId, index: usize) {
         match id {
             SettingId::AiEnabled => self.enabled = index == 0,
+            SettingId::AiAutoApprove => self.auto_approve = index == 0,
+            SettingId::AiStreaming => self.streaming = index == 0,
             SettingId::AiProvider => self.provider = AiProvider::from_index(index),
             _ => {}
         }
@@ -354,6 +380,8 @@ impl AiPrefs {
     pub fn restore_choice(&mut self, id: SettingId, token: &str) {
         match id {
             SettingId::AiEnabled => self.enabled = token != "off",
+            SettingId::AiAutoApprove => self.auto_approve = token != "off",
+            SettingId::AiStreaming => self.streaming = token != "off",
             SettingId::AiProvider => {
                 self.provider = if token == "openai" {
                     AiProvider::Openai
@@ -368,9 +396,12 @@ impl AiPrefs {
     pub fn reset(&mut self, id: SettingId) {
         match id {
             SettingId::AiEnabled => self.enabled = true,
+            SettingId::AiAutoApprove => self.auto_approve = false,
+            SettingId::AiStreaming => self.streaming = true,
             SettingId::AiProvider => self.provider = AiProvider::Ollama,
             SettingId::AiServer => self.server.clear(),
             SettingId::AiModel => self.model.clear(),
+            SettingId::AiApiKey => self.api_key.clear(),
             _ => {}
         }
     }
@@ -850,6 +881,21 @@ pub fn sections() -> &'static [Section] {
                             label: "Model",
                             detail: "Model name the server should run.",
                             id: SettingId::AiModel,
+                        },
+                        Item {
+                            label: "API key",
+                            detail: "Optional Bearer token. Leave empty for local Ollama or LM Studio.",
+                            id: SettingId::AiApiKey,
+                        },
+                        Item {
+                            label: "Streaming",
+                            detail: "Show tokens as they arrive. Falls back if the server cannot stream.",
+                            id: SettingId::AiStreaming,
+                        },
+                        Item {
+                            label: "Auto-approve tools",
+                            detail: "Run apply_edit, create_file, and save without asking Allow / Deny.",
+                            id: SettingId::AiAutoApprove,
                         },
                     ],
                 ),

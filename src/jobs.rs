@@ -81,7 +81,8 @@ pub enum Job {
         editor_id: EditorId,
         tab_id: TabId,
         path: PathBuf,
-        text: String,
+        /// Rope clone (cheap). Stringified on the worker so the UI thread does not copy.
+        text: Rope,
         encoding: TextEncoding,
         fingerprint: u64,
         epoch: u64,
@@ -111,12 +112,13 @@ pub enum Job {
         path: PathBuf,
         text: String,
     },
-    /// Count literal matches in explorer files. `Some` text replaces the bytes on disk.
+    /// Count literal matches in explorer files. `Some` rope replaces the bytes on disk
+    /// (open buffers, including unsaved dirty tabs).
     FindFiles {
         root: PathBuf,
         query: String,
         generation: u64,
-        files: Vec<(PathBuf, Option<String>)>,
+        files: Vec<(PathBuf, Option<Rope>)>,
     },
     /// Apply language-server edits to files that are not open.
     PatchFiles {
@@ -298,14 +300,17 @@ pub fn run(job: Job) -> AppEvent {
             fingerprint,
             epoch,
             after,
-        } => AppEvent::FileSaved {
-            result: encoding::write_encoded(&path, &text, encoding),
-            editor_id,
-            tab_id,
-            path,
-            fingerprint,
-            epoch,
-            after,
+        } => {
+            let text = text.to_string();
+            AppEvent::FileSaved {
+                result: encoding::write_encoded(&path, &text, encoding),
+                editor_id,
+                tab_id,
+                path,
+                fingerprint,
+                epoch,
+                after,
+            }
         },
         Job::LoadFile {
             editor_id,
@@ -493,13 +498,13 @@ fn patch_closed_files(
 fn find_in_files(
     root: &std::path::Path,
     query: &str,
-    files: Vec<(PathBuf, Option<String>)>,
+    files: Vec<(PathBuf, Option<Rope>)>,
 ) -> Vec<(PathBuf, usize)> {
     files
         .into_iter()
         .filter_map(|(path, text)| {
             let count = match text {
-                Some(text) => crate::buffer::Buffer::literal_match_count(&text, query),
+                Some(rope) => crate::buffer::find_spans_in_rope(&rope, query).len(),
                 None => fs::read_text(&root.join(&path))
                     .map(|text| crate::buffer::Buffer::literal_match_count(&text, query))
                     .unwrap_or(0),

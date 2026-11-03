@@ -102,6 +102,7 @@ impl Explorer {
     pub fn set_entries(&mut self, entries: Vec<FileEntry>) {
         self.entries = entries;
         self.loading = false;
+        self.scroll_into_view();
         let known: HashSet<&Path> = self.entries.iter().map(|e| e.path.as_path()).collect();
         self.expanded.retain(|p| known.contains(p.as_path()));
         self.pinned.retain(|p| known.contains(p.as_path()));

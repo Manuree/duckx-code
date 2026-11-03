@@ -8,8 +8,8 @@ mod provider;
 mod worker;
 mod wrap;
 
-pub use disk::{DiskTask, perform as perform_disk};
-pub use edit::{FileEdit, apply_to_buffer, read_lines};
+pub use disk::{DiskTask, MAX_BYTES, check_file_size, create_parent_plan, perform as perform_disk};
+pub use edit::{FileEdit, apply_to_buffer, read_lines, read_lines_rope};
 pub use path::within;
 pub use worker::spawn;
 pub use wrap::{column_at, index_at, next_boundary, prev_boundary, rows as wrap_rows};
@@ -21,6 +21,22 @@ use serde_json::{Value, json};
 pub struct TranscriptLine {
     pub user: bool,
     pub text: String,
+}
+
+/// A mutating tool waiting for Allow / Deny in the assistant panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTool {
+    pub turn: u64,
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+    /// Short summary shown above the prompt (tool, path, preview).
+    pub summary: String,
+}
+
+/// Tools that change files need Allow / Deny unless auto-approve is on.
+pub fn needs_approval(name: &str) -> bool {
+    matches!(name, "apply_edit" | "create_file" | "save")
 }
 
 /// Panel state. The core owns it; the worker only sees copies of the text.
@@ -43,6 +59,12 @@ pub struct Panel {
     /// Spinner frame while `busy` is set. The frames are `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`.
     pub spin: u8,
     pub turn: u64,
+    /// Mutating tool waiting for Allow (y/Enter) or Deny (n/Esc).
+    pub pending: Option<PendingTool>,
+    /// Prior turn messages (user / assistant / tool) kept under a char budget.
+    pub memory: Vec<serde_json::Value>,
+    /// Live streamed assistant text for the current turn, shown until Reply.
+    pub stream_draft: Option<String>,
 }
 
 impl Default for Panel {
@@ -60,6 +82,9 @@ impl Default for Panel {
             busy: false,
             spin: 0,
             turn: 0,
+            pending: None,
+            memory: Vec::new(),
+            stream_draft: None,
         }
     }
 }
@@ -71,7 +96,12 @@ pub enum AgentCommand {
         id: u64,
         server: String,
         model: String,
-        history: Vec<(String, String)>,
+        /// Optional Bearer token. Empty means no Authorization header.
+        api_key: String,
+        /// When true the worker tries SSE first, then falls back.
+        stream: bool,
+        /// Prior OpenAI-compatible messages (user / assistant / tool), already budgeted.
+        history: Vec<serde_json::Value>,
         prompt: String,
     },
     ToolResult {
@@ -88,6 +118,11 @@ pub enum AgentCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
     Reply {
+        id: u64,
+        text: String,
+    },
+    /// Incremental assistant text while a streamed completion is running.
+    Delta {
         id: u64,
         text: String,
     },
@@ -269,8 +304,9 @@ You are the assistant inside duckx-code. Use tools to read and change files in t
 Paths stay inside the workspace. apply_edit replaces a line range or one unique snippet, and an open file is one undo step. \
 Each user message ends with editor_state: the focused file, the 1-based cursor line and column, and any selection. \
 Edit at that cursor unless the user names another file or line. \
-create_file writes a new file and opens it. write_file is the same tool. \
+create_file writes a new file and opens it. write_file is the same tool. Parent folders must already exist, or only one new folder level is allowed. \
 It refuses a path that already exists; change an existing file with apply_edit or search_replace. \
+apply_edit, create_file, and save wait for the user to Allow or Deny before they run. \
 Do not call bash or shell. There is no shell. \
 Do not invent paths. When you are finished, answer in short plain text.";
 
