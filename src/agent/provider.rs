@@ -19,11 +19,20 @@ pub struct ToolCall {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reply {
     pub content: String,
+    /// Model reasoning kept out of the transcript and out of tool parsing.
+    pub thinking: String,
     pub calls: Vec<ToolCall>,
     /// The assistant message, sent back before each tool result.
     pub message: Value,
     /// True when this completion retried after flattening poisoned tool history.
     pub history_flattened: bool,
+}
+
+/// Streamed piece: visible answer text, or reasoning for the title only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaKind {
+    Content,
+    Thinking,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +92,7 @@ pub fn ollama_request_body(
     tools: &[Value],
     stream: bool,
     num_ctx: Option<u32>,
+    think: bool,
 ) -> Value {
     let mut options = json!({
         "temperature": 0.2,
@@ -99,6 +109,9 @@ pub fn ollama_request_body(
     });
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
+    }
+    if think {
+        body["think"] = Value::Bool(true);
     }
     body
 }
@@ -156,26 +169,7 @@ pub fn parse_ollama_reply(text: &str) -> Result<Reply, String> {
         .get("message")
         .cloned()
         .ok_or_else(|| "Response has no message".to_string())?;
-    let mut content = message_text(&raw["content"]);
-    let mut calls = structured_calls(&raw);
-    if calls.is_empty() {
-        let (found, stripped) = extract_textual(&content);
-        if found.is_empty() {
-            let (from_reason, _) = extract_textual(&reasoning_text(&raw));
-            if from_reason.is_empty() {
-                if content.trim().is_empty() {
-                    content = reasoning_text(&raw);
-                }
-            } else {
-                calls = from_reason;
-                content.clear();
-            }
-        } else {
-            calls = found;
-            content = stripped;
-        }
-    }
-    Ok(reply_from_parts(content, calls))
+    finish_message_reply(raw)
 }
 
 fn models_without_tools() -> &'static Mutex<HashSet<String>> {
@@ -194,6 +188,42 @@ fn remember_model_without_tools(model: &str) {
     if let Ok(mut set) = models_without_tools().lock() {
         set.insert(model.to_string());
     }
+}
+
+fn models_without_think() -> &'static Mutex<HashSet<String>> {
+    static CELL: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn model_skips_think(model: &str) -> bool {
+    models_without_think()
+        .lock()
+        .map(|set| set.contains(model))
+        .unwrap_or(false)
+}
+
+fn remember_model_without_think(model: &str) {
+    if let Ok(mut set) = models_without_think().lock() {
+        set.insert(model.to_string());
+    }
+}
+
+fn think_not_supported(status: reqwest::StatusCode, body: &str) -> bool {
+    if !status.is_client_error() && !status.is_server_error() {
+        // Ollama may still 400
+    }
+    if status.is_success() {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("think")
+        && (lower.contains("unknown")
+            || lower.contains("invalid")
+            || lower.contains("not support")
+            || lower.contains("unsupported")
+            || lower.contains("does not support")
+            || lower.contains("extra")
+            || lower.contains("unexpected"))
 }
 
 fn tools_not_supported(status: reqwest::StatusCode, body: &str) -> bool {
@@ -266,29 +296,33 @@ pub fn parse_reply(text: &str) -> Result<Reply, String> {
         .pointer("/choices/0/message")
         .cloned()
         .ok_or_else(|| "Response has no message".to_string())?;
+    finish_message_reply(raw)
+}
+
+fn finish_message_reply(raw: Value) -> Result<Reply, String> {
     let mut content = message_text(&raw["content"]);
+    let mut thinking = reasoning_text(&raw);
+    let (visible, from_tags) = split_think_tags(&content);
+    content = visible;
+    if !from_tags.is_empty() {
+        if !thinking.is_empty() {
+            thinking.push('\n');
+        }
+        thinking.push_str(&from_tags);
+    }
     let mut calls = structured_calls(&raw);
+    // Tool calls only from visible content — never from reasoning / <think>.
     if calls.is_empty() {
         let (found, stripped) = extract_textual(&content);
-        if found.is_empty() {
-            let (from_reason, _) = extract_textual(&reasoning_text(&raw));
-            if from_reason.is_empty() {
-                if content.trim().is_empty() {
-                    content = reasoning_text(&raw);
-                }
-            } else {
-                calls = from_reason;
-                content.clear();
-            }
-        } else {
+        if !found.is_empty() {
             calls = found;
             content = stripped;
         }
     }
-    Ok(reply_from_parts(content, calls))
+    Ok(reply_from_parts(content, thinking, calls))
 }
 
-fn reply_from_parts(content: String, calls: Vec<ToolCall>) -> Reply {
+fn reply_from_parts(content: String, thinking: String, calls: Vec<ToolCall>) -> Reply {
     let content_value = if content.trim().is_empty() && !calls.is_empty() {
         Value::Null
     } else {
@@ -303,10 +337,160 @@ fn reply_from_parts(content: String, calls: Vec<ToolCall>) -> Reply {
     }
     Reply {
         content,
+        thinking,
         calls,
         message,
         history_flattened: false,
     }
+}
+
+/// Split `<think>…</think>` (and a leading block closed by `</think>`) out of content.
+pub fn split_think_tags(text: &str) -> (String, String) {
+    let mut visible = String::new();
+    let mut thinking = String::new();
+    let mut rest = text;
+    // DeepSeek-R1 style: thinking then </think> with no opener.
+    if let Some(end) = rest.find("</think>") {
+        let before = &rest[..end];
+        if !before.contains("<think>") {
+            let piece = before.trim();
+            if !piece.is_empty() {
+                thinking.push_str(piece);
+            }
+            rest = &rest[end + "</think>".len()..];
+        }
+    }
+    while let Some(start) = rest.find("<think>") {
+        visible.push_str(&rest[..start]);
+        rest = &rest[start + "<think>".len()..];
+        if let Some(end) = rest.find("</think>") {
+            let piece = rest[..end].trim();
+            if !piece.is_empty() {
+                if !thinking.is_empty() {
+                    thinking.push('\n');
+                }
+                thinking.push_str(piece);
+            }
+            rest = &rest[end + "</think>".len()..];
+        } else {
+            let piece = rest.trim();
+            if !piece.is_empty() {
+                if !thinking.is_empty() {
+                    thinking.push('\n');
+                }
+                thinking.push_str(piece);
+            }
+            rest = "";
+            break;
+        }
+    }
+    visible.push_str(rest);
+    (visible, thinking)
+}
+
+/// Streams content while stripping `<think>…</think>` into Thinking deltas.
+#[derive(Debug, Default)]
+struct ContentThinkSplit {
+    buf: String,
+    in_think: bool,
+}
+
+impl ContentThinkSplit {
+    fn push(&mut self, piece: &str, mut emit: impl FnMut(DeltaKind, &str)) {
+        if piece.is_empty() {
+            return;
+        }
+        self.buf.push_str(piece);
+        loop {
+            if self.in_think {
+                if let Some(end) = self.buf.find("</think>") {
+                    let think = self.buf[..end].to_string();
+                    self.buf.drain(..end + "</think>".len());
+                    self.in_think = false;
+                    if !think.is_empty() {
+                        emit(DeltaKind::Thinking, &think);
+                    }
+                    continue;
+                }
+                let hold = longest_tag_prefix(&self.buf, "</think>");
+                let emit_len = self.buf.len().saturating_sub(hold);
+                if emit_len == 0 {
+                    break;
+                }
+                let think = self.buf[..emit_len].to_string();
+                self.buf.drain(..emit_len);
+                if !think.is_empty() {
+                    emit(DeltaKind::Thinking, &think);
+                }
+                break;
+            }
+            if let Some(start) = self.buf.find("<think>") {
+                let before = self.buf[..start].to_string();
+                self.buf.drain(..start + "<think>".len());
+                self.in_think = true;
+                if !before.is_empty() {
+                    emit(DeltaKind::Content, &before);
+                }
+                continue;
+            }
+            // DeepSeek-R1: thinking then </think> with no opener — hold until close or decide.
+            if let Some(end) = self.buf.find("</think>") {
+                let think = self.buf[..end].to_string();
+                self.buf.drain(..end + "</think>".len());
+                if !think.is_empty() {
+                    emit(DeltaKind::Thinking, &think);
+                }
+                continue;
+            }
+            let hold = longest_tag_prefix(&self.buf, "<think>")
+                .max(longest_tag_prefix(&self.buf, "</think>"));
+            let emit_len = self.buf.len().saturating_sub(hold);
+            if emit_len == 0 {
+                break;
+            }
+            // If the buffer still might be R1 thinking (no visible answer yet), keep holding
+            // when it looks like an unfinished think block (starts mid-tag already held).
+            let content = self.buf[..emit_len].to_string();
+            self.buf.drain(..emit_len);
+            if !content.is_empty() {
+                emit(DeltaKind::Content, &content);
+            }
+            break;
+        }
+    }
+
+    fn finish(&mut self, mut emit: impl FnMut(DeltaKind, &str)) {
+        if self.buf.is_empty() && !self.in_think {
+            return;
+        }
+        let rest = std::mem::take(&mut self.buf);
+        if self.in_think {
+            self.in_think = false;
+            if !rest.is_empty() {
+                emit(DeltaKind::Thinking, &rest);
+            }
+            return;
+        }
+        let (visible, thinking) = split_think_tags(&rest);
+        if !thinking.is_empty() {
+            emit(DeltaKind::Thinking, &thinking);
+        }
+        if !visible.is_empty() {
+            emit(DeltaKind::Content, &visible);
+        }
+    }
+}
+
+fn longest_tag_prefix(text: &str, tag: &str) -> usize {
+    let bytes = text.as_bytes();
+    let tag_b = tag.as_bytes();
+    let max = bytes.len().min(tag_b.len().saturating_sub(1));
+    for len in (1..=max).rev() {
+        if bytes[bytes.len() - len..] == tag_b[..len] {
+            return len;
+        }
+    }
+    0
 }
 
 fn message_text(content: &Value) -> String {
@@ -1083,6 +1267,7 @@ fn trim_param(raw: &str) -> String {
 #[derive(Debug, Default)]
 pub struct StreamAssembler {
     content: String,
+    thinking: String,
     calls: Vec<PartialCall>,
 }
 
@@ -1101,6 +1286,13 @@ impl StreamAssembler {
     pub fn push_delta(&mut self, delta: &Value) {
         if let Some(text) = delta.get("content").and_then(|value| value.as_str()) {
             self.content.push_str(text);
+        }
+        for key in ["reasoning", "reasoning_content", "thinking"] {
+            if let Some(text) = delta.get(key).and_then(|value| value.as_str()) {
+                if !text.is_empty() {
+                    self.thinking.push_str(text);
+                }
+            }
         }
         let Some(list) = delta.get("tool_calls").and_then(|value| value.as_array()) else {
             return;
@@ -1157,6 +1349,15 @@ impl StreamAssembler {
                 arguments: normalize_tool_arguments(&partial.arguments),
             });
         }
+        let (visible, from_tags) = split_think_tags(&content);
+        content = visible;
+        let mut thinking = self.thinking;
+        if !from_tags.is_empty() {
+            if !thinking.is_empty() {
+                thinking.push('\n');
+            }
+            thinking.push_str(&from_tags);
+        }
         if calls.is_empty() {
             let (found, stripped) = extract_textual(&content);
             if !found.is_empty() {
@@ -1164,7 +1365,7 @@ impl StreamAssembler {
                 content = stripped;
             }
         }
-        Ok(reply_from_parts(content, calls))
+        Ok(reply_from_parts(content, thinking, calls))
     }
 }
 
@@ -1194,7 +1395,7 @@ pub async fn complete(
     options: CompleteOptions<'_>,
 ) -> Result<Reply, String> {
     if options.stream
-        && let Ok(reply) = complete_stream(client, server, model, messages, options, |_| {}).await
+        && let Ok(reply) = complete_stream(client, server, model, messages, options, |_, _| {}).await
     {
         return Ok(reply);
     }
@@ -1212,7 +1413,7 @@ pub async fn complete_with_delta<F>(
     mut on_delta: F,
 ) -> Result<Reply, String>
 where
-    F: FnMut(&str),
+    F: FnMut(DeltaKind, &str),
 {
     if options.stream {
         match complete_stream(client, server, model, messages, options, &mut on_delta).await {
@@ -1242,10 +1443,12 @@ async fn complete_once(
     let api_key = options.api_key;
     let stream = options.stream;
     let mut allow_tools = allow_tools;
+    let mut allow_think = native && !model_skips_think(model);
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     loop {
         let use_tools = allow_tools && !model_skips_tools(model);
+        let use_think = allow_think && !model_skips_think(model);
         let tools = if use_tools {
             tool_specs()
         } else {
@@ -1261,7 +1464,7 @@ async fn complete_once(
         let ollama_msgs;
         let body = if native {
             ollama_msgs = messages_for_ollama_native(msgs);
-            ollama_request_body(model, &ollama_msgs, &tools, stream, options.num_ctx)
+            ollama_request_body(model, &ollama_msgs, &tools, stream, options.num_ctx, use_think)
         } else {
             request_body(model, msgs, &tools, stream)
         };
@@ -1276,6 +1479,11 @@ async fn complete_once(
             .await
             .map_err(|err| format!("Cannot read the response: {err}"))?;
         if !status.is_success() {
+            if use_think && think_not_supported(status, &text) {
+                remember_model_without_think(model);
+                allow_think = false;
+                continue;
+            }
             if use_tools && tools_not_supported(status, &text) {
                 remember_model_without_tools(model);
                 allow_tools = false;
@@ -1308,7 +1516,7 @@ async fn complete_stream<F>(
     mut on_delta: F,
 ) -> Result<Reply, String>
 where
-    F: FnMut(&str),
+    F: FnMut(DeltaKind, &str),
 {
     if options.ollama_native {
         return complete_ollama_stream(client, server, model, messages, options, on_delta).await;
@@ -1359,7 +1567,8 @@ where
     };
     // Stash flattened flag for after assembly.
     let history_flattened = flattened;
-let mut assembler = StreamAssembler::default();
+    let mut assembler = StreamAssembler::default();
+    let mut think_split = ContentThinkSplit::default();
     // Byte buffer so a multi-byte UTF-8 char split across TCP chunks is not lossy-decoded.
     let mut byte_buf: Vec<u8> = Vec::new();
     let mut line_buf = String::new();
@@ -1367,11 +1576,45 @@ let mut assembler = StreamAssembler::default();
     let mut hold_deltas = false;
     let mut held = String::new();
     let mut stream = response.bytes_stream();
+
+    let handle_delta = |delta: &Value,
+                            assembler: &mut StreamAssembler,
+                            think_split: &mut ContentThinkSplit,
+                            hold_deltas: &mut bool,
+                            held: &mut String,
+                            on_delta: &mut F| {
+        assembler.push_delta(delta);
+        for key in ["reasoning", "reasoning_content", "thinking"] {
+            if let Some(text) = delta.get(key).and_then(|value| value.as_str()) {
+                if !text.is_empty() {
+                    on_delta(DeltaKind::Thinking, text);
+                }
+            }
+        }
+        if let Some(text) = delta.get("content").and_then(|value| value.as_str()) {
+            if text.is_empty() {
+                return;
+            }
+            if !*hold_deltas && content_looks_like_tool_prefix(assembler.content()) {
+                *hold_deltas = true;
+            }
+            think_split.push(text, |kind, piece| match kind {
+                DeltaKind::Thinking => on_delta(DeltaKind::Thinking, piece),
+                DeltaKind::Content => {
+                    if *hold_deltas {
+                        held.push_str(piece);
+                    } else {
+                        on_delta(DeltaKind::Content, piece);
+                    }
+                }
+            });
+        }
+    };
+
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|err| format!("Stream read failed: {err}"))?;
         byte_buf.extend_from_slice(&chunk);
-        let consumed = append_valid_utf8(&mut line_buf, &mut byte_buf);
-        let _ = consumed;
+        let _ = append_valid_utf8(&mut line_buf, &mut byte_buf);
         while let Some(newline) = line_buf.find('\n') {
             let mut line = line_buf[..newline].to_string();
             line_buf.drain(..=newline);
@@ -1382,19 +1625,14 @@ let mut assembler = StreamAssembler::default();
                 continue;
             };
             saw_event = true;
-            assembler.push_delta(&delta);
-            if let Some(text) = delta.get("content").and_then(|value| value.as_str()) {
-                if !text.is_empty() {
-                    if !hold_deltas && content_looks_like_tool_prefix(assembler.content()) {
-                        hold_deltas = true;
-                    }
-                    if hold_deltas {
-                        held.push_str(text);
-                    } else {
-                        on_delta(text);
-                    }
-                }
-            }
+            handle_delta(
+                &delta,
+                &mut assembler,
+                &mut think_split,
+                &mut hold_deltas,
+                &mut held,
+                &mut on_delta,
+            );
         }
     }
     if !byte_buf.is_empty() {
@@ -1405,21 +1643,26 @@ let mut assembler = StreamAssembler::default();
     if !line_buf.trim().is_empty() {
         if let Some(delta) = sse_data_delta(line_buf.trim())? {
             saw_event = true;
-            assembler.push_delta(&delta);
-            if let Some(text) = delta.get("content").and_then(|value| value.as_str()) {
-                if !text.is_empty() {
-                    if !hold_deltas && content_looks_like_tool_prefix(assembler.content()) {
-                        hold_deltas = true;
-                    }
-                    if hold_deltas {
-                        held.push_str(text);
-                    } else {
-                        on_delta(text);
-                    }
-                }
-            }
+            handle_delta(
+                &delta,
+                &mut assembler,
+                &mut think_split,
+                &mut hold_deltas,
+                &mut held,
+                &mut on_delta,
+            );
         }
     }
+    think_split.finish(|kind, piece| match kind {
+        DeltaKind::Thinking => on_delta(DeltaKind::Thinking, piece),
+        DeltaKind::Content => {
+            if hold_deltas {
+                held.push_str(piece);
+            } else {
+                on_delta(DeltaKind::Content, piece);
+            }
+        }
+    });
     if !saw_event {
         return Err("Stream produced no events".to_string());
     }
@@ -1428,10 +1671,10 @@ let mut assembler = StreamAssembler::default();
     if hold_deltas {
         if reply.calls.is_empty() {
             if !held.is_empty() {
-                on_delta(&held);
+                on_delta(DeltaKind::Content, &held);
             }
         } else if !reply.content.trim().is_empty() {
-            on_delta(&reply.content);
+            on_delta(DeltaKind::Content, &reply.content);
         }
     }
     Ok(reply)
@@ -1446,14 +1689,16 @@ async fn complete_ollama_stream<F>(
     mut on_delta: F,
 ) -> Result<Reply, String>
 where
-    F: FnMut(&str),
+    F: FnMut(DeltaKind, &str),
 {
     let url = ollama_chat_url(server);
     let mut allow_tools = true;
+    let mut allow_think = !model_skips_think(model);
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     let response = loop {
         let use_tools = allow_tools && !model_skips_tools(model);
+        let use_think = allow_think && !model_skips_think(model);
         let tools = if use_tools {
             tool_specs()
         } else {
@@ -1467,7 +1712,7 @@ where
             owned.as_slice()
         };
         let ollama_msgs = messages_for_ollama_native(msgs);
-        let body = ollama_request_body(model, &ollama_msgs, &tools, true, options.num_ctx);
+        let body = ollama_request_body(model, &ollama_msgs, &tools, true, options.num_ctx, use_think);
         let request = apply_auth(client.post(&url), options.api_key).json(&body);
         let response = request
             .send()
@@ -1478,6 +1723,11 @@ where
             break response;
         }
         let text = response.text().await.unwrap_or_default();
+        if use_think && think_not_supported(status, &text) {
+            remember_model_without_think(model);
+            allow_think = false;
+            continue;
+        }
         if use_tools && tools_not_supported(status, &text) {
             remember_model_without_tools(model);
             allow_tools = false;
@@ -1493,7 +1743,9 @@ where
     };
     let history_flattened = flattened;
     let mut content = String::new();
+    let mut thinking = String::new();
     let mut tool_calls = Value::Null;
+    let mut think_split = ContentThinkSplit::default();
     let mut byte_buf: Vec<u8> = Vec::new();
     let mut line_buf = String::new();
     let mut saw_event = false;
@@ -1519,17 +1771,33 @@ where
             };
             saw_event = true;
             if let Some(message) = value.get("message") {
+                for key in ["thinking", "reasoning", "reasoning_content"] {
+                    if let Some(piece) = message.get(key).and_then(|v| v.as_str()) {
+                        if !piece.is_empty() {
+                            thinking.push_str(piece);
+                            on_delta(DeltaKind::Thinking, piece);
+                        }
+                    }
+                }
                 if let Some(piece) = message.get("content").and_then(|v| v.as_str()) {
                     if !piece.is_empty() {
                         content.push_str(piece);
                         if !hold_deltas && content_looks_like_tool_prefix(&content) {
                             hold_deltas = true;
                         }
-                        if hold_deltas {
-                            held.push_str(piece);
-                        } else {
-                            on_delta(piece);
-                        }
+                        think_split.push(piece, |kind, text| match kind {
+                            DeltaKind::Thinking => {
+                                thinking.push_str(text);
+                                on_delta(DeltaKind::Thinking, text);
+                            }
+                            DeltaKind::Content => {
+                                if hold_deltas {
+                                    held.push_str(text);
+                                } else {
+                                    on_delta(DeltaKind::Content, text);
+                                }
+                            }
+                        });
                     }
                 }
                 if let Some(calls) = message.get("tool_calls") {
@@ -1540,9 +1808,25 @@ where
             }
         }
     }
+    think_split.finish(|kind, text| match kind {
+        DeltaKind::Thinking => {
+            thinking.push_str(text);
+            on_delta(DeltaKind::Thinking, text);
+        }
+        DeltaKind::Content => {
+            if hold_deltas {
+                held.push_str(text);
+            } else {
+                on_delta(DeltaKind::Content, text);
+            }
+        }
+    });
     if !saw_event {
         return Err("Stream produced no events".to_string());
     }
+    // Tags were already routed into `thinking` via ContentThinkSplit; strip only.
+    let (visible, _) = split_think_tags(&content);
+    content = visible;
     let mut raw = json!({"role": "assistant", "content": content});
     if !tool_calls.is_null() {
         raw["tool_calls"] = tool_calls;
@@ -1555,15 +1839,15 @@ where
             content = stripped;
         }
     }
-    let mut reply = reply_from_parts(content, calls);
+    let mut reply = reply_from_parts(content, thinking, calls);
     reply.history_flattened = history_flattened;
     if hold_deltas {
         if reply.calls.is_empty() {
             if !held.is_empty() {
-                on_delta(&held);
+                on_delta(DeltaKind::Content, &held);
             }
         } else if !reply.content.trim().is_empty() {
-            on_delta(&reply.content);
+            on_delta(DeltaKind::Content, &reply.content);
         }
     }
     Ok(reply)
@@ -1647,11 +1931,21 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_is_the_reply_when_content_is_empty() {
+    fn reasoning_stays_out_of_content_when_content_is_empty() {
         let raw = r#"{"choices":[{"message":{"role":"assistant","content":"","reasoning":"Use index.html"}}]}"#;
         let reply = parse_reply(raw).unwrap();
         assert!(reply.calls.is_empty());
-        assert_eq!(reply.content, "Use index.html");
+        assert!(reply.content.trim().is_empty(), "{}", reply.content);
+        assert_eq!(reply.thinking, "Use index.html");
+    }
+
+    #[test]
+    fn think_tags_are_stripped_from_content() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"<think>plan</think>Hello"}}]}"#;
+        let reply = parse_reply(raw).unwrap();
+        assert_eq!(reply.content, "Hello");
+        assert_eq!(reply.thinking, "plan");
+        assert!(reply.calls.is_empty());
     }
 
     #[test]
@@ -1883,7 +2177,11 @@ mod tests {
             "qwen",
             &messages,
             CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
-            |text| pieces.push(text.to_string()),
+            |kind, text| {
+                if kind == DeltaKind::Content {
+                    pieces.push(text.to_string());
+                }
+            },
         )
         .await
         .unwrap();
@@ -1920,7 +2218,11 @@ mod tests {
             "qwen2.5-coder:7b",
             &messages,
             CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
-            |text| pieces.push(text.to_string()),
+            |kind, text| {
+                if kind == DeltaKind::Content {
+                    pieces.push(text.to_string());
+                }
+            },
         )
         .await
         .unwrap();
@@ -2075,7 +2377,7 @@ mod tests {
 
     #[test]
     fn ollama_request_body_sets_num_ctx() {
-        let body = ollama_request_body("qwen", &[], &[], false, Some(16384));
+        let body = ollama_request_body("qwen", &[], &[], false, Some(16384), false);
         assert_eq!(body["options"]["num_ctx"], 16384);
         assert_eq!(body["stream"], false);
     }
@@ -2360,6 +2662,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_ollama_qwen3_thinking_stream() {
+        let client = reqwest::Client::new();
+        let ok = client
+            .get("http://127.0.0.1:11434/api/tags")
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if !ok {
+            return;
+        }
+        let messages = [serde_json::json!({
+            "role": "user",
+            "content": "Reply with exactly the word hi and nothing else."
+        })];
+        let mut thinking = String::new();
+        let mut content = String::new();
+        let reply = complete_with_delta(
+            &client,
+            "http://127.0.0.1:11434/v1",
+            "qwen3:0.6b",
+            &messages,
+            CompleteOptions {
+                api_key: "",
+                stream: true,
+                num_ctx: Some(2048),
+                ollama_native: true,
+            },
+            |kind, text| match kind {
+                DeltaKind::Thinking => thinking.push_str(text),
+                DeltaKind::Content => content.push_str(text),
+            },
+        )
+        .await;
+        let Ok(reply) = reply else {
+            eprintln!("live thinking request failed: {reply:?}");
+            return;
+        };
+        eprintln!(
+            "live thinking_len={} content_len={} reply.thinking_len={} reply.content={:?}",
+            thinking.len(),
+            content.len(),
+            reply.thinking.len(),
+            reply.content.chars().take(80).collect::<String>()
+        );
+        assert!(
+            !thinking.is_empty() || !reply.thinking.is_empty() || !reply.content.trim().is_empty(),
+            "expected thinking and/or content from qwen3: {reply:?}"
+        );
+        assert!(
+            !reply.content.contains("<think>") && !reply.content.contains("</think>"),
+            "think tags leaked into content: {}",
+            reply.content
+        );
+    }
+
+    #[tokio::test]
     async fn live_ollama_stream_content_json_if_available() {
         let client = reqwest::Client::new();
         let ok = client
@@ -2382,7 +2741,11 @@ mod tests {
             "qwen2.5-coder:0.5b",
             &messages,
             CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
-            |text| pieces.push(text.to_string()),
+            |kind, text| {
+                if kind == DeltaKind::Content {
+                    pieces.push(text.to_string());
+                }
+            },
         )
         .await;
         let Ok(reply) = reply else {

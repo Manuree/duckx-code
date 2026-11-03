@@ -29,6 +29,7 @@ impl App {
                     return;
                 }
                 self.agent.stream_draft = None;
+                self.agent.thinking_draft = None;
                 self.remember_assistant(&text);
                 self.push_line(false, text);
                 self.agent.busy = false;
@@ -38,17 +39,30 @@ impl App {
                 if id != self.agent.turn || !self.agent.busy {
                     return;
                 }
+                // Visible answer started — drop thinking snippet from the title.
+                self.agent.thinking_draft = None;
                 match self.agent.stream_draft.as_mut() {
                     Some(draft) => draft.push_str(&text),
                     None => self.agent.stream_draft = Some(text),
                 }
                 self.agent.status = "streaming".to_string();
             }
+            AgentEvent::Thinking { id, text } => {
+                if id != self.agent.turn || !self.agent.busy {
+                    return;
+                }
+                match self.agent.thinking_draft.as_mut() {
+                    Some(draft) => draft.push_str(&text),
+                    None => self.agent.thinking_draft = Some(text),
+                }
+                self.agent.status = "thinking".to_string();
+            }
             AgentEvent::Failed { id, text } => {
                 if id != self.agent.turn || !self.agent.busy {
                     return;
                 }
                 self.agent.stream_draft = None;
+                self.agent.thinking_draft = None;
                 if text.to_ascii_lowercase().contains("invalid tool call arguments") {
                     self.agent.memory.clear();
                 }
@@ -80,6 +94,7 @@ impl App {
                         self.push_line(false, draft);
                     }
                 }
+                self.agent.thinking_draft = None;
                 self.remember_tool_call(&call_id, &name, &arguments);
                 self.agent.status = format!("running {name}");
                 self.run_tool(id, call_id, &name, &arguments);
@@ -234,6 +249,7 @@ impl App {
         self.agent.memory.clear();
         self.agent.transcript.clear();
         self.agent.stream_draft = None;
+        self.agent.thinking_draft = None;
         self.agent.scroll = 0;
         self.agent.reading = false;
         self.agent.status = "new chat".to_string();
@@ -275,6 +291,7 @@ editor_state:
         self.agent.anchor = 0;
         self.agent.busy = true;
         self.agent.stream_draft = None;
+        self.agent.thinking_draft = None;
         self.agent.status = "waiting".to_string();
         let ollama_native = self.ai.provider == crate::settings::AiProvider::Ollama;
         let _ = tx.send(AgentCommand::Turn {
@@ -296,6 +313,7 @@ editor_state:
         self.agent.busy = false;
         self.agent.pending = None;
         self.agent.stream_draft = None;
+        self.agent.thinking_draft = None;
         self.agent.status = "ready".to_string();
         if let Some(tx) = &self.agent_tx {
             let _ = tx.send(AgentCommand::Cancel { id });

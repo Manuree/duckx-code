@@ -70,6 +70,8 @@ pub struct Panel {
     pub memory: Vec<serde_json::Value>,
     /// Live streamed assistant text for the current turn, shown until Reply.
     pub stream_draft: Option<String>,
+    /// Live reasoning / thinking text for the title only (not the transcript).
+    pub thinking_draft: Option<String>,
 }
 
 impl Default for Panel {
@@ -90,6 +92,7 @@ impl Default for Panel {
             pending: None,
             memory: Vec::new(),
             stream_draft: None,
+            thinking_draft: None,
         }
     }
 }
@@ -132,6 +135,11 @@ pub enum AgentEvent {
     },
     /// Incremental assistant text while a streamed completion is running.
     Delta {
+        id: u64,
+        text: String,
+    },
+    /// Incremental reasoning / thinking (title only; never the transcript).
+    Thinking {
         id: u64,
         text: String,
     },

@@ -436,7 +436,8 @@ mod tests {
                 "missing rounded corner {corner}\n{screen}"
             );
         }
-        assert!(screen.contains("Assistant"), "{screen}");
+        assert!(screen.contains("ready"), "{screen}");
+        assert!(!screen.contains("Assistant ·"), "{screen}");
         assert!(screen.contains("fn main"), "{screen}");
     }
 
