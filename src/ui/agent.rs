@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
 };
@@ -25,7 +25,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         theme.sidebar_border
     };
-    let title = format!(" Assistant · {} ", fit(&status_label(app), 40));
+    let title = format!(" Assistant · {} ", fit(&status_label(app), 48));
     let block = panel(&title).border_style(border).style(theme.sidebar);
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -35,21 +35,17 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     }
     let width = inner.width as usize;
     let content = width.saturating_sub(3).max(1);
-    let prompt_rows = wrap_rows(&app.agent.prompt, content);
-    let prompt_limit = (inner.height as usize).saturating_sub(1).max(1);
-    // Grow with content, cap at 8 rows, scroll within that window.
-    let prompt_height = prompt_rows
-        .len()
-        .clamp(1, 8.min(prompt_limit).min(inner.height as usize));
-    let cursor_row = row_for(
-        &prompt_rows,
-        app.agent.cursor,
-        app.agent.prompt.chars().count(),
-    );
-    let prompt_start = cursor_row
-        .saturating_add(1)
-        .saturating_sub(prompt_height)
-        .min(prompt_rows.len().saturating_sub(prompt_height));
+    let pending = app.agent.pending.as_ref();
+    let prompt_height = if pending.is_some() {
+        1usize
+    } else {
+        let prompt_rows = wrap_rows(&app.agent.prompt, content);
+        let prompt_limit = (inner.height as usize).saturating_sub(1).max(1);
+        // Grow with content, cap at 8 rows, scroll within that window.
+        prompt_rows
+            .len()
+            .clamp(1, 8.min(prompt_limit).min(inner.height as usize))
+    };
     let transcript_room = (inner.height as usize).saturating_sub(prompt_height);
     let transcript = transcript_lines(app, content);
     let max_scroll = transcript.len().saturating_sub(transcript_room);
@@ -75,6 +71,35 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             Rect::new(inner.x, inner.y + offset as u16, inner.width, 1),
         );
     }
+
+    if let Some(pending) = pending {
+        let y = inner.y + transcript_room as u16;
+        let marked = theme
+            .sidebar
+            .bg(theme.sidebar_selected)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+        let spans = approve_button_spans(pending.allow_selected, theme.sidebar, marked);
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(theme.sidebar),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        if focused {
+            let column = button_cursor_column(pending.allow_selected).min(inner.width.saturating_sub(1) as usize);
+            super::cursor::place(inner.x + column as u16, y);
+        }
+        return;
+    }
+
+    let prompt_rows = wrap_rows(&app.agent.prompt, content);
+    let cursor_row = row_for(
+        &prompt_rows,
+        app.agent.cursor,
+        app.agent.prompt.chars().count(),
+    );
+    let prompt_start = cursor_row
+        .saturating_add(1)
+        .saturating_sub(prompt_height)
+        .min(prompt_rows.len().saturating_sub(prompt_height));
     let marked = theme.sidebar.bg(theme.sidebar_selected);
     let mut cursor_at = None;
     for (offset, row) in prompt_rows
@@ -106,6 +131,28 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             let column = (column as u16).min(inner.width.saturating_sub(1));
             super::cursor::place(inner.x + column, y);
         }
+    }
+}
+
+fn approve_button_spans(allow_selected: bool, base: Style, marked: Style) -> Vec<Span<'static>> {
+    let yes = if allow_selected {
+        Span::styled(" > [ Yes ] < ", marked)
+    } else {
+        Span::styled("   [ Yes ]   ", base)
+    };
+    let no = if !allow_selected {
+        Span::styled(" > [ No ] < ", marked)
+    } else {
+        Span::styled("   [ No ]   ", base)
+    };
+    vec![yes, no]
+}
+
+fn button_cursor_column(allow_selected: bool) -> usize {
+    if allow_selected {
+        " > [ Yes ] < ".width() / 2
+    } else {
+        " > [ Yes ] < ".width() + " > [ No ] < ".width() / 2
     }
 }
 

@@ -115,7 +115,15 @@ impl App {
                     self.clear_agent_chat();
                     return;
                 }
-                AgentAction::Submit => self.resolve_pending_tool(true),
+                AgentAction::Submit => {
+                    let allow = self
+                        .agent
+                        .pending
+                        .as_ref()
+                        .map(|pending| pending.allow_selected)
+                        .unwrap_or(true);
+                    self.resolve_pending_tool(allow);
+                }
                 AgentAction::Close => self.resolve_pending_tool(false),
                 AgentAction::Insert(text) => {
                     let key = text.trim();
@@ -123,6 +131,22 @@ impl App {
                         self.resolve_pending_tool(true);
                     } else if key.eq_ignore_ascii_case("n") {
                         self.resolve_pending_tool(false);
+                    } else if key == "h" || key == "H" {
+                        self.select_pending_allow(true);
+                    } else if key == "l" || key == "L" {
+                        self.select_pending_allow(false);
+                    }
+                    // Other keys must not leak into the prompt while approval is open.
+                }
+                AgentAction::Move { right, .. } => {
+                    self.select_pending_allow(!right);
+                }
+                AgentAction::Jump { end, .. } => {
+                    // Home -> Yes, End -> No (also used while reading is false).
+                    if self.agent.reading {
+                        self.agent.scroll = if end { 0 } else { usize::MAX };
+                    } else {
+                        self.select_pending_allow(!end);
                     }
                 }
                 AgentAction::Above => {
@@ -138,9 +162,6 @@ impl App {
                     } else {
                         self.agent.scroll = self.agent.scroll.saturating_add(1);
                     }
-                }
-                AgentAction::Jump { end, .. } if self.agent.reading => {
-                    self.agent.scroll = if end { 0 } else { usize::MAX };
                 }
                 _ => {}
             }
@@ -316,7 +337,7 @@ editor_state:
 
     fn ask_tool_approval(&mut self, turn: u64, call_id: String, name: String, arguments: String) {
         let summary = self.tool_approval_summary(&name, &arguments);
-        self.agent.status = format!("approve {name}? y/n");
+        self.agent.status = format!("approve {name} · ←/→ Enter");
         self.agent.reading = false;
         self.agent.pending = Some(PendingTool {
             turn,
@@ -324,9 +345,23 @@ editor_state:
             name,
             arguments,
             summary,
+            allow_selected: true,
         });
         if !self.agent.open || !self.agent.focused {
             self.focus_agent();
+        }
+    }
+
+    fn select_pending_allow(&mut self, allow: bool) {
+        if let Some(pending) = self.agent.pending.as_mut() {
+            pending.allow_selected = allow;
+        }
+    }
+
+    /// Tab toggles Yes/No while a tool waits for approval.
+    pub(super) fn toggle_pending_allow(&mut self) {
+        if let Some(pending) = self.agent.pending.as_mut() {
+            pending.allow_selected = !pending.allow_selected;
         }
     }
 
@@ -363,14 +398,9 @@ editor_state:
                         .get("replace")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    format!(
-                        "Allow apply_edit on {path}?
-- find: {}
-+ replace: {}
-[y] Allow  [n] Deny",
-                        clip(find, 120),
-                        clip(replace, 120)
-                    )
+                    let mut lines = vec![format!("apply_edit · {path}")];
+                    lines.extend(diff_preview_lines(find, replace));
+                    lines.join("\n")
                 } else {
                     let start = value
                         .get("start_line")
@@ -381,12 +411,9 @@ editor_state:
                         .and_then(|v| v.as_u64())
                         .unwrap_or(start);
                     let text = value.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    format!(
-                        "Allow apply_edit on {path} lines {start}-{end}?
-{}
-[y] Allow  [n] Deny",
-                        clip(text, 160)
-                    )
+                    let mut lines = vec![format!("apply_edit · {path} · lines {start}-{end}")];
+                    lines.extend(plus_preview_lines(text, 6));
+                    lines.join("\n")
                 }
             }
             "create_file" => {
@@ -394,30 +421,21 @@ editor_state:
                 let parent_note = match agent::within(&self.explorer.root, path) {
                     Ok(full) => match agent::create_parent_plan(&full) {
                         Ok(plan) if plan.missing_dirs > 0 => format!(
-                            "
-Will create {} new folder(s) under {}",
+                            "folders: +{} under {}",
                             plan.missing_dirs,
                             plan.parent.display()
                         ),
-                        Ok(_) => "
-Parent folder exists".to_string(),
-                        Err(err) => format!("
-{err}"),
+                        Ok(_) => "folders: parent exists".to_string(),
+                        Err(err) => err,
                     },
-                    Err(err) => format!("
-{err}"),
+                    Err(err) => err,
                 };
-                format!(
-                    "Allow create_file {path}?{parent_note}
-{}
-[y] Allow  [n] Deny",
-                    clip(text, 160)
-                )
+                let mut lines = vec![format!("create_file · {path}"), parent_note];
+                lines.extend(plus_preview_lines(text, 4));
+                lines.join("\n")
             }
-                        "save" => format!("Allow save {path}?
-[y] Allow  [n] Deny"),
-            _ => format!("Allow {name} on {path}?
-[y] Allow  [n] Deny"),
+            "save" => format!("save · {path}"),
+            _ => format!("{name} · {path}"),
         }
     }
 
@@ -979,12 +997,67 @@ fn memory_chars(memory: &[serde_json::Value]) -> usize {
         .sum()
 }
 
+fn diff_preview_lines(find: &str, replace: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in find.lines().take(4) {
+        lines.push(format!("- {}", clip_width(line, 72)));
+    }
+    if find.lines().count() > 4 {
+        lines.push("- …".to_string());
+    }
+    if find.is_empty() {
+        lines.push("- (empty)".to_string());
+    }
+    for line in replace.lines().take(4) {
+        lines.push(format!("+ {}", clip_width(line, 72)));
+    }
+    if replace.lines().count() > 4 {
+        lines.push("+ …".to_string());
+    }
+    if replace.is_empty() {
+        lines.push("+ (empty)".to_string());
+    }
+    lines
+}
+
+fn plus_preview_lines(text: &str, max_lines: usize) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .lines()
+        .take(max_lines)
+        .map(|line| format!("+ {}", clip_width(line, 72)))
+        .collect();
+    if text.lines().count() > max_lines {
+        lines.push("+ …".to_string());
+    }
+    if text.is_empty() {
+        lines.push("+ (empty)".to_string());
+    }
+    lines
+}
+
 fn clip(text: &str, max: usize) -> String {
     let count = text.chars().count();
     if count <= max {
         return text.to_string();
     }
     let mut out: String = text.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+fn clip_width(text: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= max {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if out.width() + w > max.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+    }
     out.push('…');
     out
 }

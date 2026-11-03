@@ -457,6 +457,34 @@ mod tests {
     }
 
     #[test]
+    fn assistant_approval_shows_buttons_and_diff_card() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.agent.busy = true;
+        app.agent.status = "approve apply_edit · ←/→ Enter".into();
+        app.agent.pending = Some(crate::agent::PendingTool {
+            turn: 1,
+            call_id: "c1".into(),
+            name: "apply_edit".into(),
+            arguments: r#"{"path":"demo.txt","find":"hello","replace":"hi"}"#.into(),
+            summary: "apply_edit · demo.txt\n- hello\n+ hi".into(),
+            allow_selected: true,
+        });
+        app.set_screen_size(80, 24);
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("apply_edit"), "{screen}");
+        assert!(screen.contains("- hello"), "{screen}");
+        assert!(screen.contains("+ hi"), "{screen}");
+        assert!(screen.contains("[ Yes ]"), "{screen}");
+        assert!(screen.contains("[ No ]"), "{screen}");
+        assert!(screen.contains("> [ Yes ]"), "{screen}");
+        app.agent.pending.as_mut().unwrap().allow_selected = false;
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("> [ No ]"), "{screen}");
+    }
+
+    #[test]
     fn assistant_panel_hides_outside_agent_mode() {
         let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
         app.agent.open = true;

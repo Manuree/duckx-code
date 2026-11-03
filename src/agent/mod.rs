@@ -33,8 +33,10 @@ pub struct PendingTool {
     pub call_id: String,
     pub name: String,
     pub arguments: String,
-    /// Short summary shown above the prompt (tool, path, preview).
+    /// Card text shown above the Yes/No buttons (tool, path, preview).
     pub summary: String,
+    /// `true` highlights Yes (default for a fast allow flow). `false` highlights No.
+    pub allow_selected: bool,
 }
 
 /// Tools that change files need Allow / Deny unless auto-approve is on.
@@ -62,7 +64,7 @@ pub struct Panel {
     /// Spinner frame while `busy` is set. The frames are `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`.
     pub spin: u8,
     pub turn: u64,
-    /// Mutating tool waiting for Allow (y/Enter) or Deny (n/Esc).
+    /// Mutating tool waiting for Allow / Deny (buttons, y/n, Enter, Esc).
     pub pending: Option<PendingTool>,
     /// Prior turn messages (user / assistant / tool) kept under a char budget.
     pub memory: Vec<serde_json::Value>,
