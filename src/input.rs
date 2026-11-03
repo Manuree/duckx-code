@@ -385,6 +385,9 @@ fn route_agent(event: &Event, keys: &crate::keys::KeyMap) -> Option<SemanticActi
             }
             KeyCode::Up => return Some(SemanticAction::Agent(AgentAction::Above)),
             KeyCode::Down => return Some(SemanticAction::Agent(AgentAction::Below)),
+            KeyCode::Char('l') | KeyCode::Char('L') => {
+                return Some(SemanticAction::Agent(AgentAction::NewChat));
+            }
             _ => {}
         }
     }

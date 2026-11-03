@@ -101,6 +101,10 @@ pub enum AgentCommand {
         api_key: String,
         /// When true the worker tries SSE first, then falls back.
         stream: bool,
+        /// Ollama `num_ctx`. Ignored on OpenAI-compat / LM Studio.
+        num_ctx: Option<u32>,
+        /// Use Ollama native `/api/chat` so `num_ctx` is honored.
+        ollama_native: bool,
         /// Prior OpenAI-compatible messages (user / assistant / tool), already budgeted.
         history: Vec<serde_json::Value>,
         prompt: String,
@@ -305,16 +309,16 @@ fn tool(name: &str, description: &str, parameters: Value) -> Value {
 }
 
 pub const SYSTEM: &str = "\
-You are the assistant inside duckx-code. Use tools to read and change files in the workspace. \
-Answer ordinary greetings and short chat in plain text without tools. \
-Each user message already ends with editor_state (focused file, 1-based cursor, selection) — do not call the editor_state tool just to greet or to restate that. \
-Paths stay inside the workspace. apply_edit replaces a line range or one unique snippet, and an open file is one undo step. \
-Edit at that cursor unless the user names another file or line. \
-create_file writes a new file and opens it. write_file is the same tool. Parent folders must already exist, or only one new folder level is allowed. \
-It refuses a path that already exists; change an existing file with apply_edit or search_replace. \
-apply_edit, create_file, and save wait for the user to Allow or Deny before they run. \
-Do not call bash or shell. There is no shell. \
-Do not invent paths. When you are finished, answer in short plain text.";
+You are the duckx-code assistant. Act with tools. Never tell the user to run steps you can do yourself. \
+Greetings and short chat: plain text, no tools. Each user message already ends with editor_state — do not call editor_state to greet. \
+Rules: paths stay in the workspace; no bash/shell; do not invent paths. \
+create_file / write_file: write a new file and open it (one new parent folder max; refuse if path exists). \
+apply_edit / search_replace: change an existing file (line range or unique snippet; open file = one undo). Edit at the cursor unless another path/line is named. \
+save: save an open file. Approval for apply_edit/create_file/save is handled by the app — call the tool; do not hesitate. \
+Tool call format examples (emit a real tool call, not these as prose): \
+{\"name\":\"create_file\",\"arguments\":{\"path\":\"src/hi.rs\",\"text\":\"fn main() {}\"}} \
+{\"name\":\"apply_edit\",\"arguments\":{\"path\":\"a.rs\",\"find\":\"old\",\"replace\":\"new\"}} \
+When done, reply in short plain text.";
 
 /// Maps names and argument keys local models already emit onto the tools the editor runs.
 pub fn normalize_call(name: &str, arguments: &str) -> (String, String) {

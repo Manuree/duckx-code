@@ -168,6 +168,8 @@ pub enum AgentAction {
     Submit,
     /// Leave the prompt. The panel stays open.
     Close,
+    /// Clear transcript and tool memory (new chat).
+    NewChat,
 }
 
 /// Keys that belong to the completion list. Typing is not one of these: it still edits the buffer.

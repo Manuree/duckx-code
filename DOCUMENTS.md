@@ -370,7 +370,8 @@ If no OS clipboard is available (e.g. a headless session), `copy`, `cut`, and `p
 | Command | Argument | Description | Shortcut |
 | :--- | :--- | :--- | :--- |
 | `setting` | — | Open the settings page. `config` is another name for the same command. | — |
-| `agent` | — | Open the assistant panel. It is drawn only while the prompt is focused. `F6` while the prompt is focused closes it. From the command bar, `Tab` opens it, and `Tab` in the prompt returns to the command bar and hides the panel. See [Assistant](#assistant). | `F6` |
+| `agent` | — | Open the assistant panel. It is drawn only while the prompt is focused. `F6` while the prompt is focused closes it. From the command bar, `Tab` opens it, and `Tab` in the prompt returns to the command bar and hides the panel. `agent new` clears chat memory. See [Assistant](#assistant). | `F6` |
+| `clear` | — | Start a new assistant chat (clears transcript and tool memory). Alias `agent-new`. | `Ctrl+L` (in panel) |
 | `about` | — | Open the about page. It shows the duck logo, the name, and the version. `Esc` closes it. | — |
 | `quit` | — | Exit duckx-code. Asks before leaving unsaved changes | `Ctrl + Q` |
 
@@ -596,7 +597,7 @@ The choice is written to `settings.json`:
   "editor": { "tab_width": 4, "indent_with_spaces": true, "line_ending": "auto" },
   "files": { "trim_trailing_space": false, "final_newline": false },
   "lsp": { "enabled": true, "check_on_save": true, "format_on_save": false, "python": "basic" },
-  "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "", "auto_approve": false }
+  "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "", "auto_approve": false, "streaming": true, "context_size": "16384" }
 }
 ```
 
@@ -628,11 +629,12 @@ A color theme may add a `diagnostics` section with `error`, `warning`, `info`, a
 | :--- | :--- | :--- |
 | Assistant | On, Off | Off refuses to send a prompt. |
 | Provider | Ollama, OpenAI-compatible / LM Studio | Ollama defaults to `http://127.0.0.1:11434/v1`. OpenAI-compatible / LM Studio defaults to `http://127.0.0.1:1234/v1`. The stored value stays `openai` for older settings files. |
-| Server | text | Base address, including `/v1`. Both providers use `POST /v1/chat/completions`. |
+| Server | text | Base address, including `/v1`. Ollama talks to native `/api/chat` (derived from this URL) so Context size works. LM Studio stays on `/v1/chat/completions`. |
 | Model | text | Model name sent as `model`. |
 | API key | text | Optional Bearer token. Empty (default) sends no Authorization header — right for local Ollama and LM Studio. |
-| Streaming | On, Off | On (default) requests SSE token streaming and shows text as it arrives; falls back to one JSON reply if streaming fails. Off always uses one JSON reply. |
+| Streaming | On, Off | On (default) streams tokens (SSE on LM Studio; NDJSON on Ollama native) and shows text as it arrives; falls back to one JSON reply if streaming fails. Off always uses one JSON reply. |
 | Auto-approve tools | On, Off | On runs `apply_edit`, `create_file`, and `save` without asking. Off (default) shows Allow / Deny in the assistant panel. |
+| Context size | text (`16384`, `auto`, or a number) | Token window for Ollama (`options.num_ctx`). Default `16384`. `auto` uses 16384. OpenAI-compat `/v1` ignores `num_ctx` on current Ollama — that is why the Ollama provider uses native `/api/chat`. LM Studio: set context in LM Studio; this row only budgets client history. You can also set host env `OLLAMA_CONTEXT_LENGTH` as a fallback. |
 
 Code uses the syntax theme's `text` color. The other syntax roles are stored for highlighting and are what the sample on the Syntax colors row shows.
 
@@ -646,11 +648,11 @@ Code uses the syntax theme's `text` color. The other syntax roles are stored for
 
 ## Assistant
 
-`agent` or `F6` opens a panel under the editor, and the panel is drawn only while its prompt is focused. The editor above it keeps its own text; the panel does not cover those lines, and keys in the prompt do not move the editor cursor. `Tab` in the command bar closes the bar and shows the panel. `Tab` in the prompt opens the command bar and hides the panel. `Esc` leaves the prompt and hides the panel. `F6` from the editor shows it again, and `F6` while the prompt is focused closes it. `Ctrl + Down` moves into the panel only while it is showing. Inside the panel, `Ctrl + Up` reads the messages and `Ctrl + Down` returns to the prompt. `Up` and `Down` scroll those messages, and they move between wrapped rows while the prompt has the cursor.
+`agent` or `F6` opens a panel under the editor, and the panel is drawn only while its prompt is focused. The editor above it keeps its own text; the panel does not cover those lines, and keys in the prompt do not move the editor cursor. `Tab` in the command bar closes the bar and shows the panel. `Tab` in the prompt opens the command bar and hides the panel. `Esc` leaves the prompt and hides the panel. `F6` from the editor shows it again, and `F6` while the prompt is focused closes it. `Ctrl + Down` moves into the panel only while it is showing. Inside the panel, `Ctrl + Up` reads the messages and `Ctrl + Down` returns to the prompt. `Up` and `Down` scroll those messages, and they move between wrapped rows while the prompt has the cursor. `Ctrl + L` in the panel, or the commands `clear` / `agent new` / `agent-new`, starts a new chat: transcript and tool-trail memory are cleared so a long session cannot push the system prompt and tools out of a small context window.
 
 Messages and the prompt wrap onto the next row when they are wider than the panel. Printable keys edit the prompt. `Left` and `Right` move the cursor, and `Shift` with either key extends the selection. `Up` and `Down` move between wrapped rows. `Home` and `End` jump to the ends. `Backspace` and `Delete` remove the selection, or one character. `Enter` sends it. `Ctrl + Up` leaves the prompt to read the messages above it. `Up` and `Down` then scroll those messages, `Home` and `End` jump to the top and the latest line, and `Ctrl + Down` returns to the prompt. The model also receives the focused file, the cursor line and column, and any selection, and it is told to edit at that cursor unless the prompt names another place. The chat line stays the text you typed. The panel title reads `ready`, `waiting`, `running read_file` (or another tool), or the server error. While the assistant is waiting or running a tool, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` spins in front of that word. The same tool with the same arguments three times in a row stops the turn, and so does a 33rd tool call. A missing model, or Assistant set to Off, is a status-bar message.
 
-The assistant can run these tools. A path that climbs out of the workspace with `..`, or through a symlink that leaves the folder, is refused. Files larger than 2 MB are not read or edited on disk. `create_file` refuses to create more than one new folder level under a missing parent. `apply_edit`, `create_file`, and `save` wait in the assistant panel for Allow (`y` or `Enter`) or Deny (`n` or `Esc`) unless Auto-approve tools is On. Deny returns a tool result to the model so the turn can continue. Read-only tools (`read_file`, `list_dir`, `editor_state`, `diagnostics`, `open_file`, `goto`) run without asking. Later turns keep a budgeted trail of prior tool calls and results so a small local context window still sees what already happened.
+The assistant can run these tools. A path that climbs out of the workspace with `..`, or through a symlink that leaves the folder, is refused. Files larger than 2 MB are not read or edited on disk. `create_file` refuses to create more than one new folder level under a missing parent. `apply_edit`, `create_file`, and `save` wait in the assistant panel for Allow (`y` or `Enter`) or Deny (`n` or `Esc`) unless Auto-approve tools is On. Deny returns a tool result to the model so the turn can continue. Read-only tools (`read_file`, `list_dir`, `editor_state`, `diagnostics`, `open_file`, `goto`) run without asking. Later turns keep a small budgeted trail of prior tool calls and results (about 2500 characters, clipped tool results, oldest dropped first) so a small local context window still sees recent work. Before each request the client also estimates tokens (chars ÷ 3.5) against Context size and drops oldest history while always keeping the system prompt, tool specs, and the current user message.
 
 | Tool | What it does |
 | :--- | :--- |

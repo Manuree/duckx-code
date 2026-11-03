@@ -30,6 +30,10 @@ pub struct Reply {
 pub struct CompleteOptions<'a> {
     pub api_key: &'a str,
     pub stream: bool,
+    /// Ollama `options.num_ctx`. Only sent on the native `/api/chat` path.
+    pub num_ctx: Option<u32>,
+    /// Prefer Ollama native `/api/chat` (honors num_ctx). LM Studio stays on `/v1`.
+    pub ollama_native: bool,
 }
 
 impl Default for CompleteOptions<'static> {
@@ -37,12 +41,24 @@ impl Default for CompleteOptions<'static> {
         Self {
             api_key: "",
             stream: false,
+            num_ctx: None,
+            ollama_native: false,
         }
     }
 }
 
 pub fn completions_url(server: &str) -> String {
     format!("{}/chat/completions", server.trim().trim_end_matches('/'))
+}
+
+/// Strip a trailing `/v1` and append `/api/chat`.
+pub fn ollama_chat_url(server: &str) -> String {
+    let trimmed = server.trim().trim_end_matches('/');
+    let base = trimmed
+        .strip_suffix("/v1")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    format!("{base}/api/chat")
 }
 
 pub fn request_body(model: &str, messages: &[Value], tools: &[Value], stream: bool) -> Value {
@@ -59,6 +75,107 @@ pub fn request_body(model: &str, messages: &[Value], tools: &[Value], stream: bo
         body["stream"] = Value::Bool(true);
     }
     body
+}
+
+pub fn ollama_request_body(
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    stream: bool,
+    num_ctx: Option<u32>,
+) -> Value {
+    let mut options = json!({
+        "temperature": 0.2,
+        "num_predict": 8192
+    });
+    if let Some(n) = num_ctx {
+        options["num_ctx"] = json!(n);
+    }
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+        "options": options
+    });
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools.to_vec());
+    }
+    body
+}
+
+/// Native Ollama `/api/chat` expects `function.arguments` as a JSON object, not a string.
+fn messages_for_ollama_native(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|message| {
+            let mut out = message.clone();
+            let Some(calls) = out.get("tool_calls").and_then(|v| v.as_array()).cloned() else {
+                return out;
+            };
+            let mut fixed = Vec::with_capacity(calls.len());
+            for (index, call) in calls.iter().enumerate() {
+                let id = call
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("call-{index}"));
+                let name = call
+                    .pointer("/function/name")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| call.get("name").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                let args = call
+                    .pointer("/function/arguments")
+                    .cloned()
+                    .or_else(|| call.get("arguments").cloned())
+                    .unwrap_or(json!({}));
+                let args_obj = match args {
+                    Value::String(s) => serde_json::from_str::<Value>(&normalize_tool_arguments(&s))
+                        .unwrap_or_else(|_| json!({})),
+                    Value::Object(_) => args,
+                    other => other,
+                };
+                fixed.push(json!({
+                    "id": id,
+                    "type": "function",
+                    "function": { "name": name, "arguments": args_obj }
+                }));
+            }
+            out["tool_calls"] = Value::Array(fixed);
+            out
+        })
+        .collect()
+}
+
+/// Parse a finished Ollama `/api/chat` JSON body into a [`Reply`].
+pub fn parse_ollama_reply(text: &str) -> Result<Reply, String> {
+    let value: Value = serde_json::from_str(text).map_err(|err| format!("Bad response: {err}"))?;
+    let raw = value
+        .get("message")
+        .cloned()
+        .ok_or_else(|| "Response has no message".to_string())?;
+    let mut content = message_text(&raw["content"]);
+    let mut calls = structured_calls(&raw);
+    if calls.is_empty() {
+        let (found, stripped) = extract_textual(&content);
+        if found.is_empty() {
+            let (from_reason, _) = extract_textual(&reasoning_text(&raw));
+            if from_reason.is_empty() {
+                if content.trim().is_empty() {
+                    content = reasoning_text(&raw);
+                }
+            } else {
+                calls = from_reason;
+                content.clear();
+            }
+        } else {
+            calls = found;
+            content = stripped;
+        }
+    }
+    Ok(reply_from_parts(content, calls))
 }
 
 fn models_without_tools() -> &'static Mutex<HashSet<String>> {
@@ -1077,12 +1194,13 @@ pub async fn complete(
     options: CompleteOptions<'_>,
 ) -> Result<Reply, String> {
     if options.stream
-        && let Ok(reply) =
-            complete_stream(client, server, model, messages, options.api_key, true, |_| {}).await
+        && let Ok(reply) = complete_stream(client, server, model, messages, options, |_| {}).await
     {
         return Ok(reply);
     }
-    complete_once(client, server, model, messages, options.api_key, false, true).await
+    let mut options = options;
+    options.stream = false;
+    complete_once(client, server, model, messages, options, true).await
 }
 
 pub async fn complete_with_delta<F>(
@@ -1097,22 +1215,14 @@ where
     F: FnMut(&str),
 {
     if options.stream {
-        match complete_stream(
-            client,
-            server,
-            model,
-            messages,
-            options.api_key,
-            true,
-            &mut on_delta,
-        )
-        .await
-        {
+        match complete_stream(client, server, model, messages, options, &mut on_delta).await {
             Ok(reply) => return Ok(reply),
             Err(_) => {}
         }
     }
-    complete_once(client, server, model, messages, options.api_key, false, true).await
+    let mut options = options;
+    options.stream = false;
+    complete_once(client, server, model, messages, options, true).await
 }
 
 async fn complete_once(
@@ -1120,11 +1230,17 @@ async fn complete_once(
     server: &str,
     model: &str,
     messages: &[Value],
-    api_key: &str,
-    stream: bool,
+    options: CompleteOptions<'_>,
     allow_tools: bool,
 ) -> Result<Reply, String> {
-    let url = completions_url(server);
+    let native = options.ollama_native;
+    let url = if native {
+        ollama_chat_url(server)
+    } else {
+        completions_url(server)
+    };
+    let api_key = options.api_key;
+    let stream = options.stream;
     let mut allow_tools = allow_tools;
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
@@ -1142,8 +1258,14 @@ async fn complete_once(
             owned = messages_with_tool_prompt(&working);
             owned.as_slice()
         };
-        let request = apply_auth(client.post(&url), api_key)
-            .json(&request_body(model, msgs, &tools, stream));
+        let ollama_msgs;
+        let body = if native {
+            ollama_msgs = messages_for_ollama_native(msgs);
+            ollama_request_body(model, &ollama_msgs, &tools, stream, options.num_ctx)
+        } else {
+            request_body(model, msgs, &tools, stream)
+        };
+        let request = apply_auth(client.post(&url), api_key).json(&body);
         let response = request
             .send()
             .await
@@ -1167,7 +1289,11 @@ async fn complete_once(
             let snippet: String = text.chars().take(300).collect();
             return Err(format!("Server returned {status}: {snippet}"));
         }
-        let mut reply = parse_reply(&text)?;
+        let mut reply = if native {
+            parse_ollama_reply(&text)?
+        } else {
+            parse_reply(&text)?
+        };
         reply.history_flattened = flattened;
         return Ok(reply);
     }
@@ -1178,15 +1304,18 @@ async fn complete_stream<F>(
     server: &str,
     model: &str,
     messages: &[Value],
-    api_key: &str,
-    allow_tools: bool,
+    options: CompleteOptions<'_>,
     mut on_delta: F,
 ) -> Result<Reply, String>
 where
     F: FnMut(&str),
 {
+    if options.ollama_native {
+        return complete_ollama_stream(client, server, model, messages, options, on_delta).await;
+    }
     let url = completions_url(server);
-    let mut allow_tools = allow_tools;
+    let api_key = options.api_key;
+    let mut allow_tools = true;
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     let response = loop {
@@ -1295,6 +1424,138 @@ let mut assembler = StreamAssembler::default();
         return Err("Stream produced no events".to_string());
     }
     let mut reply = assembler.into_reply()?;
+    reply.history_flattened = history_flattened;
+    if hold_deltas {
+        if reply.calls.is_empty() {
+            if !held.is_empty() {
+                on_delta(&held);
+            }
+        } else if !reply.content.trim().is_empty() {
+            on_delta(&reply.content);
+        }
+    }
+    Ok(reply)
+}
+
+async fn complete_ollama_stream<F>(
+    client: &reqwest::Client,
+    server: &str,
+    model: &str,
+    messages: &[Value],
+    options: CompleteOptions<'_>,
+    mut on_delta: F,
+) -> Result<Reply, String>
+where
+    F: FnMut(&str),
+{
+    let url = ollama_chat_url(server);
+    let mut allow_tools = true;
+    let mut flattened = false;
+    let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
+    let response = loop {
+        let use_tools = allow_tools && !model_skips_tools(model);
+        let tools = if use_tools {
+            tool_specs()
+        } else {
+            Vec::new()
+        };
+        let owned;
+        let msgs = if use_tools {
+            working.as_slice()
+        } else {
+            owned = messages_with_tool_prompt(&working);
+            owned.as_slice()
+        };
+        let ollama_msgs = messages_for_ollama_native(msgs);
+        let body = ollama_request_body(model, &ollama_msgs, &tools, true, options.num_ctx);
+        let request = apply_auth(client.post(&url), options.api_key).json(&body);
+        let response = request
+            .send()
+            .await
+            .map_err(|err| format!("Cannot reach {url}: {err}"))?;
+        let status = response.status();
+        if status.is_success() {
+            break response;
+        }
+        let text = response.text().await.unwrap_or_default();
+        if use_tools && tools_not_supported(status, &text) {
+            remember_model_without_tools(model);
+            allow_tools = false;
+            continue;
+        }
+        if !flattened && invalid_tool_call_arguments(status, &text) {
+            working = flatten_tool_history(&working);
+            flattened = true;
+            continue;
+        }
+        let snippet: String = text.chars().take(300).collect();
+        return Err(format!("Server returned {status}: {snippet}"));
+    };
+    let history_flattened = flattened;
+    let mut content = String::new();
+    let mut tool_calls = Value::Null;
+    let mut byte_buf: Vec<u8> = Vec::new();
+    let mut line_buf = String::new();
+    let mut saw_event = false;
+    let mut hold_deltas = false;
+    let mut held = String::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| format!("Stream read failed: {err}"))?;
+        byte_buf.extend_from_slice(&chunk);
+        let _ = append_valid_utf8(&mut line_buf, &mut byte_buf);
+        while let Some(newline) = line_buf.find('\n') {
+            let mut line = line_buf[..newline].to_string();
+            line_buf.drain(..=newline);
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            saw_event = true;
+            if let Some(message) = value.get("message") {
+                if let Some(piece) = message.get("content").and_then(|v| v.as_str()) {
+                    if !piece.is_empty() {
+                        content.push_str(piece);
+                        if !hold_deltas && content_looks_like_tool_prefix(&content) {
+                            hold_deltas = true;
+                        }
+                        if hold_deltas {
+                            held.push_str(piece);
+                        } else {
+                            on_delta(piece);
+                        }
+                    }
+                }
+                if let Some(calls) = message.get("tool_calls") {
+                    if !calls.is_null() {
+                        tool_calls = calls.clone();
+                    }
+                }
+            }
+        }
+    }
+    if !saw_event {
+        return Err("Stream produced no events".to_string());
+    }
+    let mut raw = json!({"role": "assistant", "content": content});
+    if !tool_calls.is_null() {
+        raw["tool_calls"] = tool_calls;
+    }
+    let mut calls = structured_calls(&raw);
+    if calls.is_empty() {
+        let (found, stripped) = extract_textual(&content);
+        if !found.is_empty() {
+            calls = found;
+            content = stripped;
+        }
+    }
+    let mut reply = reply_from_parts(content, calls);
     reply.history_flattened = history_flattened;
     if hold_deltas {
         if reply.calls.is_empty() {
@@ -1588,10 +1849,7 @@ mod tests {
             &server_url,
             "qwen",
             &messages,
-            CompleteOptions {
-                api_key: "secret-key",
-                stream: false,
-            },
+            CompleteOptions { api_key: "secret-key", stream: false, num_ctx: None, ollama_native: false },
         )
         .await
         .unwrap();
@@ -1624,10 +1882,7 @@ mod tests {
             &server_url,
             "qwen",
             &messages,
-            CompleteOptions {
-                api_key: "",
-                stream: true,
-            },
+            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
             |text| pieces.push(text.to_string()),
         )
         .await
@@ -1664,10 +1919,7 @@ mod tests {
             &server_url,
             "qwen2.5-coder:7b",
             &messages,
-            CompleteOptions {
-                api_key: "",
-                stream: true,
-            },
+            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
             |text| pieces.push(text.to_string()),
         )
         .await
@@ -1748,10 +2000,7 @@ mod tests {
             &server_url,
             "qwen",
             &messages,
-            CompleteOptions {
-                api_key: "",
-                stream: true,
-            },
+            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
         )
         .await
         .unwrap();
@@ -1813,7 +2062,43 @@ mod tests {
     }
 
     #[test]
-    fn request_body_omits_tools_when_empty() {
+    fn ollama_chat_url_strips_v1() {
+        assert_eq!(
+            ollama_chat_url("http://127.0.0.1:11434/v1"),
+            "http://127.0.0.1:11434/api/chat"
+        );
+        assert_eq!(
+            ollama_chat_url("http://127.0.0.1:11434/v1/"),
+            "http://127.0.0.1:11434/api/chat"
+        );
+    }
+
+    #[test]
+    fn ollama_request_body_sets_num_ctx() {
+        let body = ollama_request_body("qwen", &[], &[], false, Some(16384));
+        assert_eq!(body["options"]["num_ctx"], 16384);
+        assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn messages_for_ollama_native_objectifies_arguments() {
+        let args = "{\"path\":\"a.rs\"}";
+        let messages = [json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "c1",
+                "type": "function",
+                "function": { "name": "read_file", "arguments": args }
+            }]
+        })];
+        let out = messages_for_ollama_native(&messages);
+        assert!(out[0]["tool_calls"][0]["function"]["arguments"].is_object());
+        assert_eq!(out[0]["tool_calls"][0]["function"]["arguments"]["path"], "a.rs");
+    }
+
+    #[test]
+        fn request_body_omits_tools_when_empty() {
         let body = request_body("tiny", &[], &[], false);
         assert!(body.get("tools").is_none(), "{body}");
     }
@@ -2096,10 +2381,7 @@ mod tests {
             "http://127.0.0.1:11434/v1",
             "qwen2.5-coder:0.5b",
             &messages,
-            CompleteOptions {
-                api_key: "",
-                stream: true,
-            },
+            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
             |text| pieces.push(text.to_string()),
         )
         .await;
