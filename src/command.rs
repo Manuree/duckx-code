@@ -95,6 +95,8 @@ pub enum CommandId {
     About,
     /// Open, focus, or close the assistant panel.
     Agent,
+    /// Clear assistant transcript and tool memory (new chat).
+    AgentNew,
     /// Open the workspace file picker.
     FilePicker,
     /// Leave this folder and open another one.
@@ -537,8 +539,17 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::Agent,
         name: "agent",
-        description: "Open the assistant panel",
+        description: "Open the assistant panel (agent new clears chat)",
         shortcut: "F6",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::AgentNew,
+        name: "clear",
+        description: "Start a new assistant chat",
+        shortcut: "Ctrl+L",
         arg: None,
         editor: true,
         explorer: false,
@@ -676,6 +687,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::CloseAll => 380,
         CommandId::Settings => 390,
         CommandId::Agent => 392,
+        CommandId::AgentNew => 393,
         CommandId::About => 395,
         CommandId::Quit => 400,
     }
@@ -686,6 +698,7 @@ pub fn aliases(id: CommandId) -> &'static [&'static str] {
     match id {
         CommandId::Settings => &["config"],
         CommandId::CloseView => &["clean-view"],
+        CommandId::AgentNew => &["agent-new"],
         _ => &[],
     }
 }
@@ -1006,6 +1019,7 @@ mod tests {
                 "close-all",
                 "setting",
                 "agent",
+                "clear",
                 "about",
                 "quit",
             ]

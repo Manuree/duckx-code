@@ -8,9 +8,11 @@ use crate::jobs::Job;
 
 use super::App;
 
-const HISTORY: usize = 12;
-const MEMORY_BUDGET: usize = 6_000;
-const MEMORY_TOOL_CLIP: usize = 400;
+const HISTORY: usize = 8;
+const MEMORY_BUDGET: usize = 2_500;
+const MEMORY_TOOL_CLIP: usize = 180;
+/// Conservative chars/token for Thai/CJK-heavy prompts.
+const CHARS_PER_TOKEN: f64 = 3.5;
 
 impl App {
     /// Next frame of the wait spinner. Idle turns stay on the current frame.
@@ -109,6 +111,10 @@ impl App {
     pub(super) fn handle_agent_input(&mut self, action: AgentAction) {
         if self.agent.pending.is_some() {
             match action {
+                AgentAction::NewChat => {
+                    self.clear_agent_chat();
+                    return;
+                }
                 AgentAction::Submit => self.resolve_pending_tool(true),
                 AgentAction::Close => self.resolve_pending_tool(false),
                 AgentAction::Insert(text) => {
@@ -191,9 +197,27 @@ impl App {
                 }
                 self.agent.focused = false;
             }
+            AgentAction::NewChat => self.clear_agent_chat(),
             AgentAction::Submit if !self.agent.reading => self.submit_agent(),
             AgentAction::Submit => {}
         }
+    }
+
+    /// Drop transcript + tool memory so the next turn starts fresh.
+    pub(super) fn clear_agent_chat(&mut self) {
+        if self.agent.busy {
+            self.cancel_agent();
+        }
+        self.agent.pending = None;
+        self.agent.memory.clear();
+        self.agent.transcript.clear();
+        self.agent.stream_draft = None;
+        self.agent.scroll = 0;
+        self.agent.reading = false;
+        self.agent.status = "new chat".to_string();
+        self.push_line(false, "New chat — prior tool memory cleared.".to_string());
+        self.agent.status = "ready".to_string();
+        self.focus_agent();
     }
 
     fn submit_agent(&mut self) {
@@ -214,7 +238,7 @@ impl App {
             self.message = Some("Assistant is not running".to_string());
             return;
         };
-        let history = budget_memory(&self.agent.memory);
+        let ctx = self.ai.resolved_context_size();
         self.agent.turn = self.agent.turn.saturating_add(1);
         let id = self.agent.turn;
         self.push_line(true, prompt.clone());
@@ -223,18 +247,22 @@ impl App {
 editor_state:
 {}", self.tool_state());
         self.remember_user(&prompt);
+        let history = budget_memory(&self.agent.memory, ctx, &prompt);
         self.agent.prompt.clear();
         self.agent.cursor = 0;
         self.agent.anchor = 0;
         self.agent.busy = true;
         self.agent.stream_draft = None;
         self.agent.status = "waiting".to_string();
+        let ollama_native = self.ai.provider == crate::settings::AiProvider::Ollama;
         let _ = tx.send(AgentCommand::Turn {
             id,
             server: self.ai.endpoint(),
             model: self.ai.model.trim().to_string(),
             api_key: self.ai.api_key.clone(),
             stream: self.ai.streaming,
+            num_ctx: Some(ctx),
+            ollama_native,
             history,
             prompt,
         });
@@ -808,16 +836,50 @@ impl App {
     }
 }
 
-fn budget_memory(memory: &[serde_json::Value]) -> Vec<serde_json::Value> {
+fn estimate_tokens(text: &str) -> usize {
+    let chars = text.chars().count() as f64;
+    (chars / CHARS_PER_TOKEN).ceil() as usize
+}
+
+fn estimate_message_tokens(message: &serde_json::Value) -> usize {
+    estimate_tokens(&message.to_string())
+}
+
+/// Keep system+tools+current user outside; drop oldest history/tool-trail first.
+fn budget_memory(
+    memory: &[serde_json::Value],
+    context_tokens: u32,
+    current_prompt: &str,
+) -> Vec<serde_json::Value> {
     let mut out: Vec<_> = memory.iter().map(sanitize_memory_message).collect();
+    // Current user message is appended by the worker; drop a trailing duplicate user if present.
+    if out
+        .last()
+        .and_then(|last| last.get("role"))
+        .and_then(|r| r.as_str())
+        == Some("user")
+    {
+        out.pop();
+    }
     trim_memory(&mut out);
     let keep = HISTORY.saturating_mul(2).max(4);
     if out.len() > keep {
-        // Drop whole messages from the front; never slice inside arguments JSON.
         out.drain(0..out.len() - keep);
     }
-    // Keep tool_call / tool result pairs coherent when possible.
     reconcile_tool_pairs(&mut out);
+
+    let system_reserve = estimate_tokens(agent::SYSTEM) + 900; // tools + reply margin
+    let prompt_tokens = estimate_tokens(current_prompt);
+    let history_budget = (context_tokens as usize)
+        .saturating_sub(system_reserve)
+        .saturating_sub(prompt_tokens)
+        .max(256);
+    while !out.is_empty()
+        && out.iter().map(estimate_message_tokens).sum::<usize>() > history_budget
+    {
+        out.remove(0);
+        reconcile_tool_pairs(&mut out);
+    }
     out
 }
 
@@ -896,7 +958,13 @@ fn compact_arguments_for_memory(arguments: &str) -> String {
 }
 
 fn summarize_tool_result(content: &str) -> String {
-    clip(content, MEMORY_TOOL_CLIP)
+    let trimmed = content.trim();
+    if trimmed.chars().count() <= MEMORY_TOOL_CLIP {
+        return trimmed.to_string();
+    }
+    // Prefer a short head that still names the outcome.
+    let head: String = trimmed.chars().take(MEMORY_TOOL_CLIP.saturating_sub(20)).collect();
+    format!("{head}… (truncated)")
 }
 
 fn trim_memory(memory: &mut Vec<serde_json::Value>) {

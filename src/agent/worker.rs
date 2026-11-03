@@ -54,6 +54,8 @@ async fn run(
                 model,
                 api_key,
                 stream,
+                num_ctx,
+                ollama_native,
                 history,
                 prompt,
             } => {
@@ -66,6 +68,8 @@ async fn run(
                     &model,
                     &api_key,
                     stream,
+                    num_ctx,
+                    ollama_native,
                     history,
                     prompt,
                 )
@@ -82,6 +86,7 @@ async fn run(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_turn(
     client: &reqwest::Client,
     events: &mpsc::UnboundedSender<AgentEvent>,
@@ -91,6 +96,8 @@ async fn run_turn(
     model: &str,
     api_key: &str,
     stream: bool,
+    num_ctx: Option<u32>,
+    ollama_native: bool,
     history: Vec<Value>,
     prompt: String,
 ) -> Result<(), String> {
@@ -100,6 +107,7 @@ async fn run_turn(
     messages.push(json!({"role": "user", "content": prompt}));
 
     let mut trail = ToolTrail::default();
+    let mut nudged = false;
     loop {
         let Some(reply) = complete_or_cancel(
             client,
@@ -110,6 +118,8 @@ async fn run_turn(
             model,
             api_key,
             stream,
+            num_ctx,
+            ollama_native,
             &messages,
         )
         .await?
@@ -120,6 +130,15 @@ async fn run_turn(
             let _ = events.send(AgentEvent::ResetMemory { id });
         }
         if reply.calls.is_empty() {
+            if !nudged && wants_file_action(&prompt) && looks_like_manual_steps(&reply.content) {
+                nudged = true;
+                messages.push(json!({"role": "assistant", "content": reply.content}));
+                messages.push(json!({
+                    "role": "user",
+                    "content": "Use a tool call now (create_file or apply_edit). Do not give steps or paste file contents as instructions. Approval is handled by the app."
+                }));
+                continue;
+            }
             let text = if reply.content.trim().is_empty() {
                 "The model sent an empty reply. Send it again. A thinking model can spend the whole reply before it writes anything, and a local server drops a tool call whose name is not in the tool list.".to_string()
             } else {
@@ -222,6 +241,44 @@ impl ToolTrail {
     }
 }
 
+fn wants_file_action(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    const KEYS: &[&str] = &[
+        "create",
+        "write",
+        "edit",
+        "make a file",
+        "new file",
+        "สร้าง",
+        "เขียน",
+        "แก้",
+        "ทำไฟล์",
+        "สร้างไฟล์",
+        "แก้ไฟล์",
+    ];
+    KEYS.iter().any(|k| lower.contains(k))
+}
+
+fn looks_like_manual_steps(content: &str) -> bool {
+    let text = content.trim();
+    if text.is_empty() {
+        return false;
+    }
+    if text.contains("```") {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    lower.contains("step 1")
+        || lower.contains("1.")
+        || lower.contains("you can")
+        || lower.contains("you should")
+        || lower.contains("เปิดไฟล์")
+        || lower.contains("สร้างไฟล์เอง")
+        || lower.contains("ทำตาม")
+        || lower.contains("ดังนี้")
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn complete_or_cancel(
     client: &reqwest::Client,
     commands: &mut mpsc::UnboundedReceiver<AgentCommand>,
@@ -231,9 +288,16 @@ async fn complete_or_cancel(
     model: &str,
     api_key: &str,
     stream: bool,
+    num_ctx: Option<u32>,
+    ollama_native: bool,
     messages: &[Value],
 ) -> Result<Option<Reply>, String> {
-    let options = CompleteOptions { api_key, stream };
+    let options = CompleteOptions {
+        api_key,
+        stream,
+        num_ctx,
+        ollama_native,
+    };
     let events = events.clone();
     let request = async move {
         if stream {

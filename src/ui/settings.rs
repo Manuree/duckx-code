@@ -44,7 +44,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         .then(|| page.section().items.get(page.row).map(|item| item.id))
         .flatten();
     let binding = matches!(row_id, Some(SettingId::Binding(_)));
-    let text_row = matches!(row_id, Some(SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey));
+    let text_row = matches!(row_id, Some(SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize));
     let footer = if page.text.is_some() {
         " type    enter save    esc cancel"
     } else if page.capture {
@@ -300,6 +300,14 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool, drafting:
                 "••••••••".to_string()
             }
         }
+        SettingId::AiContextSize => {
+            let raw = app.ai.context_size.trim();
+            if raw.is_empty() {
+                format!("{} (default)", app.ai.resolved_context_size())
+            } else {
+                app.ai.context_size.clone()
+            }
+        }
     }
 }
 
@@ -342,7 +350,7 @@ fn paint_menu(
         id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
             crate::settings::AiPrefs::choice_names(id)
         }
-        SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::Binding(_) => return,
+        SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize | SettingId::Binding(_) => return,
     };
     if names.is_empty() || width < 8 || footer_row == 0 {
         return;

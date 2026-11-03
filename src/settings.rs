@@ -47,6 +47,8 @@ pub enum SettingId {
     AiApiKey,
     /// Stream assistant tokens with SSE; falls back when the server cannot.
     AiStreaming,
+    /// Prompt context window size in tokens (Ollama `num_ctx`). `auto` uses 16384.
+    AiContextSize,
 }
 
 /// How a new line is ended. `Auto` keeps the ending detected in the file.
@@ -299,6 +301,14 @@ pub struct AiPrefs {
     /// Try SSE streaming first (default on).
     #[serde(default = "enabled")]
     pub streaming: bool,
+    /// Context window size sent to Ollama as `num_ctx`. Empty/`auto` → 16384.
+    /// LM Studio ignores this (set context in LM Studio).
+    #[serde(default = "default_context_size")]
+    pub context_size: String,
+}
+
+fn default_context_size() -> String {
+    "16384".to_string()
 }
 
 impl Default for AiPrefs {
@@ -311,13 +321,14 @@ impl Default for AiPrefs {
             api_key: String::new(),
             auto_approve: false,
             streaming: true,
+            context_size: default_context_size(),
         }
     }
 }
 
 impl AiPrefs {
     pub fn is_text(id: SettingId) -> bool {
-        matches!(id, SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey)
+        matches!(id, SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize)
     }
 
     /// URL the assistant posts to, including `/v1`.
@@ -402,8 +413,21 @@ impl AiPrefs {
             SettingId::AiServer => self.server.clear(),
             SettingId::AiModel => self.model.clear(),
             SettingId::AiApiKey => self.api_key.clear(),
+            SettingId::AiContextSize => self.context_size = default_context_size(),
             _ => {}
         }
+    }
+
+    /// Tokens for the prompt window. `auto` / empty / invalid → 16384.
+    pub fn resolved_context_size(&self) -> u32 {
+        let raw = self.context_size.trim();
+        if raw.is_empty() || raw.eq_ignore_ascii_case("auto") {
+            return 16384;
+        }
+        raw.parse::<u32>()
+            .ok()
+            .filter(|n| (1024..=262_144).contains(n))
+            .unwrap_or(16384)
     }
 }
 
@@ -896,6 +920,11 @@ pub fn sections() -> &'static [Section] {
                             label: "Auto-approve tools",
                             detail: "Run apply_edit, create_file, and save without asking Allow / Deny.",
                             id: SettingId::AiAutoApprove,
+                        },
+                        Item {
+                            label: "Context size",
+                            detail: "Token window for Ollama (num_ctx). Default 16384. Type auto or a number. LM Studio: set context there instead.",
+                            id: SettingId::AiContextSize,
                         },
                     ],
                 ),

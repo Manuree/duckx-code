@@ -2425,6 +2425,13 @@ impl App {
             SettingId::AiServer => self.ai.endpoint(),
             SettingId::AiModel => self.ai.model.clone(),
             SettingId::AiApiKey => self.ai.api_key.clone(),
+            SettingId::AiContextSize => {
+                if self.ai.context_size.trim().is_empty() {
+                    self.ai.resolved_context_size().to_string()
+                } else {
+                    self.ai.context_size.clone()
+                }
+            }
             _ => return,
         };
         if let Some(page) = self.settings.as_mut() {
@@ -2467,6 +2474,16 @@ impl App {
                 self.ai.api_key = value;
                 changed
             }
+            Some(SettingId::AiContextSize) => {
+                let stored = if value.is_empty() {
+                    "16384".to_string()
+                } else {
+                    value
+                };
+                let changed = stored != self.ai.context_size;
+                self.ai.context_size = stored;
+                changed
+            }
             _ => false,
         };
         if let Some(page) = self.settings.as_mut() {
@@ -2502,7 +2519,7 @@ impl App {
             id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
                 self.ai.set_choice(id, index);
             }
-            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::Binding(_) => return,
+            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize | SettingId::Binding(_) => return,
         }
         if let Some(menu) = self.settings.as_mut().and_then(|page| page.menu.as_mut()) {
             menu.index = index;
@@ -2534,7 +2551,7 @@ impl App {
             id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
                 self.ai.restore_choice(id, origin);
             }
-            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::Binding(_) => {}
+            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize | SettingId::Binding(_) => {}
         }
     }
 
@@ -2554,7 +2571,7 @@ impl App {
             | SettingId::FormatOnSave
             | SettingId::PythonChecking) => self.appearance.lsp.choice_token(id),
             id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => self.ai.choice_token(id),
-            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::Binding(_) => String::new(),
+            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize | SettingId::Binding(_) => String::new(),
         }
     }
 
@@ -2594,7 +2611,7 @@ impl App {
                 self.ai.choice_token(id),
                 AiPrefs::choice_names(id).len(),
             ),
-            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::Binding(_) => return None,
+            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize | SettingId::Binding(_) => return None,
         };
         Some((index, token, len))
     }
@@ -2673,7 +2690,8 @@ impl App {
             | SettingId::AiProvider
             | SettingId::AiServer
             | SettingId::AiModel
-            | SettingId::AiApiKey) => self.ai.reset(id),
+            | SettingId::AiApiKey
+            | SettingId::AiContextSize) => self.ai.reset(id),
         }
     }
 
@@ -3714,7 +3732,11 @@ impl App {
                 self.settings = None;
                 self.about = true;
             }
-            CommandId::Agent => self.toggle_agent(),
+            CommandId::Agent => match arg.map(str::trim) {
+                Some("new") | Some("clear") => self.clear_agent_chat(),
+                _ => self.toggle_agent(),
+            },
+            CommandId::AgentNew => self.clear_agent_chat(),
             CommandId::FilePicker => self.open_file_picker(),
             CommandId::Workspace => self.request_workspace(arg.unwrap_or(""))?,
             CommandId::Diff => self.toggle_diff(),
