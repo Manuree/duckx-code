@@ -504,4 +504,42 @@ mod tests {
             reply.calls[0].arguments
         );
     }
+
+    #[tokio::test]
+    async fn posts_an_openai_compatible_chat_completion() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            assert!(request.starts_with("POST /v1/chat/completions"), "{request}");
+            assert!(request.contains("\"model\":\"qwen\""), "{request}");
+            assert!(request.contains("\"tools\":"), "{request}");
+            assert!(request.contains("read_file"), "{request}");
+            assert!(!request.contains("\"stream\":true"), "{request}");
+            let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let server_url = format!("http://{addr}/v1");
+        let messages = [serde_json::json!({"role":"user","content":"hi"})];
+        let reply = complete(&client, &server_url, "qwen", &messages)
+            .await
+            .unwrap();
+        assert_eq!(reply.content, "ok");
+        assert!(reply.calls.is_empty());
+        server.join().unwrap();
+    }
 }

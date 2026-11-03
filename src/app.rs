@@ -2446,7 +2446,7 @@ impl App {
             | SettingId::PythonChecking) => {
                 self.appearance.lsp.set_choice(id, index);
             }
-            id @ (SettingId::AiEnabled | SettingId::AiProvider) => {
+            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiProvider) => {
                 self.ai.set_choice(id, index);
             }
             SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => return,
@@ -2478,7 +2478,7 @@ impl App {
             | SettingId::PythonChecking) => {
                 self.appearance.lsp.restore_choice(id, origin);
             }
-            id @ (SettingId::AiEnabled | SettingId::AiProvider) => {
+            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiProvider) => {
                 self.ai.restore_choice(id, origin);
             }
             SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => {}
@@ -2500,7 +2500,7 @@ impl App {
             | SettingId::CheckOnSave
             | SettingId::FormatOnSave
             | SettingId::PythonChecking) => self.appearance.lsp.choice_token(id),
-            id @ (SettingId::AiEnabled | SettingId::AiProvider) => self.ai.choice_token(id),
+            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiProvider) => self.ai.choice_token(id),
             SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => String::new(),
         }
     }
@@ -2536,7 +2536,7 @@ impl App {
                 self.appearance.lsp.choice_token(id),
                 LspPrefs::choice_names(id).len(),
             ),
-            id @ (SettingId::AiEnabled | SettingId::AiProvider) => (
+            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiProvider) => (
                 self.ai.choice_index(id),
                 self.ai.choice_token(id),
                 AiPrefs::choice_names(id).len(),
@@ -2615,6 +2615,7 @@ impl App {
             SettingId::FormatOnSave => self.appearance.lsp.format_on_save = false,
             SettingId::PythonChecking => self.appearance.lsp.python = PythonCheck::Basic,
             id @ (SettingId::AiEnabled
+            | SettingId::AiAutoApprove
             | SettingId::AiProvider
             | SettingId::AiServer
             | SettingId::AiModel) => self.ai.reset(id),
@@ -6126,6 +6127,81 @@ mod tests {
         assert!(prompt.contains("python.py"), "{prompt}");
         assert!(prompt.contains("line: 8"), "{prompt}");
         assert_eq!(app.agent.transcript.last().unwrap().text, "add hello");
+    }
+
+    #[test]
+    fn mutating_tools_wait_for_allow_or_deny() {
+        let root = std::env::temp_dir().join(format!(
+            "duckx-approve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("demo.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+        let mut app = App::new(Buffer::from_text("hello\n"), Some(file.clone()));
+        app.explorer = crate::explorer::Explorer::new(root.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.attach_agent(tx);
+        app.ai.model = "qwen".into();
+        app.agent.busy = true;
+        app.agent.turn = 1;
+        let args = format!(
+            r#"{{"path":"{}","find":"hello","replace":"hi"}}"#,
+            file.display()
+        );
+        app.handle_agent(crate::agent::AgentEvent::Tool {
+            id: 1,
+            call_id: "c1".into(),
+            name: "apply_edit".into(),
+            arguments: args.clone(),
+        });
+        assert!(app.agent.pending.is_some());
+        assert!(app.agent.status.contains("approve"), "{}", app.agent.status);
+        assert!(rx.try_recv().is_err(), "tool must not run before Allow");
+
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "n".into(),
+        )));
+        let crate::agent::AgentCommand::ToolResult { content, .. } = rx.try_recv().unwrap() else {
+            panic!("deny must reply to the worker");
+        };
+        assert!(content.contains("denied"), "{content}");
+        assert!(app.agent.pending.is_none());
+        assert_eq!(app.buffer().rope().to_string(), "hello\n");
+
+        app.agent.busy = true;
+        app.handle_agent(crate::agent::AgentEvent::Tool {
+            id: 1,
+            call_id: "c2".into(),
+            name: "apply_edit".into(),
+            arguments: args,
+        });
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Submit));
+        assert!(app.agent.pending.is_none());
+        assert_eq!(app.buffer().rope().to_string(), "hi\n");
+        let crate::agent::AgentCommand::ToolResult { content, .. } = rx.try_recv().unwrap() else {
+            panic!("allow must reply");
+        };
+        assert!(content.contains("Replaced"), "{content}");
+
+        app.ai.auto_approve = true;
+        app.agent.busy = true;
+        app.handle_agent(crate::agent::AgentEvent::Tool {
+            id: 1,
+            call_id: "c3".into(),
+            name: "apply_edit".into(),
+            arguments: format!(
+                r#"{{"path":"{}","find":"hi","replace":"hey"}}"#,
+                file.display()
+            ),
+        });
+        assert!(app.agent.pending.is_none());
+        assert_eq!(app.buffer().rope().to_string(), "hey\n");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

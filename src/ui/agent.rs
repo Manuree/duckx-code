@@ -115,6 +115,15 @@ struct DrawnLine {
 
 fn transcript_lines(app: &App, content: usize) -> Vec<DrawnLine> {
     let mut lines = Vec::new();
+    if let Some(pending) = &app.agent.pending {
+        for (index, row) in pending.summary.lines().enumerate() {
+            let mark = if index == 0 { "!" } else { " " };
+            lines.push(DrawnLine {
+                user: false,
+                text: format!(" {mark} {row}"),
+            });
+        }
+    }
     for message in &app.agent.transcript {
         let chars: Vec<char> = message.text.chars().collect();
         for (index, (start, end)) in wrap_rows(&message.text, content).into_iter().enumerate() {
@@ -179,6 +188,9 @@ fn prompt_line(
 }
 
 fn status_label(app: &App) -> String {
+    if app.agent.pending.is_some() {
+        return app.agent.status.clone();
+    }
     if !app.agent.busy {
         return app.agent.status.clone();
     }

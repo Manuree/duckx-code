@@ -276,7 +276,7 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool, drafting:
         | SettingId::PythonChecking) => {
             format!("{} {mark}", app.appearance.lsp.choice_label(id))
         }
-        id @ (SettingId::AiEnabled | SettingId::AiProvider) => {
+        id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiProvider) => {
             format!("{} {mark}", app.ai.choice_label(id))
         }
         SettingId::AiServer => {
@@ -332,7 +332,7 @@ fn paint_menu(
         | SettingId::CheckOnSave
         | SettingId::FormatOnSave
         | SettingId::PythonChecking) => crate::settings::LspPrefs::choice_names(id),
-        id @ (SettingId::AiEnabled | SettingId::AiProvider) => {
+        id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiProvider) => {
             crate::settings::AiPrefs::choice_names(id)
         }
         SettingId::AiServer | SettingId::AiModel | SettingId::Binding(_) => return,

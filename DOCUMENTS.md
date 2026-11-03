@@ -596,7 +596,7 @@ The choice is written to `settings.json`:
   "editor": { "tab_width": 4, "indent_with_spaces": true, "line_ending": "auto" },
   "files": { "trim_trailing_space": false, "final_newline": false },
   "lsp": { "enabled": true, "check_on_save": true, "format_on_save": false, "python": "basic" },
-  "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "" }
+  "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "", "auto_approve": false }
 }
 ```
 
@@ -630,6 +630,7 @@ A color theme may add a `diagnostics` section with `error`, `warning`, `info`, a
 | Provider | Ollama, OpenAI | Ollama defaults to `http://127.0.0.1:11434/v1`. OpenAI defaults to `http://127.0.0.1:1234/v1` (LM Studio and any later server that speaks the same API). |
 | Server | text | Base address, including `/v1`. Both providers use `POST /v1/chat/completions`. |
 | Model | text | Model name sent as `model`. |
+| Auto-approve tools | On, Off | On runs `apply_edit`, `create_file`, and `save` without asking. Off (default) shows Allow / Deny in the assistant panel. |
 
 Code uses the syntax theme's `text` color. The other syntax roles are stored for highlighting and are what the sample on the Syntax colors row shows.
 
@@ -647,7 +648,7 @@ Code uses the syntax theme's `text` color. The other syntax roles are stored for
 
 Messages and the prompt wrap onto the next row when they are wider than the panel. Printable keys edit the prompt. `Left` and `Right` move the cursor, and `Shift` with either key extends the selection. `Up` and `Down` move between wrapped rows. `Home` and `End` jump to the ends. `Backspace` and `Delete` remove the selection, or one character. `Enter` sends it. `Ctrl + Up` leaves the prompt to read the messages above it. `Up` and `Down` then scroll those messages, `Home` and `End` jump to the top and the latest line, and `Ctrl + Down` returns to the prompt. The model also receives the focused file, the cursor line and column, and any selection, and it is told to edit at that cursor unless the prompt names another place. The chat line stays the text you typed. The panel title reads `ready`, `waiting`, `running read_file` (or another tool), or the server error. While the assistant is waiting or running a tool, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` spins in front of that word. The same tool with the same arguments three times in a row stops the turn, and so does a 33rd tool call. A missing model, or Assistant set to Off, is a status-bar message.
 
-The assistant can run these tools. A path that climbs out of the workspace with `..` is refused.
+The assistant can run these tools. A path that climbs out of the workspace with `..`, or through a symlink that leaves the folder, is refused. Files larger than 2 MB are not read or edited on disk. `apply_edit`, `create_file`, and `save` wait in the assistant panel for Allow (`y` or `Enter`) or Deny (`n` or `Esc`) unless Auto-approve tools is On. Deny returns a tool result to the model so the turn can continue. Read-only tools (`read_file`, `list_dir`, `editor_state`, `diagnostics`, `open_file`, `goto`) run without asking.
 
 | Tool | What it does |
 | :--- | :--- |

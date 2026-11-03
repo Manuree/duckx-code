@@ -3,7 +3,7 @@
 use serde::Deserialize;
 
 use crate::action::AgentAction;
-use crate::agent::{self, AgentCommand, AgentEvent, DiskTask, FileEdit, TranscriptLine};
+use crate::agent::{self, AgentCommand, AgentEvent, DiskTask, FileEdit, PendingTool, TranscriptLine};
 use crate::jobs::Job;
 
 use super::App;
@@ -73,6 +73,39 @@ impl App {
     }
 
     pub(super) fn handle_agent_input(&mut self, action: AgentAction) {
+        if self.agent.pending.is_some() {
+            match action {
+                AgentAction::Submit => self.resolve_pending_tool(true),
+                AgentAction::Close => self.resolve_pending_tool(false),
+                AgentAction::Insert(text) => {
+                    let key = text.trim();
+                    if key.eq_ignore_ascii_case("y") {
+                        self.resolve_pending_tool(true);
+                    } else if key.eq_ignore_ascii_case("n") {
+                        self.resolve_pending_tool(false);
+                    }
+                }
+                AgentAction::Above => {
+                    self.agent.reading = true;
+                    self.agent.scroll = 0;
+                }
+                AgentAction::Below => {
+                    self.agent.reading = false;
+                }
+                AgentAction::Line { down, .. } if self.agent.reading => {
+                    if down {
+                        self.agent.scroll = self.agent.scroll.saturating_sub(1);
+                    } else {
+                        self.agent.scroll = self.agent.scroll.saturating_add(1);
+                    }
+                }
+                AgentAction::Jump { end, .. } if self.agent.reading => {
+                    self.agent.scroll = if end { 0 } else { usize::MAX };
+                }
+                _ => {}
+            }
+            return;
+        }
         match action {
             AgentAction::Insert(text) if !self.agent.reading => self.edit_prompt(&text),
             AgentAction::Backspace if !self.agent.reading => self.delete_prompt(false),
@@ -183,6 +216,7 @@ impl App {
         let id = self.agent.turn;
         self.agent.turn = self.agent.turn.saturating_add(1);
         self.agent.busy = false;
+        self.agent.pending = None;
         self.agent.status = "ready".to_string();
         if let Some(tx) = &self.agent_tx {
             let _ = tx.send(AgentCommand::Cancel { id });
@@ -214,9 +248,108 @@ impl App {
 
     fn run_tool(&mut self, turn: u64, call_id: String, name: &str, arguments: &str) {
         let (name, arguments) = agent::normalize_call(name, arguments);
-        let value = serde_json::from_str::<serde_json::Value>(&arguments)
+        if agent::needs_approval(&name) && !self.ai.auto_approve {
+            self.ask_tool_approval(turn, call_id, name, arguments);
+            return;
+        }
+        self.execute_tool(turn, call_id, &name, &arguments);
+    }
+
+    fn ask_tool_approval(&mut self, turn: u64, call_id: String, name: String, arguments: String) {
+        let summary = self.tool_approval_summary(&name, &arguments);
+        self.agent.status = format!("approve {name}? y/n");
+        self.agent.reading = false;
+        self.agent.pending = Some(PendingTool {
+            turn,
+            call_id,
+            name,
+            arguments,
+            summary,
+        });
+        if !self.agent.open || !self.agent.focused {
+            self.focus_agent();
+        }
+    }
+
+    fn resolve_pending_tool(&mut self, allow: bool) {
+        let Some(pending) = self.agent.pending.take() else {
+            return;
+        };
+        if pending.turn != self.agent.turn || !self.agent.busy {
+            return;
+        }
+        if allow {
+            self.agent.status = format!("running {}", pending.name);
+            self.execute_tool(pending.turn, pending.call_id, &pending.name, &pending.arguments);
+        } else {
+            self.reply_tool(
+                pending.turn,
+                pending.call_id,
+                format!("User denied {}.", pending.name),
+            );
+        }
+    }
+
+    fn tool_approval_summary(&self, name: &str, arguments: &str) -> String {
+        let value = serde_json::from_str::<serde_json::Value>(arguments)
             .unwrap_or(serde_json::Value::Object(Default::default()));
-        let reply = match name.as_str() {
+        let path = value
+            .get("path")
+            .and_then(|path| path.as_str())
+            .unwrap_or("(no path)");
+        match name {
+            "apply_edit" => {
+                if let Some(find) = value.get("find").and_then(|v| v.as_str()) {
+                    let replace = value
+                        .get("replace")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    format!(
+                        "Allow apply_edit on {path}?
+- find: {}
++ replace: {}
+[y] Allow  [n] Deny",
+                        clip(find, 120),
+                        clip(replace, 120)
+                    )
+                } else {
+                    let start = value
+                        .get("start_line")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let end = value
+                        .get("end_line")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(start);
+                    let text = value.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    format!(
+                        "Allow apply_edit on {path} lines {start}-{end}?
+{}
+[y] Allow  [n] Deny",
+                        clip(text, 160)
+                    )
+                }
+            }
+            "create_file" => {
+                let text = value.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                format!(
+                    "Allow create_file {path}?
+{}
+[y] Allow  [n] Deny",
+                    clip(text, 160)
+                )
+            }
+            "save" => format!("Allow save {path}?
+[y] Allow  [n] Deny"),
+            _ => format!("Allow {name} on {path}?
+[y] Allow  [n] Deny"),
+        }
+    }
+
+    fn execute_tool(&mut self, turn: u64, call_id: String, name: &str, arguments: &str) {
+        let value = serde_json::from_str::<serde_json::Value>(arguments)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let reply = match name {
             "shell" => Some(
                 "No shell. Create a file with create_file, or change one with apply_edit."
                     .to_string(),
