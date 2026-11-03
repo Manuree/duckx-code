@@ -71,6 +71,9 @@ async fn run(
                 )
                 .await
                 {
+                    if text.to_ascii_lowercase().contains("invalid tool call arguments") {
+                        let _ = events.send(AgentEvent::ResetMemory { id });
+                    }
                     let _ = events.send(AgentEvent::Failed { id, text });
                 }
             }
@@ -113,6 +116,9 @@ async fn run_turn(
         else {
             return Ok(());
         };
+        if reply.history_flattened {
+            let _ = events.send(AgentEvent::ResetMemory { id });
+        }
         if reply.calls.is_empty() {
             let text = if reply.content.trim().is_empty() {
                 "The model sent an empty reply. Send it again. A thinking model can spend the whole reply before it writes anything, and a local server drops a tool call whose name is not in the tool list.".to_string()
@@ -122,7 +128,46 @@ async fn run_turn(
             let _ = events.send(AgentEvent::Reply { id, text });
             return Ok(());
         }
-        messages.push(reply.message);
+        // Ensure wire-format arguments stay valid JSON strings for the next round-trip.
+        let mut message = reply.message;
+        if let Some(calls) = message.get("tool_calls").cloned() {
+            if let Some(list) = calls.as_array() {
+                let normalized: Vec<_> = list
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, call)| {
+                        let name = call
+                            .pointer("/function/name")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| call.get("name").and_then(|v| v.as_str()))?;
+                        let args = call
+                            .pointer("/function/arguments")
+                            .cloned()
+                            .or_else(|| call.get("arguments").cloned())
+                            .unwrap_or(serde_json::Value::String(String::new()));
+                        let args = match args {
+                            serde_json::Value::String(s) => {
+                                provider::normalize_tool_arguments(&s)
+                            }
+                            other => provider::normalize_tool_arguments(&other.to_string()),
+                        };
+                        let call_id = call
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("call-{index}"));
+                        Some(serde_json::json!({
+                            "id": call_id,
+                            "type": "function",
+                            "function": { "name": name, "arguments": args }
+                        }))
+                    })
+                    .collect();
+                message["tool_calls"] = serde_json::Value::Array(normalized);
+            }
+        }
+        messages.push(message);
         for call in reply.calls {
             if let Some(text) = trail.note(&call.name, &call.arguments) {
                 let _ = events.send(AgentEvent::Reply { id, text });

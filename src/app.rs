@@ -4391,6 +4391,7 @@ impl App {
     /// Opens `path`. `line` is 1-based and moves the cursor when the file is already open.
     /// A file that still has to load keeps the line in the load request.
     fn open_at(&mut self, path: PathBuf, line: Option<usize>) {
+        let path = crate::agent::strip_verbatim(&path);
         self.remember_file(&path);
         if let Some(tab_id) = self.tab_with_path(&path) {
             self.focus_tab(tab_id);

@@ -57,6 +57,7 @@ pub struct Explorer {
 
 impl Explorer {
     pub fn new(root: PathBuf) -> Self {
+        let root = crate::agent::strip_verbatim(&root);
         let root_name = root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
