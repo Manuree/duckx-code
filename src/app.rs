@@ -1027,6 +1027,7 @@ impl App {
     }
 
     /// Rows the assistant panel takes. Zero unless the prompt itself is focused.
+    /// Grows with the prompt (up to 8 wrapped lines) so multi-line input stays visible.
     pub fn agent_rows(&self) -> u16 {
         if self.focus() != Focus::Agent {
             return 0;
@@ -1035,7 +1036,14 @@ impl App {
         if height < 10 {
             return 0;
         }
-        8.min(height / 3).max(4)
+        let base = 8.min(height / 3).max(4);
+        let width = self.screen_width.saturating_sub(2).saturating_sub(3).max(1) as usize;
+        let prompt_lines = crate::agent::wrap_rows(&self.agent.prompt, width)
+            .len()
+            .clamp(1, 8) as u16;
+        // Keep the previous minimum panel size; grow when the prompt needs more rows.
+        let grown = 3u16.saturating_add(prompt_lines);
+        grown.max(base).min(height.saturating_sub(6)).max(4)
     }
 
     pub fn focus(&self) -> Focus {
@@ -6335,6 +6343,52 @@ mod tests {
             "x".into(),
         )));
         assert_eq!(app.agent.prompt, "x");
+    }
+
+    #[test]
+    fn the_prompt_keeps_pasted_newlines_and_joins_on_backspace() {
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "a\nb".into(),
+        )));
+        assert_eq!(app.agent.prompt, "a\nb");
+        assert_eq!(app.agent.cursor, 3);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Move {
+            right: false,
+            extend: false,
+        }));
+        assert_eq!(app.agent.cursor, 2);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Backspace));
+        assert_eq!(app.agent.prompt, "ab");
+        assert_eq!(app.agent.cursor, 1);
+    }
+
+    #[test]
+    fn the_prompt_home_end_stay_on_the_current_wrap_row() {
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        app.set_screen_size(40, 24);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "one\ntwo".into(),
+        )));
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Jump {
+            end: false,
+            extend: false,
+        }));
+        assert_eq!(app.agent.cursor, 4); // start of "two"
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Jump {
+            end: true,
+            extend: false,
+        }));
+        assert_eq!(app.agent.cursor, 7); // end of "two"
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Line {
+            down: false,
+            extend: false,
+        }));
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Jump {
+            end: false,
+            extend: false,
+        }));
+        assert_eq!(app.agent.cursor, 0);
     }
 
     #[test]

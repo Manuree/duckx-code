@@ -162,11 +162,12 @@ impl App {
                     self.agent.scroll = if end { 0 } else { usize::MAX };
                     return;
                 }
-                let at = if end {
-                    self.agent.prompt.chars().count()
-                } else {
-                    0
-                };
+                let width = self.screen_width.saturating_sub(2).saturating_sub(3).max(1) as usize;
+                let rows = agent::wrap_rows(&self.agent.prompt, width);
+                let len = self.agent.prompt.chars().count();
+                let cursor = self.agent.cursor.min(len);
+                let row = prompt_row_for(&rows, cursor, len);
+                let at = if end { rows[row].1 } else { rows[row].0 };
                 self.place_prompt(at, extend);
             }
             AgentAction::Line { down, extend } => {
@@ -751,10 +752,7 @@ impl App {
         let rows = agent::wrap_rows(&self.agent.prompt, width);
         let len = self.agent.prompt.chars().count();
         let cursor = self.agent.cursor.min(len);
-        let row = rows
-            .iter()
-            .rposition(|(start, end)| cursor >= *start && (cursor < *end || *start == *end))
-            .unwrap_or(0);
+        let row = prompt_row_for(&rows, cursor, len);
         let next = if down {
             row.saturating_add(1)
         } else {
@@ -1013,4 +1011,17 @@ struct EditArgs {
     find: Option<String>,
     #[serde(default)]
     replace: Option<String>,
+}
+
+fn prompt_row_for(rows: &[(usize, usize)], cursor: usize, len: usize) -> usize {
+    let cursor = cursor.min(len);
+    rows.iter()
+        .rposition(|(start, end)| {
+            if cursor == len {
+                *end == len || *start == len
+            } else {
+                cursor >= *start && cursor < *end || (*start == *end && cursor == *start)
+            }
+        })
+        .unwrap_or(0)
 }

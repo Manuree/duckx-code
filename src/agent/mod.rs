@@ -6,6 +6,7 @@ mod edit;
 mod path;
 mod provider;
 mod worker;
+mod paste;
 mod wrap;
 
 pub use disk::{DiskTask, MAX_BYTES, check_file_size, create_parent_plan, perform as perform_disk};
@@ -13,6 +14,7 @@ pub use edit::{FileEdit, apply_to_buffer, read_lines, read_lines_rope};
 pub use path::{canonicalize, strip_verbatim, within};
 pub use provider::{content_looks_like_tool_prefix, normalize_tool_arguments};
 pub use worker::spawn;
+pub use paste::{PasteBurst, normalize_paste};
 pub use wrap::{column_at, index_at, next_boundary, prev_boundary, rows as wrap_rows};
 
 use serde_json::{Value, json};
