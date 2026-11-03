@@ -3,16 +3,26 @@
 
 mod disk;
 mod edit;
+mod mention;
 mod path;
 mod provider;
+mod slash;
 mod worker;
 mod paste;
 mod wrap;
 
 pub use disk::{DiskTask, MAX_BYTES, check_file_size, create_parent_plan, perform as perform_disk};
 pub use edit::{FileEdit, apply_to_buffer, read_lines, read_lines_rope};
+pub use mention::{
+    ATTACH_BUDGET, ATTACH_FILE_CAP, ActiveMention, MentionSpan, active_mention, format_mention_token,
+    insert_mention, mention_trigger_at, parse_mentions, suggest_files,
+};
 pub use path::{canonicalize, strip_verbatim, within};
 pub use provider::{content_looks_like_tool_prefix, normalize_tool_arguments};
+pub use slash::{
+    COMMANDS, ParsedSlash, SlashCommand, filter_commands, help_text, is_slash_prompt, lookup,
+    parse_slash, slash_filter,
+};
 pub use worker::spawn;
 pub use paste::{PasteBurst, normalize_paste};
 pub use wrap::{column_at, index_at, next_boundary, prev_boundary, rows as wrap_rows};
@@ -44,6 +54,24 @@ pub fn needs_approval(name: &str) -> bool {
     matches!(name, "apply_edit" | "create_file" | "save")
 }
 
+/// Popup above the assistant prompt (`/` commands or `@` files).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentPopup {
+    Slash {
+        /// Text after `/` used to filter.
+        filter: String,
+        selected: usize,
+    },
+    Mention {
+        /// Char index of `@`.
+        at: usize,
+        query: String,
+        selected: usize,
+        /// Relative paths currently listed.
+        paths: Vec<String>,
+    },
+}
+
 /// Panel state. The core owns it; the worker only sees copies of the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Panel {
@@ -72,6 +100,10 @@ pub struct Panel {
     pub stream_draft: Option<String>,
     /// Live reasoning / thinking text for the title only (not the transcript).
     pub thinking_draft: Option<String>,
+    /// `/` or `@` completion popup above the prompt.
+    pub popup: Option<AgentPopup>,
+    /// Last user prompt text (for `/retry`), without editor_state suffix.
+    pub last_prompt: Option<String>,
 }
 
 impl Default for Panel {
@@ -93,6 +125,8 @@ impl Default for Panel {
             memory: Vec::new(),
             stream_draft: None,
             thinking_draft: None,
+            popup: None,
+            last_prompt: None,
         }
     }
 }
@@ -112,6 +146,8 @@ pub enum AgentCommand {
         num_ctx: Option<u32>,
         /// Use Ollama native `/api/chat` so `num_ctx` is honored.
         ollama_native: bool,
+        /// Prefer Ollama `think: true` when supported.
+        think: bool,
         /// Prior OpenAI-compatible messages (user / assistant / tool), already budgeted.
         history: Vec<serde_json::Value>,
         prompt: String,

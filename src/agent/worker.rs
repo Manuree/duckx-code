@@ -56,6 +56,7 @@ async fn run(
                 stream,
                 num_ctx,
                 ollama_native,
+                think,
                 history,
                 prompt,
             } => {
@@ -70,6 +71,7 @@ async fn run(
                     stream,
                     num_ctx,
                     ollama_native,
+                    think,
                     history,
                     prompt,
                 )
@@ -98,6 +100,7 @@ async fn run_turn(
     stream: bool,
     num_ctx: Option<u32>,
     ollama_native: bool,
+    think: bool,
     history: Vec<Value>,
     prompt: String,
 ) -> Result<(), String> {
@@ -121,6 +124,7 @@ async fn run_turn(
             stream,
             num_ctx,
             ollama_native,
+            think,
             &messages,
         )
         .await?
@@ -307,6 +311,7 @@ async fn complete_or_cancel(
     stream: bool,
     num_ctx: Option<u32>,
     ollama_native: bool,
+    think: bool,
     messages: &[Value],
 ) -> Result<Option<Reply>, String> {
     let options = CompleteOptions {
@@ -314,6 +319,7 @@ async fn complete_or_cancel(
         stream,
         num_ctx,
         ollama_native,
+        think,
     };
     let events = events.clone();
     let request = async move {

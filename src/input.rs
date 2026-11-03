@@ -431,7 +431,7 @@ fn route_agent(
         burst.reset();
     }
     match key.code {
-        KeyCode::Tab => Some(SemanticAction::OpenCommandBar),
+        KeyCode::Tab => Some(SemanticAction::Agent(AgentAction::Complete)),
         KeyCode::Esc => Some(SemanticAction::Agent(AgentAction::Close)),
         KeyCode::Enter if shift || burst.enter_as_newline() => {
             Some(SemanticAction::Agent(AgentAction::Insert("\n".into())))
@@ -941,7 +941,7 @@ mod tests {
         );
         assert_eq!(
             route(&key(KeyCode::Tab, KeyModifiers::NONE), Focus::Agent, false),
-            Some(SemanticAction::OpenCommandBar)
+            Some(SemanticAction::Agent(AgentAction::Complete))
         );
         assert_eq!(
             route(

@@ -305,6 +305,9 @@ pub struct AiPrefs {
     /// LM Studio ignores this (set context in LM Studio).
     #[serde(default = "default_context_size")]
     pub context_size: String,
+    /// Prefer Ollama `think: true` when the model supports it.
+    #[serde(default = "enabled")]
+    pub think: bool,
 }
 
 fn default_context_size() -> String {
@@ -322,6 +325,7 @@ impl Default for AiPrefs {
             auto_approve: false,
             streaming: true,
             context_size: default_context_size(),
+            think: true,
         }
     }
 }

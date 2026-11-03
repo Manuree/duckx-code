@@ -43,6 +43,8 @@ pub struct CompleteOptions<'a> {
     pub num_ctx: Option<u32>,
     /// Prefer Ollama native `/api/chat` (honors num_ctx). LM Studio stays on `/v1`.
     pub ollama_native: bool,
+    /// When true (and native), try `think: true` with per-model fallback.
+    pub think: bool,
 }
 
 impl Default for CompleteOptions<'static> {
@@ -52,6 +54,7 @@ impl Default for CompleteOptions<'static> {
             stream: false,
             num_ctx: None,
             ollama_native: false,
+            think: true,
         }
     }
 }
@@ -1443,7 +1446,7 @@ async fn complete_once(
     let api_key = options.api_key;
     let stream = options.stream;
     let mut allow_tools = allow_tools;
-    let mut allow_think = native && !model_skips_think(model);
+    let mut allow_think = native && options.think && !model_skips_think(model);
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     loop {
@@ -1693,7 +1696,7 @@ where
 {
     let url = ollama_chat_url(server);
     let mut allow_tools = true;
-    let mut allow_think = !model_skips_think(model);
+    let mut allow_think = options.think && !model_skips_think(model);
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     let response = loop {
@@ -2143,7 +2146,7 @@ mod tests {
             &server_url,
             "qwen",
             &messages,
-            CompleteOptions { api_key: "secret-key", stream: false, num_ctx: None, ollama_native: false },
+            CompleteOptions { api_key: "secret-key", stream: false, num_ctx: None, ollama_native: false, think: true },
         )
         .await
         .unwrap();
@@ -2176,7 +2179,7 @@ mod tests {
             &server_url,
             "qwen",
             &messages,
-            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
+            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false, think: true },
             |kind, text| {
                 if kind == DeltaKind::Content {
                     pieces.push(text.to_string());
@@ -2217,7 +2220,7 @@ mod tests {
             &server_url,
             "qwen2.5-coder:7b",
             &messages,
-            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
+            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false, think: true },
             |kind, text| {
                 if kind == DeltaKind::Content {
                     pieces.push(text.to_string());
@@ -2302,7 +2305,7 @@ mod tests {
             &server_url,
             "qwen",
             &messages,
-            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
+            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false, think: true },
         )
         .await
         .unwrap();
@@ -2689,7 +2692,7 @@ mod tests {
                 stream: true,
                 num_ctx: Some(2048),
                 ollama_native: true,
-            },
+             think: true },
             |kind, text| match kind {
                 DeltaKind::Thinking => thinking.push_str(text),
                 DeltaKind::Content => content.push_str(text),
@@ -2740,7 +2743,7 @@ mod tests {
             "http://127.0.0.1:11434/v1",
             "qwen2.5-coder:0.5b",
             &messages,
-            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false },
+            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false, think: true },
             |kind, text| {
                 if kind == DeltaKind::Content {
                     pieces.push(text.to_string());

@@ -3744,10 +3744,7 @@ impl App {
                 self.settings = None;
                 self.about = true;
             }
-            CommandId::Agent => match arg.map(str::trim) {
-                Some("new") | Some("clear") => self.clear_agent_chat(),
-                _ => self.toggle_agent(),
-            },
+            CommandId::Agent => self.toggle_agent(),
             CommandId::AgentNew => self.clear_agent_chat(),
             CommandId::FilePicker => self.open_file_picker(),
             CommandId::Workspace => self.request_workspace(arg.unwrap_or(""))?,

@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::panel;
-use crate::agent::wrap_rows;
+use crate::agent::{wrap_rows, AgentPopup, filter_commands};
 use crate::app::App;
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -131,6 +131,139 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             let column = (column as u16).min(inner.width.saturating_sub(1));
             super::cursor::place(inner.x + column, y);
         }
+    }
+
+    // Popup sits above the prompt; approval buttons skip it (early return above).
+    if let Some(popup) = app.agent.popup.as_ref() {
+        let prompt_top = inner.y + transcript_room as u16;
+        render_popup(frame, app, popup, inner, prompt_top, theme.sidebar, theme.sidebar.bg(theme.sidebar_selected));
+    }
+}
+
+
+fn render_popup(
+    frame: &mut Frame,
+    _app: &App,
+    popup: &AgentPopup,
+    area: Rect,
+    prompt_top: u16,
+    base: Style,
+    marked: Style,
+) {
+    let rows: Vec<(String, String, bool)> = match popup {
+        AgentPopup::Slash { filter, selected } => {
+            let hits = filter_commands(filter);
+            if hits.is_empty() {
+                vec![("(no matching commands)".into(), String::new(), false)]
+            } else {
+                hits.iter()
+                    .enumerate()
+                    .map(|(i, cmd)| {
+                        (
+                            format!("/{}", cmd.name),
+                            cmd.summary.to_string(),
+                            i == *selected,
+                        )
+                    })
+                    .collect()
+            }
+        }
+        AgentPopup::Mention {
+            paths, selected, query, ..
+        } => {
+            if paths.is_empty() {
+                let msg = if query.is_empty() {
+                    "(type to filter files)".to_string()
+                } else {
+                    "(no matching files)".to_string()
+                };
+                vec![(msg, String::new(), false)]
+            } else {
+                paths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (p.clone(), String::new(), i == *selected))
+                    .collect()
+            }
+        }
+    };
+
+    let title = match popup {
+        AgentPopup::Slash { .. } => " commands ",
+        AgentPopup::Mention { .. } => " files ",
+    };
+
+    let max_rows = rows.len().clamp(1, 8);
+    let list_h = max_rows as u16;
+    let box_h = list_h.saturating_add(2); // borders
+    let box_w = area.width.min(72).max(20.min(area.width));
+    if box_w < 12 || area.height < 4 {
+        return;
+    }
+    // Prefer sitting just above the prompt; clamp into the panel.
+    let y = prompt_top
+        .saturating_sub(box_h)
+        .max(area.y);
+    // If that would cover the prompt almost entirely in a tiny panel, still draw.
+    let x = area.x;
+    let rect = Rect::new(x, y, box_w, box_h.min(area.height.saturating_sub(prompt_top.saturating_sub(area.y).max(1))));
+    if rect.height < 3 || rect.width < 12 {
+        return;
+    }
+
+    let block = super::panel(title)
+        .border_style(base)
+        .style(base);
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let scroll = match popup {
+        AgentPopup::Slash { selected, .. } | AgentPopup::Mention { selected, .. } => {
+            let visible = inner.height as usize;
+            selected.saturating_sub(visible.saturating_sub(1))
+        }
+    };
+
+    for (offset, (left, right, selected)) in rows
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(inner.height as usize)
+    {
+        let style = if *selected { marked } else { base };
+        let gap = 2usize;
+        let left_w = left.width();
+        let avail = inner.width as usize;
+        let line = if right.is_empty() {
+            format!(" {}{}", left, " ".repeat(avail.saturating_sub(left_w.saturating_add(1))))
+        } else {
+            let right_budget = avail.saturating_sub(left_w.saturating_add(gap).saturating_add(1));
+            let right_shown = fit(right, right_budget);
+            let pad = avail
+                .saturating_sub(1 + left_w + gap + right_shown.width());
+            format!(
+                " {}{}{}{}",
+                left,
+                " ".repeat(gap + pad),
+                right_shown,
+                ""
+            )
+        };
+        let shown = fit(&line, avail);
+        // Pad to full width so selection highlight fills the row.
+        let mut padded = shown;
+        while padded.width() < avail {
+            padded.push(' ');
+        }
+        let padded = fit(&padded, avail);
+        frame.render_widget(
+            Paragraph::new(Line::styled(padded, style)).style(base),
+            Rect::new(inner.x, inner.y + (offset - scroll) as u16, inner.width, 1),
+        );
     }
 }
 
