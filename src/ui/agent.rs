@@ -78,13 +78,13 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             .sidebar
             .bg(theme.sidebar_selected)
             .add_modifier(Modifier::BOLD | Modifier::REVERSED);
-        let spans = approve_button_spans(pending.allow_selected, theme.sidebar, marked);
+        let spans = approve_button_spans(pending.choices(), pending.choice, theme.sidebar, marked);
         frame.render_widget(
             Paragraph::new(Line::from(spans)).style(theme.sidebar),
             Rect::new(inner.x, y, inner.width, 1),
         );
         if focused {
-            let column = button_cursor_column(pending.allow_selected).min(inner.width.saturating_sub(1) as usize);
+            let column = button_cursor_column(pending.choices(), pending.choice).min(inner.width.saturating_sub(1) as usize);
             super::cursor::place(inner.x + column as u16, y);
         }
         return;
@@ -267,26 +267,51 @@ fn render_popup(
     }
 }
 
-fn approve_button_spans(allow_selected: bool, base: Style, marked: Style) -> Vec<Span<'static>> {
-    let yes = if allow_selected {
-        Span::styled(" > [ Yes ] < ", marked)
-    } else {
-        Span::styled("   [ Yes ]   ", base)
-    };
-    let no = if !allow_selected {
-        Span::styled(" > [ No ] < ", marked)
-    } else {
-        Span::styled("   [ No ]   ", base)
-    };
-    vec![yes, no]
+fn approve_label(choice: crate::agent::ApprovalChoice) -> &'static str {
+    match choice {
+        crate::agent::ApprovalChoice::Yes => "[ Yes ]",
+        crate::agent::ApprovalChoice::Session => "[ Yes, this session ]",
+        crate::agent::ApprovalChoice::No => "[ No ]",
+    }
 }
 
-fn button_cursor_column(allow_selected: bool) -> usize {
-    if allow_selected {
-        " > [ Yes ] < ".width() / 2
+fn approve_button_text(choice: crate::agent::ApprovalChoice, selected: bool) -> String {
+    let label = approve_label(choice);
+    if selected {
+        format!(" > {label} < ")
     } else {
-        " > [ Yes ] < ".width() + " > [ No ] < ".width() / 2
+        format!("   {label}   ")
     }
+}
+
+fn approve_button_spans(
+    choices: &[crate::agent::ApprovalChoice],
+    selected: crate::agent::ApprovalChoice,
+    base: Style,
+    marked: Style,
+) -> Vec<Span<'static>> {
+    choices
+        .iter()
+        .map(|choice| {
+            let on = *choice == selected;
+            Span::styled(approve_button_text(*choice, on), if on { marked } else { base })
+        })
+        .collect()
+}
+
+fn button_cursor_column(
+    choices: &[crate::agent::ApprovalChoice],
+    selected: crate::agent::ApprovalChoice,
+) -> usize {
+    let mut column = 0;
+    for choice in choices {
+        let text = approve_button_text(*choice, *choice == selected);
+        if *choice == selected {
+            return column + text.width() / 2;
+        }
+        column += text.width();
+    }
+    column
 }
 
 struct DrawnLine {
@@ -390,7 +415,10 @@ fn status_label(app: &App) -> String {
     if !app.agent.busy {
         let status = app.agent.status.as_str();
         if status.is_empty() || status == "ready" {
-            return "ready".to_string();
+            if app.agent.session_allow.is_empty() {
+                return "ready".to_string();
+            }
+            return format!("ready · ✓ session-approved: {}", session_allow_list(app));
         }
         return short_status(status);
     }
@@ -415,6 +443,22 @@ fn status_label(app: &App) -> String {
     } else {
         format!("{frame} {status}{elapsed}")
     }
+}
+
+/// Session-approved tools in approval order of the common file tools.
+fn session_allow_list(app: &App) -> String {
+    const ORDER: [&str; 3] = ["create_file", "apply_edit", "save"];
+    let mut names: Vec<&str> = ORDER
+        .iter()
+        .copied()
+        .filter(|name| app.agent.session_allow.contains(*name))
+        .collect();
+    for name in &app.agent.session_allow {
+        if !ORDER.contains(&name.as_str()) {
+            names.push(name);
+        }
+    }
+    names.join(", ")
 }
 
 fn busy_elapsed_label(app: &App) -> String {

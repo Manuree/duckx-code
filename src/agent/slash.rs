@@ -185,12 +185,27 @@ pub fn help_text() -> String {
     lines.push(String::new());
     lines.push("Keys: Enter send · Shift+Enter newline · Ctrl+L new chat · Esc close popup".into());
     lines.push("@file: type @ after a space (or at start) to attach a workspace file.".into());
+    lines.push(
+        "Approval: [ Yes ] [ Yes, this session ] [ No ] · ←/→ Tab h/l move · y yes · a this session · n/Esc no"
+            .into(),
+    );
+    lines.push(
+        "  \"This session\" allows that tool (create_file / apply_edit / save) until /new, /clear or Ctrl+L. Command tools always ask."
+            .into(),
+    );
     lines.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_mentions_session_approval() {
+        let help = help_text();
+        assert!(help.contains("Yes, this session"), "{help}");
+        assert!(help.contains("a this session"), "{help}");
+    }
 
     #[test]
     fn only_position_zero_is_a_command() {

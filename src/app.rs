@@ -6350,7 +6350,7 @@ mod tests {
             arguments: args,
         });
         let pending = app.agent.pending.as_ref().expect("pending");
-        assert!(pending.allow_selected, "Yes is the default selection");
+        assert_eq!(pending.choice, crate::agent::ApprovalChoice::Yes, "Yes is the default selection");
         assert!(pending.summary.contains("apply_edit"), "{}", pending.summary);
         assert!(pending.summary.contains("- hello"), "{}", pending.summary);
         assert!(pending.summary.contains("+ hi"), "{}", pending.summary);
@@ -6363,17 +6363,28 @@ mod tests {
         )));
         assert_eq!(app.agent.prompt, before);
 
+        use crate::agent::ApprovalChoice as C;
+        let choice = |app: &App| app.agent.pending.as_ref().unwrap().choice;
         app.handle(SemanticAction::Agent(crate::action::AgentAction::Move {
             right: true,
             extend: false,
         }));
-        assert!(!app.agent.pending.as_ref().unwrap().allow_selected);
-        app.handle(SemanticAction::OpenCommandBar); // Tab toggles
-        assert!(app.agent.pending.as_ref().unwrap().allow_selected);
+        assert_eq!(choice(&app), C::Session);
+        app.handle(SemanticAction::OpenCommandBar); // Tab cycles
+        assert_eq!(choice(&app), C::No);
+        app.handle(SemanticAction::OpenCommandBar); // wraps
+        assert_eq!(choice(&app), C::Yes);
         app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
             "l".into(),
         )));
-        assert!(!app.agent.pending.as_ref().unwrap().allow_selected);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "l".into(),
+        )));
+        assert_eq!(choice(&app), C::No);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "l".into(),
+        )));
+        assert_eq!(choice(&app), C::No, "clamped at the right edge");
         // Enter confirms No.
         app.handle(SemanticAction::Agent(crate::action::AgentAction::Submit));
         let crate::agent::AgentCommand::ToolResult { content, .. } = rx.try_recv().unwrap() else {
@@ -6383,6 +6394,104 @@ mod tests {
         assert!(app.agent.pending.is_none());
         assert_eq!(app.buffer().rope().to_string(), "hello\n");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn session_approve_test_app(tag: &str) -> (App, tokio::sync::mpsc::UnboundedReceiver<crate::agent::AgentCommand>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "duckx-session-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::new(Buffer::from_text(""), None);
+        app.explorer = crate::explorer::Explorer::new(root.clone());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.attach_agent(tx);
+        app.ai.model = "qwen".into();
+        app.agent.busy = true;
+        app.agent.turn = 1;
+        (app, rx, root)
+    }
+
+    fn send_create(app: &mut App, call: &str, path: &std::path::Path) {
+        let args = serde_json::json!({"path": path.display().to_string(), "text": "x"}).to_string();
+        app.handle_agent(crate::agent::AgentEvent::Tool {
+            id: 1,
+            call_id: call.into(),
+            name: "create_file".into(),
+            arguments: args,
+        });
+    }
+
+    #[test]
+    fn session_approval_allowlists_only_that_tool_until_new_chat() {
+        let (mut app, _rx, root) = session_approve_test_app("allow");
+        send_create(&mut app, "c1", &root.join("a.txt"));
+        assert!(app.agent.pending.as_ref().unwrap().offers_session());
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert("a".into())));
+        assert!(app.agent.pending.is_none());
+        assert!(app.agent.session_allow.contains("create_file"));
+        assert_eq!(app.agent.session_allow.len(), 1, "only that tool name");
+
+        // Same tool again: no prompt.
+        app.agent.busy = true;
+        send_create(&mut app, "c2", &root.join("b.txt"));
+        assert!(app.agent.pending.is_none(), "session-approved tool must not ask again");
+
+        // Different mutating tool still asks.
+        app.handle_agent(crate::agent::AgentEvent::Tool {
+            id: 1,
+            call_id: "c3".into(),
+            name: "save".into(),
+            arguments: "{}".into(),
+        });
+        assert!(app.agent.pending.is_some(), "other tools still need approval");
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Close));
+
+        let screen_status = app.agent.session_allow.iter().cloned().collect::<Vec<_>>();
+        assert_eq!(screen_status, vec!["create_file".to_string()]);
+
+        // /new clears the allowlist.
+        app.clear_agent_chat();
+        assert!(app.agent.session_allow.is_empty());
+        app.agent.busy = true;
+        app.agent.turn = 1;
+        send_create(&mut app, "c4", &root.join("c.txt"));
+        assert!(app.agent.pending.is_some(), "after /new the tool asks again");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enter_on_session_button_and_ctrl_l_clear() {
+        let (mut app, _rx, root) = session_approve_test_app("enter");
+        send_create(&mut app, "c1", &root.join("a.txt"));
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Move { right: true, extend: false }));
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Submit));
+        assert!(app.agent.session_allow.contains("create_file"));
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::NewChat));
+        assert!(app.agent.session_allow.is_empty(), "Ctrl+L clears");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn command_tools_never_offer_session_approval() {
+        assert!(!crate::agent::session_approvable("shell"));
+        assert!(!crate::agent::session_approvable("run_command"));
+        assert!(crate::agent::session_approvable("apply_edit"));
+        let mut pending = crate::agent::PendingTool {
+            turn: 1,
+            call_id: "x".into(),
+            name: "run_command".into(),
+            arguments: "{}".into(),
+            summary: String::new(),
+            choice: crate::agent::ApprovalChoice::Yes,
+        };
+        assert_eq!(pending.choices().len(), 2);
+        pending.step(true);
+        assert_eq!(pending.choice, crate::agent::ApprovalChoice::No);
     }
 
     #[test]

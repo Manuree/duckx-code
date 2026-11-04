@@ -470,7 +470,7 @@ mod tests {
             name: "apply_edit".into(),
             arguments: r#"{"path":"demo.txt","find":"hello","replace":"hi"}"#.into(),
             summary: "apply_edit · demo.txt\n- hello\n+ hi".into(),
-            allow_selected: true,
+            choice: crate::agent::ApprovalChoice::Yes,
         });
         app.set_screen_size(80, 24);
         let screen = draw(&app, 80, 24);
@@ -480,9 +480,29 @@ mod tests {
         assert!(screen.contains("[ Yes ]"), "{screen}");
         assert!(screen.contains("[ No ]"), "{screen}");
         assert!(screen.contains("> [ Yes ]"), "{screen}");
-        app.agent.pending.as_mut().unwrap().allow_selected = false;
+        assert!(screen.contains("[ Yes, this session ]"), "{screen}");
+        app.agent.pending.as_mut().unwrap().choice = crate::agent::ApprovalChoice::No;
         let screen = draw(&app, 80, 24);
         assert!(screen.contains("> [ No ]"), "{screen}");
+        app.agent.pending.as_mut().unwrap().choice = crate::agent::ApprovalChoice::Session;
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("> [ Yes, this session ]"), "{screen}");
+    }
+
+    #[test]
+    fn assistant_title_lists_session_approved_tools() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.agent.status = "ready".into();
+        app.agent.session_allow.insert("create_file".into());
+        app.agent.session_allow.insert("apply_edit".into());
+        app.set_screen_size(100, 24);
+        let screen = draw(&app, 100, 24);
+        assert!(
+            screen.contains("ready · ✓ session-approved: create_file, apply_edit"),
+            "{screen}"
+        );
     }
 
     #[test]
