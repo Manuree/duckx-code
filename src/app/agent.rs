@@ -3,7 +3,9 @@
 use serde::Deserialize;
 
 use crate::action::AgentAction;
-use crate::agent::{self, AgentCommand, AgentEvent, DiskTask, FileEdit, PendingTool, TranscriptLine};
+use crate::agent::{
+    self, AgentCommand, AgentEvent, ApprovalChoice, DiskTask, FileEdit, PendingTool, TranscriptLine,
+};
 use crate::jobs::Job;
 
 use super::App;
@@ -133,35 +135,41 @@ impl App {
                     return;
                 }
                 AgentAction::Submit => {
-                    let allow = self
+                    let choice = self
                         .agent
                         .pending
                         .as_ref()
-                        .map(|pending| pending.allow_selected)
-                        .unwrap_or(true);
-                    self.resolve_pending_tool(allow);
+                        .map(|pending| pending.choice)
+                        .unwrap_or_default();
+                    self.resolve_pending_tool(choice);
                 }
-                AgentAction::Close => self.resolve_pending_tool(false),
+                AgentAction::Close => self.resolve_pending_tool(ApprovalChoice::No),
                 AgentAction::Insert(text) => {
                     let key = text.trim();
                     if key.eq_ignore_ascii_case("y") {
-                        self.resolve_pending_tool(true);
+                        self.resolve_pending_tool(ApprovalChoice::Yes);
+                    } else if key.eq_ignore_ascii_case("a") {
+                        // Session approval only where offered; otherwise ignore.
+                        if self.agent.pending.as_ref().is_some_and(|p| p.offers_session()) {
+                            self.resolve_pending_tool(ApprovalChoice::Session);
+                        }
                     } else if key.eq_ignore_ascii_case("n") {
-                        self.resolve_pending_tool(false);
+                        self.resolve_pending_tool(ApprovalChoice::No);
                     } else if key == "h" || key == "H" {
-                        self.select_pending_allow(true);
+                        self.step_pending_choice(false);
                     } else if key == "l" || key == "L" {
-                        self.select_pending_allow(false);
+                        self.step_pending_choice(true);
                     }
                 }
                 AgentAction::Move { right, .. } => {
-                    self.select_pending_allow(!right);
+                    self.step_pending_choice(right);
                 }
                 AgentAction::Jump { end, .. } => {
                     if self.agent.reading {
                         self.agent.scroll = if end { 0 } else { usize::MAX };
-                    } else {
-                        self.select_pending_allow(!end);
+                    } else if let Some(pending) = self.agent.pending.as_mut() {
+                        let list = pending.choices();
+                        pending.choice = if end { list[list.len() - 1] } else { list[0] };
                     }
                 }
                 AgentAction::Above => {
@@ -291,6 +299,7 @@ impl App {
             self.cancel_agent();
         }
         self.agent.pending = None;
+        self.agent.session_allow.clear();
         self.agent.memory.clear();
         self.agent.transcript.clear();
         self.agent.stream_draft = None;
@@ -412,7 +421,10 @@ impl App {
 
     fn run_tool(&mut self, turn: u64, call_id: String, name: &str, arguments: &str) {
         let (name, arguments) = agent::normalize_call(name, arguments);
-        if agent::needs_approval(&name) && !self.ai.auto_approve {
+        if agent::needs_approval(&name)
+            && !self.ai.auto_approve
+            && !(agent::session_approvable(&name) && self.agent.session_allow.contains(&name))
+        {
             self.ask_tool_approval(turn, call_id, name, arguments);
             return;
         }
@@ -429,34 +441,42 @@ impl App {
             name,
             arguments,
             summary,
-            allow_selected: true,
+            choice: ApprovalChoice::Yes,
         });
         if !self.agent.open || !self.agent.focused {
             self.focus_agent();
         }
     }
 
-    fn select_pending_allow(&mut self, allow: bool) {
+    fn step_pending_choice(&mut self, right: bool) {
         if let Some(pending) = self.agent.pending.as_mut() {
-            pending.allow_selected = allow;
+            pending.step(right);
         }
     }
 
-    /// Tab toggles Yes/No while a tool waits for approval.
+    /// Tab cycles Yes / Yes, this session / No while a tool waits for approval.
     pub(super) fn toggle_pending_allow(&mut self) {
         if let Some(pending) = self.agent.pending.as_mut() {
-            pending.allow_selected = !pending.allow_selected;
+            pending.cycle();
         }
     }
 
-    fn resolve_pending_tool(&mut self, allow: bool) {
+    fn resolve_pending_tool(&mut self, choice: ApprovalChoice) {
         let Some(pending) = self.agent.pending.take() else {
             return;
         };
         if pending.turn != self.agent.turn || !self.agent.busy {
             return;
         }
-        if allow {
+        let choice = if choice == ApprovalChoice::Session && !pending.offers_session() {
+            ApprovalChoice::Yes
+        } else {
+            choice
+        };
+        if choice == ApprovalChoice::Session {
+            self.agent.session_allow.insert(pending.name.clone());
+        }
+        if choice != ApprovalChoice::No {
             self.agent.status = format!("running {}", pending.name);
             self.execute_tool(pending.turn, pending.call_id, &pending.name, &pending.arguments);
         } else {

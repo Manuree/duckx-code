@@ -45,13 +45,72 @@ pub struct PendingTool {
     pub arguments: String,
     /// Card text shown above the Yes/No buttons (tool, path, preview).
     pub summary: String,
-    /// `true` highlights Yes (default for a fast allow flow). `false` highlights No.
-    pub allow_selected: bool,
+    /// Highlighted button. Defaults to Yes for a fast allow flow.
+    pub choice: ApprovalChoice,
+}
+
+impl PendingTool {
+    /// Whether the "Yes, this session" button is offered for this tool.
+    pub fn offers_session(&self) -> bool {
+        session_approvable(&self.name)
+    }
+
+    /// Buttons shown, left to right.
+    pub fn choices(&self) -> &'static [ApprovalChoice] {
+        if self.offers_session() {
+            &[ApprovalChoice::Yes, ApprovalChoice::Session, ApprovalChoice::No]
+        } else {
+            &[ApprovalChoice::Yes, ApprovalChoice::No]
+        }
+    }
+
+    /// Move the highlight one button left/right (clamped).
+    pub fn step(&mut self, right: bool) {
+        let list = self.choices();
+        let at = list.iter().position(|c| *c == self.choice).unwrap_or(0);
+        let next = if right {
+            (at + 1).min(list.len() - 1)
+        } else {
+            at.saturating_sub(1)
+        };
+        self.choice = list[next];
+    }
+
+    /// Tab: cycle through the buttons, wrapping.
+    pub fn cycle(&mut self) {
+        let list = self.choices();
+        let at = list.iter().position(|c| *c == self.choice).unwrap_or(0);
+        self.choice = list[(at + 1) % list.len()];
+    }
+}
+
+/// Approval prompt buttons: `[ Yes ]  [ Yes, this session ]  [ No ]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApprovalChoice {
+    #[default]
+    Yes,
+    /// Allow and remember this tool name until the chat is cleared.
+    Session,
+    No,
 }
 
 /// Tools that change files need Allow / Deny unless auto-approve is on.
 pub fn needs_approval(name: &str) -> bool {
     matches!(name, "apply_edit" | "create_file" | "save")
+}
+
+/// Shell-like tools: never session-allowlisted, always asked.
+pub fn is_command_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "shell" | "bash" | "run_command" | "run_terminal_cmd" | "execute" | "powershell" | "cmd"
+    )
+}
+
+/// Only file tools can be approved for the rest of the session; command tools
+/// (if ever enabled) must ask every time.
+pub fn session_approvable(name: &str) -> bool {
+    !is_command_tool(name) && matches!(name, "apply_edit" | "create_file" | "save")
 }
 
 /// Popup above the assistant prompt (`/` commands or `@` files).
@@ -96,6 +155,8 @@ pub struct Panel {
     pub turn: u64,
     /// Mutating tool waiting for Allow / Deny (buttons, y/n, Enter, Esc).
     pub pending: Option<PendingTool>,
+    /// Tool names approved with "Yes, this session"; cleared with the chat.
+    pub session_allow: std::collections::BTreeSet<String>,
     /// Prior turn messages (user / assistant / tool) kept under a char budget.
     pub memory: Vec<serde_json::Value>,
     /// Live streamed assistant text for the current turn, shown until Reply.
@@ -125,6 +186,7 @@ impl Default for Panel {
             spin: 0,
             turn: 0,
             pending: None,
+            session_allow: std::collections::BTreeSet::new(),
             memory: Vec::new(),
             stream_draft: None,
             thinking_draft: None,
