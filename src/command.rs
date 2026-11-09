@@ -22,6 +22,12 @@ pub enum CommandId {
     Copy,
     Cut,
     Paste,
+    /// Copy the focused file or folder name.
+    CopyName,
+    /// Copy the focused file or folder as a full native path.
+    CopyPath,
+    /// Copy the focused file or folder path relative to the workspace, with `/`.
+    CopyRelativePath,
     Save,
     ToggleExplorer,
     /// Grow the explorer column.
@@ -489,6 +495,33 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: false,
     },
     CommandSpec {
+        id: CommandId::CopyName,
+        name: "copy-name",
+        description: "Copy the file or folder name",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
+        id: CommandId::CopyPath,
+        name: "copy-path",
+        description: "Copy the full path of the file or folder",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
+        id: CommandId::CopyRelativePath,
+        name: "copy-relative-path",
+        description: "Copy the path from the workspace folder",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
         id: CommandId::Save,
         name: "save",
         description: "Save the current file",
@@ -680,6 +713,9 @@ fn importance(id: CommandId) -> u16 {
         CommandId::Copy => 80,
         CommandId::Cut => 90,
         CommandId::Paste => 100,
+        CommandId::CopyName => 102,
+        CommandId::CopyPath => 104,
+        CommandId::CopyRelativePath => 106,
         CommandId::GotoDefinition => 110,
         CommandId::GotoReferences => 112,
         CommandId::MatchBracket => 115,
@@ -726,6 +762,19 @@ fn importance(id: CommandId) -> u16 {
         CommandId::AgentNew => 393,
         CommandId::About => 395,
         CommandId::Quit => 400,
+    }
+}
+
+/// Sort key on one surface. In the explorer the copy commands follow the file
+/// commands (`select` … `new-folder`), so `move`, `delete`, and `rename` stay on the
+/// first page of hints in FILE mode. Everywhere else this is [`importance`].
+fn surface_rank(id: CommandId, context: CommandContext) -> u32 {
+    let base = u32::from(importance(id)) * 10;
+    match (context, id) {
+        (CommandContext::Explorer, CommandId::CopyName) => 2525,
+        (CommandContext::Explorer, CommandId::CopyPath) => 2526,
+        (CommandContext::Explorer, CommandId::CopyRelativePath) => 2527,
+        _ => base,
     }
 }
 
@@ -782,7 +831,7 @@ pub fn catalog(context: CommandContext, files: bool) -> Vec<&'static CommandSpec
         .iter()
         .filter(|spec| allows(spec, context, files))
         .collect();
-    commands.sort_by_key(|spec| importance(spec.id));
+    commands.sort_by_key(|spec| surface_rank(spec.id, context));
     commands
 }
 
@@ -1035,6 +1084,9 @@ mod tests {
                 "copy",
                 "cut",
                 "paste",
+                "copy-name",
+                "copy-path",
+                "copy-relative-path",
                 "goto-definition",
                 "goto-references",
                 "match-bracket",
@@ -1086,6 +1138,9 @@ mod tests {
                 "select",
                 "new-file",
                 "new-folder",
+                "copy-name",
+                "copy-path",
+                "copy-relative-path",
                 "reveal",
                 "explorer",
                 "wider",
@@ -1111,6 +1166,9 @@ mod tests {
                 "rename",
                 "new-file",
                 "new-folder",
+                "copy-name",
+                "copy-path",
+                "copy-relative-path",
                 "reveal",
                 "explorer",
                 "wider",
@@ -1154,7 +1212,10 @@ mod tests {
                 "duplicate-line-up"
             ]
         );
-        assert_eq!(names("cop", None), ["copy"]);
+        assert_eq!(
+            names("cop", None),
+            ["copy", "copy-name", "copy-path", "copy-relative-path"]
+        );
         assert_eq!(names("set", None), ["setting"]);
         assert_eq!(names("about", None), ["about"]);
         assert_eq!(names_in("about", None, CommandContext::Explorer), ["about"]);
@@ -1242,6 +1303,32 @@ mod tests {
         assert_eq!(
             name_source(CommandId::NewFolder),
             Some(NameSource::NewEntry)
+        );
+    }
+
+    #[test]
+    fn copy_path_commands_are_listed_on_both_surfaces_without_file_mode() {
+        for id in [
+            CommandId::CopyName,
+            CommandId::CopyPath,
+            CommandId::CopyRelativePath,
+        ] {
+            assert!(
+                catalog(CommandContext::Editor, false)
+                    .iter()
+                    .any(|c| c.id == id)
+            );
+            assert!(
+                catalog(CommandContext::Explorer, false)
+                    .iter()
+                    .any(|c| c.id == id)
+            );
+            assert!(!manages_files(id));
+            assert!(spec(id).arg.is_none());
+        }
+        assert_eq!(
+            names_in("copy-", None, CommandContext::Explorer),
+            ["copy-name", "copy-path", "copy-relative-path"]
         );
     }
 

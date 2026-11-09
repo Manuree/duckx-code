@@ -87,6 +87,9 @@ fn allowed_in_preview(id: CommandId) -> bool {
             | CommandId::FilePicker
             | CommandId::Workspace
             | CommandId::NewFile
+            | CommandId::CopyName
+            | CommandId::CopyPath
+            | CommandId::CopyRelativePath
     )
 }
 

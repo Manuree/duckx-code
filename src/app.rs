@@ -47,6 +47,36 @@ fn replaced_message(matches: usize, files: usize) -> String {
     format!("Replaced {matches} {match_word} in {files} {file_word}")
 }
 
+/// What `copy-name`, `copy-path`, and `copy-relative-path` put on the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyKind {
+    Name,
+    Path,
+    Relative,
+}
+
+/// Columns of a copied path shown in the status message.
+const COPY_SHOWN: usize = 60;
+
+/// Keeps the end of `text`, which is where a path's file name is.
+fn truncate_start(text: &str, max_cols: usize) -> String {
+    if text.width() <= max_cols {
+        return text.to_string();
+    }
+    let budget = max_cols.saturating_sub(1);
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0;
+    for grapheme in text.graphemes(true).rev() {
+        if used + grapheme.width() > budget {
+            break;
+        }
+        used += grapheme.width();
+        kept.push(grapheme);
+    }
+    kept.reverse();
+    format!("…{}", kept.concat())
+}
+
 fn truncate_end(text: &str, max_cols: usize) -> String {
     let flat: String = text
         .chars()
@@ -3840,6 +3870,9 @@ impl App {
             CommandId::Copy => self.copy()?,
             CommandId::Cut => self.cut()?,
             CommandId::Paste => self.paste()?,
+            CommandId::CopyName => self.copy_location(CopyKind::Name)?,
+            CommandId::CopyPath => self.copy_location(CopyKind::Path)?,
+            CommandId::CopyRelativePath => self.copy_location(CopyKind::Relative)?,
             CommandId::Save => {
                 let follow = self.resume.take();
                 self.save_focused(arg.map(PathBuf::from), follow)?;
@@ -4024,6 +4057,55 @@ impl App {
         let count = text.chars().count();
         self.clipboard.set_text(text)?;
         self.message = Some(format!("Copied {count} characters"));
+        Ok(())
+    }
+
+    /// The file or folder that `copy-name` and friends describe: the focused explorer
+    /// row, the source of a focused preview, or the focused tab's file.
+    fn copy_target(&self) -> Result<PathBuf, String> {
+        if self.explorer.open && self.explorer.focused {
+            let rel = self
+                .explorer
+                .selected()
+                .ok_or_else(|| "Nothing selected in the explorer".to_string())?;
+            return Ok(self.explorer.root.join(rel));
+        }
+        let tab = match self.preview(self.active) {
+            Some(preview) => self
+                .find_tab(preview.source)
+                .ok_or_else(|| "Nothing to copy".to_string())?,
+            None => self.active_editor().tab(),
+        };
+        tab.path
+            .clone()
+            .ok_or_else(|| "This buffer has no file yet; save it first".to_string())
+    }
+
+    /// `copy-name`, `copy-path`, and `copy-relative-path`.
+    fn copy_location(&mut self, kind: CopyKind) -> Result<(), String> {
+        let target = self.copy_target()?;
+        let absolute = std::path::absolute(&target)
+            .map_err(|err| format!("Cannot resolve {}: {err}", target.display()))?;
+        let absolute = crate::agent::strip_verbatim(&absolute);
+        let text = match kind {
+            CopyKind::Name => absolute
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| absolute.display().to_string()),
+            CopyKind::Path => absolute.display().to_string(),
+            CopyKind::Relative => {
+                if same_path(&self.explorer.root, &absolute) {
+                    ".".to_string()
+                } else {
+                    let rel = relative_to(&self.explorer.root, &absolute).ok_or_else(|| {
+                        format!("{} is outside the workspace", file_label(Some(&absolute)))
+                    })?;
+                    display_rel(&rel)
+                }
+            }
+        };
+        self.clipboard.set_text(text.clone())?;
+        self.message = Some(format!("Copied {}", truncate_start(&text, COPY_SHOWN)));
         Ok(())
     }
 
@@ -7907,6 +7989,9 @@ mod tests {
                 "select",
                 "new-file",
                 "new-folder",
+                "copy-name",
+                "copy-path",
+                "copy-relative-path",
                 "reveal",
                 "explorer",
                 "wider",
@@ -9137,5 +9222,139 @@ mod tests {
         assert_eq!(app.path(), Some(readme.as_path()));
         run(&mut app, "close");
         assert!(app.previews().is_empty());
+    }
+
+    fn clip(app: &mut App) -> String {
+        app.clipboard.get_text().unwrap_or_default()
+    }
+
+    fn native(path: &Path) -> String {
+        crate::agent::strip_verbatim(&std::path::absolute(path).unwrap())
+            .display()
+            .to_string()
+    }
+
+    #[test]
+    fn copy_commands_use_the_focused_tab_file() {
+        let (dir, _guard) = temp_dir();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        let file = dir.join("docs").join("ARCHITECTURE.md");
+        std::fs::write(&file, "# Header\n").unwrap();
+        let mut app = App::new(Buffer::from_text("# Header\n"), Some(file.clone()));
+        app.explorer = Explorer::new(dir.clone());
+
+        run(&mut app, "copy-name");
+        assert_eq!(clip(&mut app), "ARCHITECTURE.md");
+        assert_eq!(app.message.as_deref(), Some("Copied ARCHITECTURE.md"));
+        assert_eq!(app.recent_command, Some(CommandId::CopyName));
+
+        run(&mut app, "copy-path");
+        assert_eq!(clip(&mut app), native(&file));
+        assert!(!clip(&mut app).starts_with(r"\\?\"));
+
+        run(&mut app, "copy-relative-path");
+        assert_eq!(clip(&mut app), "docs/ARCHITECTURE.md");
+        assert_eq!(app.message.as_deref(), Some("Copied docs/ARCHITECTURE.md"));
+        assert_eq!(app.buffer().rope().to_string(), "# Header\n");
+    }
+
+    #[test]
+    fn copy_commands_use_the_focused_explorer_row_without_file_mode() {
+        let (dir, _guard) = temp_dir();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs").join("ARCHITECTURE.md"), "").unwrap();
+        let mut app = App::new(Buffer::new(), None);
+        focus_tree(
+            &mut app,
+            dir.clone(),
+            vec![dir_entry("docs"), file_entry("docs/ARCHITECTURE.md")],
+        );
+        assert!(!app.explorer.selecting);
+
+        assert!(app.explorer.reveal_entry(Path::new("docs")));
+        run(&mut app, "copy-name");
+        assert_eq!(clip(&mut app), "docs");
+        run(&mut app, "copy-relative-path");
+        assert_eq!(clip(&mut app), "docs");
+        run(&mut app, "copy-path");
+        assert_eq!(clip(&mut app), native(&dir.join("docs")));
+        assert_eq!(app.recent_explorer, Some(CommandId::CopyPath));
+        assert!(app.explorer.focused);
+
+        assert!(
+            app.explorer
+                .reveal_entry(&Path::new("docs").join("ARCHITECTURE.md"))
+        );
+        run(&mut app, "copy-relative-path");
+        assert_eq!(clip(&mut app), "docs/ARCHITECTURE.md");
+        run(&mut app, "copy-name");
+        assert_eq!(clip(&mut app), "ARCHITECTURE.md");
+    }
+
+    #[test]
+    fn copy_commands_refuse_untitled_buffers_and_relative_paths_outside_the_workspace() {
+        let mut app = App::new(Buffer::from_text("draft"), None);
+        app.clipboard.set_text("before".to_string()).unwrap();
+        for command in ["copy-name", "copy-path", "copy-relative-path"] {
+            run(&mut app, command);
+            assert_eq!(
+                app.message.as_deref(),
+                Some("This buffer has no file yet; save it first"),
+                "{command}"
+            );
+        }
+        assert_eq!(clip(&mut app), "before");
+
+        let (dir, _guard) = temp_dir();
+        std::fs::create_dir_all(dir.join("inner")).unwrap();
+        let file = dir.join("ARCHITECTURE.md");
+        std::fs::write(&file, "").unwrap();
+        let mut app = App::new(Buffer::new(), Some(file.clone()));
+        app.explorer = Explorer::new(dir.join("inner"));
+        run(&mut app, "copy-relative-path");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("ARCHITECTURE.md is outside the workspace")
+        );
+        run(&mut app, "copy-name");
+        assert_eq!(clip(&mut app), "ARCHITECTURE.md");
+        run(&mut app, "copy-path");
+        assert_eq!(clip(&mut app), native(&file));
+
+        let mut app = App::new(Buffer::new(), None);
+        focus_tree(&mut app, dir.clone(), Vec::new());
+        run(&mut app, "copy-name");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Nothing selected in the explorer")
+        );
+    }
+
+    #[test]
+    fn copy_commands_in_a_focused_preview_use_its_source_file() {
+        let (dir, _guard) = temp_dir();
+        let file = dir.join("README.md");
+        std::fs::write(&file, "# Readme\n").unwrap();
+        let mut app = App::new(Buffer::from_text("# Readme\n"), Some(file.clone()));
+        app.explorer = Explorer::new(dir.clone());
+        run(&mut app, "preview split-right");
+        app.handle(SemanticAction::FocusAdjacent(
+            crate::action::PaneDirection::Right,
+        ));
+        assert!(app.preview_focused());
+        run(&mut app, "copy-relative-path");
+        assert_eq!(clip(&mut app), "README.md");
+        run(&mut app, "copy-path");
+        assert_eq!(clip(&mut app), native(&file));
+    }
+
+    #[test]
+    fn long_copied_paths_keep_their_end_in_the_message() {
+        let long = format!("{}/ARCHITECTURE.md", "very-long-folder/".repeat(8));
+        let shown = truncate_start(&long, COPY_SHOWN);
+        assert!(shown.starts_with('…'));
+        assert!(shown.ends_with("/ARCHITECTURE.md"));
+        assert_eq!(shown.width(), COPY_SHOWN);
+        assert_eq!(truncate_start("short.md", COPY_SHOWN), "short.md");
     }
 }

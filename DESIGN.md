@@ -89,7 +89,7 @@ When the Command Bar opens:
    * `Right`: Accept the dimmed file or folder name drawn after the typed argument. The block cursor sits on the first character of that hint, the same way a shell draws an inline suggestion. `move` hints folders, `rename` hints names in the same folder, `save` hints files and folders, `new-file` and `new-folder` hint folders (under the focused folder, or from the workspace root after a leading `/`), and `workspace` hints saved folders. The closest name is the shortest match, then A–Z. A name already typed in full stays as it is.
    * `Enter`: Execute the selected command immediately and return focus to the editor. An exact command name in the input (e.g. `goto 42`) wins over the highlighted hint. If the command needs an argument that is missing, `Enter` completes the name instead of failing.
    * `Esc` / `F1`: Dismiss the Command Bar without side effects.
-5. **Focus context:** the bar only lists commands for the surface that was focused when it opened. An editor shows editing commands. The explorer shows `file-picker`, `workspace`, `find`, `replace`, `select`, `new-file`, `new-folder`, `reveal`, `explorer`, `setting`, `about`, and `quit`. In FILE mode it also shows `move`, `delete`, and `rename`, in that order after `select` and before `new-file`. `new-file` and `new-folder` never need FILE mode, and `new-file` is listed for an editor too. A command from the other surface is not hinted, and typing its name does not run it. A bare line number is `goto` only while an editor is focused. The ★ recent command is the last one run on this surface, and it is the first hint whenever it is listed.
+5. **Focus context:** the bar only lists commands for the surface that was focused when it opened. An editor shows editing commands. The explorer shows `file-picker`, `workspace`, `find`, `replace`, `select`, `new-file`, `new-folder`, `copy-name`, `copy-path`, `copy-relative-path`, `reveal`, `explorer`, `setting`, `about`, and `quit`. In FILE mode it also shows `move`, `delete`, and `rename`, in that order after `select` and before `new-file`. `new-file`, `new-folder`, and the three copy commands never need FILE mode; `new-file` and the copy commands are listed for an editor too (there the copy commands follow `paste`). A command from the other surface is not hinted, and typing its name does not run it. A bare line number is `goto` only while an editor is focused. The ★ recent command is the last one run on this surface, and it is the first hint whenever it is listed.
 
 ### 3.3 Built-in Commands
 
@@ -99,6 +99,7 @@ While an editor is focused:
 | :--- | :--- | :--- |
 | `goto` (or just type the number) | `<line>` (1-based) | — |
 | `copy` / `cut` / `paste` | — | `Ctrl + C` / `Ctrl + X` / `Ctrl + V` |
+| `copy-name` / `copy-path` / `copy-relative-path` | — | — |
 | `save` | optional path | `Ctrl + S` |
 | `new-file` | `<path>` (nested, e.g. `images/images.rs`) | — |
 | `undo` / `redo` | — | `Ctrl + Z` / `Ctrl + Y` |
@@ -124,6 +125,8 @@ While an editor is focused:
 
 `new-file` creates an empty file and opens it, without FILE mode. From an editor the path is relative to the workspace root, and a leading `/` or `\` also means the workspace root (never the disk root). Missing folders in a nested path are made. It refuses an existing path, a path outside the workspace, or no open folder.
 
+The copy commands put the focused tab's file on the clipboard (system clipboard, or the in-memory one when the system clipboard is unavailable) and say `Copied <text>`, with a long path cut from the front behind a leading `…` so the file name stays visible. In a focused Markdown preview they use the preview's source file. `copy-name` gives `ARCHITECTURE.md`; `copy-path` gives the full path in the system's own form, without the Windows `\\?\` prefix; `copy-relative-path` gives `docs/ARCHITECTURE.md`. Relative paths always use `/`, the same as the command bar and the session file, so they paste into Markdown links and shells alike. The workspace folder itself copies as `.`. An untitled buffer is refused (`This buffer has no file yet; save it first`), and `copy-relative-path` refuses a file outside the workspace (`ARCHITECTURE.md is outside the workspace`) while the other two still work.
+
 While the explorer is focused:
 
 | Command | Argument | What it does |
@@ -133,6 +136,9 @@ While the explorer is focused:
 | `delete` | — | FILE mode only. Delete those files. Asks first. Refuses while an open editor has unsaved changes for that file. |
 | `rename` | `<name>` | FILE mode only. Rename the focused file or folder. The new name stays in the same folder. |
 | `new-file` | `<path>` | No FILE mode needed. Create an empty file and open it. A relative path starts in the focused folder (or the folder of the focused file); a leading `/` or `\` starts at the workspace root. Nested paths such as `images/images.rs` make the missing folders. Refuses an existing path or a path outside the workspace. |
+| `copy-name` | — | No FILE mode needed. Copy the focused row's file or folder name, e.g. `ARCHITECTURE.md`. |
+| `copy-path` | — | No FILE mode needed. Copy the focused row's full path in the system's own form, e.g. `D:\_Way\My Assets\Photalt\docs\ARCHITECTURE.md` on Windows (never the `\\?\` prefix). |
+| `copy-relative-path` | — | No FILE mode needed. Copy the path from the workspace folder with `/` separators on every system, e.g. `docs/ARCHITECTURE.md`; a folder copies its folder path, e.g. `docs`. |
 | `new-folder` | `<path>` | No FILE mode needed; explorer only. Create a folder in the focused folder (or the folder of the focused file), for example `dogs`. A leading `/` starts at the workspace root, so `/images/dogs` makes `images/dogs` and any missing parent. The tree refreshes and selects the new folder. Refuses an existing path or a path outside the workspace. |
 | `explorer` | — | Toggle the sidebar (`Ctrl + B`) |
 | `file-picker` | — | Open a workspace file by name (`Ctrl + P`) |
