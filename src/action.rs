@@ -123,6 +123,15 @@ pub enum SemanticAction {
     Sidebar(SidebarAction),
     /// Move focus to the neighboring surface. Does not move the text cursor.
     FocusAdjacent(PaneDirection),
+    /// `Ctrl+W`: the next arrow moves focus to the pane on that side.
+    FocusPrefix,
+    /// A key other than an arrow after `Ctrl+W`: drop it and the prefix.
+    CancelFocusPrefix,
+    /// `Ctrl+Up` / `Ctrl+Down`: scroll the view one line. The cursor moves only
+    /// when it would leave the view.
+    ScrollLine {
+        down: bool,
+    },
     /// Select the previous or next tab in the focused pane. Does not move the cursor.
     CycleTab {
         next: bool,
@@ -200,6 +209,11 @@ pub enum AgentAction {
     /// Move to the wrapped row above or below. `extend` keeps the anchor.
     Line {
         down: bool,
+        extend: bool,
+    },
+    /// `Ctrl+Left` / `Ctrl+Right`: move by word. `extend` keeps the anchor.
+    Word {
+        right: bool,
         extend: bool,
     },
     /// `Ctrl+Up`: read the messages above the prompt.

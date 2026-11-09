@@ -337,6 +337,9 @@ impl App {
                 Movement::DocumentEnd => self.scroll_preview(|_, _| isize::MAX),
                 _ => {}
             },
+            SemanticAction::ScrollLine { down } => {
+                self.scroll_preview(line(if *down { 1 } else { -1 }))
+            }
             SemanticAction::PageUp { .. } => self.scroll_preview(|s, p| s as isize - p as isize),
             SemanticAction::PageDown { .. } => self.scroll_preview(|s, p| (s + p) as isize),
             SemanticAction::OpenCommandBar
@@ -347,6 +350,8 @@ impl App {
             | SemanticAction::ResizeSidebar { .. }
             | SemanticAction::Sidebar(_)
             | SemanticAction::FocusAdjacent(_)
+            | SemanticAction::FocusPrefix
+            | SemanticAction::CancelFocusPrefix
             | SemanticAction::CycleTab { .. }
             | SemanticAction::Quit
             | SemanticAction::Prompt(_)

@@ -74,19 +74,6 @@ fn route_sidebar(
     let marking = selecting || filtering;
     let extend = shift && marking;
 
-    if ctrl && !alt {
-        let direction = match key.code {
-            KeyCode::Left => Some(PaneDirection::Left),
-            KeyCode::Right => Some(PaneDirection::Right),
-            KeyCode::Up => Some(PaneDirection::Up),
-            KeyCode::Down => Some(PaneDirection::Down),
-            _ => None,
-        };
-        if let Some(direction) = direction {
-            return Some(SemanticAction::FocusAdjacent(direction));
-        }
-    }
-
     if let Some(action) = crate::keys::dispatch(key, keys)
         && crate::keys::sidebar_accepts(&action)
     {
@@ -427,11 +414,11 @@ fn route_agent(
     }
     if ctrl && !alt {
         match key.code {
-            KeyCode::Left => {
-                return Some(SemanticAction::FocusAdjacent(PaneDirection::Left));
-            }
-            KeyCode::Right => {
-                return Some(SemanticAction::FocusAdjacent(PaneDirection::Right));
+            KeyCode::Left | KeyCode::Right => {
+                return Some(SemanticAction::Agent(AgentAction::Word {
+                    right: key.code == KeyCode::Right,
+                    extend: shift,
+                }));
             }
             KeyCode::Up => return Some(SemanticAction::Agent(AgentAction::Above)),
             KeyCode::Down => return Some(SemanticAction::Agent(AgentAction::Below)),
@@ -537,6 +524,27 @@ fn route_completion(event: &Event, keys: &crate::keys::KeyMap) -> Option<Semanti
     }
 }
 
+/// The key after `Ctrl+W`. An arrow (with or without modifiers still held) moves
+/// focus that way. Any other key cancels and is dropped. Releases and bare
+/// modifier presses keep waiting.
+pub fn route_focus_prefix(event: &Event) -> Option<SemanticAction> {
+    let key = match event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => key,
+        Event::Key(_) => return None,
+        Event::Paste(_) => return Some(SemanticAction::CancelFocusPrefix),
+        _ => return None,
+    };
+    let direction = match key.code {
+        KeyCode::Left => PaneDirection::Left,
+        KeyCode::Right => PaneDirection::Right,
+        KeyCode::Up => PaneDirection::Up,
+        KeyCode::Down => PaneDirection::Down,
+        KeyCode::Modifier(_) => return None,
+        _ => return Some(SemanticAction::CancelFocusPrefix),
+    };
+    Some(SemanticAction::FocusAdjacent(direction))
+}
+
 fn route_editor(event: &Event, keys: &crate::keys::KeyMap) -> Option<SemanticAction> {
     match event {
         Event::Key(key) => route_editor_key(key, keys),
@@ -571,13 +579,11 @@ fn route_editor_key(key: &KeyEvent, keys: &crate::keys::KeyMap) -> Option<Semant
     };
 
     match key.code {
-        KeyCode::Left if ctrl && !alt => Some(SemanticAction::FocusAdjacent(PaneDirection::Left)),
-        KeyCode::Right if ctrl && !alt => Some(SemanticAction::FocusAdjacent(PaneDirection::Right)),
-        KeyCode::Up if ctrl && !alt => Some(SemanticAction::FocusAdjacent(PaneDirection::Up)),
-        KeyCode::Down if ctrl && !alt => Some(SemanticAction::FocusAdjacent(PaneDirection::Down)),
-        KeyCode::Left if alt && !ctrl => movement(Movement::WordLeft),
+        KeyCode::Up if ctrl && !alt => Some(SemanticAction::ScrollLine { down: false }),
+        KeyCode::Down if ctrl && !alt => Some(SemanticAction::ScrollLine { down: true }),
+        KeyCode::Left if ctrl != alt => movement(Movement::WordLeft),
         KeyCode::Left => movement(Movement::Left),
-        KeyCode::Right if alt && !ctrl => movement(Movement::WordRight),
+        KeyCode::Right if ctrl != alt => movement(Movement::WordRight),
         KeyCode::Right => movement(Movement::Right),
         KeyCode::Up => movement(Movement::Up),
         KeyCode::Down => movement(Movement::Down),
@@ -1075,25 +1081,38 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_arrows_move_focus_and_alt_arrows_move_by_word() {
+    fn ctrl_and_alt_arrows_move_by_word_and_ctrl_up_down_scroll() {
         assert_eq!(
             editor(key(KeyCode::Left, KeyModifiers::CONTROL)),
-            Some(SemanticAction::FocusAdjacent(PaneDirection::Left))
+            Some(SemanticAction::Move {
+                movement: Movement::WordLeft,
+                extend: false
+            })
         );
         assert_eq!(
             editor(key(
                 KeyCode::Right,
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT
             )),
-            Some(SemanticAction::FocusAdjacent(PaneDirection::Right))
+            Some(SemanticAction::Move {
+                movement: Movement::WordRight,
+                extend: true
+            })
         );
         assert_eq!(
             editor(key(KeyCode::Up, KeyModifiers::CONTROL)),
-            Some(SemanticAction::FocusAdjacent(PaneDirection::Up))
+            Some(SemanticAction::ScrollLine { down: false })
         );
         assert_eq!(
             editor(key(KeyCode::Down, KeyModifiers::CONTROL)),
-            Some(SemanticAction::FocusAdjacent(PaneDirection::Down))
+            Some(SemanticAction::ScrollLine { down: true })
+        );
+        assert_eq!(
+            editor(key(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT)),
+            Some(SemanticAction::Move {
+                movement: Movement::WordLeft,
+                extend: true
+            })
         );
         assert_eq!(
             editor(key(KeyCode::Right, KeyModifiers::ALT)),
@@ -1188,11 +1207,15 @@ mod tests {
         );
         assert_eq!(
             sidebar(key(KeyCode::Right, KeyModifiers::CONTROL)),
-            Some(SemanticAction::FocusAdjacent(PaneDirection::Right))
+            Some(SemanticAction::Sidebar(SidebarAction::Expand {
+                extend: false
+            }))
         );
         assert_eq!(
             sidebar(key(KeyCode::Left, KeyModifiers::CONTROL)),
-            Some(SemanticAction::FocusAdjacent(PaneDirection::Left))
+            Some(SemanticAction::Sidebar(SidebarAction::Collapse {
+                extend: false
+            }))
         );
         assert_eq!(
             sidebar(key(KeyCode::Right, KeyModifiers::ALT)),
@@ -1389,5 +1412,115 @@ mod tests {
         }
         assert_eq!(route(&ctrl_d, Focus::Sidebar, true), None);
         assert_eq!(route(&ctrl_d, Focus::CommandBar, false), None);
+    }
+
+    #[test]
+    fn ctrl_w_starts_the_focus_prefix_where_arrows_used_to_move_focus() {
+        let ctrl_w = key(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        for focus in [
+            Focus::Editor,
+            Focus::Sidebar,
+            Focus::Agent,
+            Focus::CompletionPopup,
+        ] {
+            assert_eq!(
+                route(&ctrl_w, focus, false),
+                Some(SemanticAction::FocusPrefix),
+                "{focus:?}"
+            );
+        }
+        assert_eq!(
+            route(&ctrl_w, Focus::Sidebar, true),
+            Some(SemanticAction::FocusPrefix)
+        );
+        assert_eq!(
+            route(&ctrl_w, Focus::FilePicker, false),
+            Some(SemanticAction::Picker(PickerAction::DeleteWordBack))
+        );
+        for focus in [
+            Focus::Find,
+            Focus::Replace,
+            Focus::CommandBar,
+            Focus::PreviewSide,
+            Focus::Prompt,
+            Focus::About,
+            Focus::Settings,
+        ] {
+            assert_eq!(route(&ctrl_w, focus, false), None, "{focus:?}");
+        }
+    }
+
+    #[test]
+    fn the_key_after_the_prefix_is_an_arrow_or_a_cancel() {
+        use crossterm::event::{KeyEventKind, ModifierKeyCode};
+        let arrow = |code, modifiers| route_focus_prefix(&key(code, modifiers));
+        assert_eq!(
+            arrow(KeyCode::Left, KeyModifiers::NONE),
+            Some(SemanticAction::FocusAdjacent(PaneDirection::Left))
+        );
+        assert_eq!(
+            arrow(KeyCode::Right, KeyModifiers::CONTROL),
+            Some(SemanticAction::FocusAdjacent(PaneDirection::Right))
+        );
+        assert_eq!(
+            arrow(KeyCode::Up, KeyModifiers::NONE),
+            Some(SemanticAction::FocusAdjacent(PaneDirection::Up))
+        );
+        assert_eq!(
+            arrow(KeyCode::Down, KeyModifiers::NONE),
+            Some(SemanticAction::FocusAdjacent(PaneDirection::Down))
+        );
+        for code in [
+            KeyCode::Char('x'),
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Char('w'),
+        ] {
+            assert_eq!(
+                arrow(code, KeyModifiers::NONE),
+                Some(SemanticAction::CancelFocusPrefix)
+            );
+        }
+        assert_eq!(
+            route_focus_prefix(&Event::Paste("text".into())),
+            Some(SemanticAction::CancelFocusPrefix)
+        );
+        assert_eq!(
+            arrow(
+                KeyCode::Modifier(ModifierKeyCode::LeftControl),
+                KeyModifiers::CONTROL
+            ),
+            None
+        );
+        let mut release = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        release.kind = KeyEventKind::Release;
+        assert_eq!(route_focus_prefix(&Event::Key(release)), None);
+    }
+
+    #[test]
+    fn agent_ctrl_left_right_move_by_word_and_ctrl_up_down_still_read() {
+        let agent = |code, modifiers| route(&key(code, modifiers), Focus::Agent, false);
+        assert_eq!(
+            agent(KeyCode::Left, KeyModifiers::CONTROL),
+            Some(SemanticAction::Agent(AgentAction::Word {
+                right: false,
+                extend: false
+            }))
+        );
+        assert_eq!(
+            agent(KeyCode::Right, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            Some(SemanticAction::Agent(AgentAction::Word {
+                right: true,
+                extend: true
+            }))
+        );
+        assert_eq!(
+            agent(KeyCode::Up, KeyModifiers::CONTROL),
+            Some(SemanticAction::Agent(AgentAction::Above))
+        );
+        assert_eq!(
+            agent(KeyCode::Down, KeyModifiers::CONTROL),
+            Some(SemanticAction::Agent(AgentAction::Below))
+        );
     }
 }
