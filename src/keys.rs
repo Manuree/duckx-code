@@ -327,8 +327,8 @@ pub fn bindings() -> &'static [Binding] {
         },
         Binding {
             id: "focus-prefix",
-            label: "Focus pane",
-            detail: "Press, then an arrow, to move focus to the window on that side.",
+            label: "Pane select mode",
+            detail: "Enter PANE mode: arrows move a highlight between windows, Enter focuses it, Esc cancels.",
             defaults: &[ch('w', true, false, false)],
             action: || SemanticAction::FocusPrefix,
         },

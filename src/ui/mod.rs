@@ -27,7 +27,7 @@ use ratatui::{
 use crate::theme::UiStyles;
 
 use crate::app::App;
-use crate::layout::{self, Divider, EditorId, Layout};
+use crate::layout::{self, Divider, EditorId, Layout, Surface};
 
 /// The only way to create a bordered panel: every border in duckx-code is rounded.
 pub(crate) fn panel(title: &str) -> Block<'_> {
@@ -61,7 +61,12 @@ pub struct EditorLayout {
 /// command bar, find, or replace is open.
 pub fn frame_layout(app: &App, area: Rect) -> EditorLayout {
     let focus = app.focus_mode();
-    let sole = Layout::Leaf(app.active_id());
+    // In focus mode PANE mode shows the candidate window in place of the active one.
+    let shown = match app.pane_candidate() {
+        Some(Surface::Editor(id)) if focus => id,
+        _ => app.active_id(),
+    };
+    let sole = Layout::Leaf(shown);
     let mut placed = layout(
         area,
         app.explorer.open && !focus,
@@ -339,6 +344,41 @@ fn buffer_name(path: Option<&Path>) -> String {
         .unwrap_or_else(|| "[No Name]".to_string())
 }
 
+/// The PANE mode title on the candidate's border.
+pub const PANE_SELECT_TITLE: &str = " ▸ select ";
+
+/// PANE mode: a bold amber rounded border, titled `▸ select`, drawn over the
+/// candidate window's edge cells. Its contents stay as they are. The window that
+/// still has focus keeps its normal look, so "here" and "going there" differ.
+fn render_pane_candidate(frame: &mut Frame, app: &App, layout: &EditorLayout, theme: &UiStyles) {
+    let Some(candidate) = app.pane_candidate() else {
+        return;
+    };
+    let area = match candidate {
+        Surface::Sidebar => layout.sidebar,
+        Surface::Agent => layout.agent,
+        Surface::Editor(id) => match layout.panes.iter().find(|pane| pane.id == id) {
+            Some(pane) => Rect::new(
+                pane.title.x.min(pane.gutter.x),
+                pane.title.y,
+                pane.title.width.max(pane.gutter.width + pane.text.width),
+                pane.title.height + pane.text.height,
+            ),
+            None => return,
+        },
+    };
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let accent = Style::new()
+        .fg(theme.diagnostic_warning)
+        .add_modifier(ratatui::style::Modifier::BOLD);
+    let block = panel(PANE_SELECT_TITLE)
+        .border_style(accent)
+        .title_style(accent);
+    frame.render_widget(block, area);
+}
+
 fn render_divider(frame: &mut Frame, divider: &Divider, theme: &UiStyles) {
     use ratatui::text::Line;
     use ratatui::widgets::Paragraph;
@@ -425,6 +465,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.explorer.open {
         sidebar::render(frame, &app.explorer, layout.sidebar, &theme);
     }
+    render_pane_candidate(frame, app, &layout, &theme);
     if (app.find_mode.is_some() || app.replace_mode.is_some()) && layout.command.height > 0 {
         command_bar::render_mode_hint(frame, app, layout.command);
     } else if layout.command.height > 0 {
@@ -2035,5 +2076,107 @@ mod tests {
 
         app.handle(SemanticAction::Deselect);
         assert!(!draw(&app, 60, 8).contains("selected"));
+    }
+
+    /// Two side-by-side `[No Name]` splits, the left one focused, PANE mode on with
+    /// the candidate moved to the right (borderless) split.
+    fn pane_mode_on_the_right_split(width: u16, height: u16) -> App {
+        use crate::action::{PaneDirection, PaneSelectAction};
+        let mut app = App::new(Buffer::from_text("left"), None);
+        app.set_screen_size(width, height);
+        submit(&mut app, "split-right");
+        app.handle(SemanticAction::FocusAdjacent(PaneDirection::Left));
+        app.handle(SemanticAction::FocusPrefix);
+        app.handle(SemanticAction::PaneSelect(PaneSelectAction::Move(
+            PaneDirection::Right,
+        )));
+        app
+    }
+
+    #[test]
+    fn pane_mode_draws_an_amber_rounded_border_on_a_borderless_split() {
+        let (width, height) = (80, 14);
+        let app = pane_mode_on_the_right_split(width, height);
+        let before = {
+            let mut plain = App::new(Buffer::from_text("left"), None);
+            plain.set_screen_size(width, height);
+            submit(&mut plain, "split-right");
+            draw(&plain, width, height)
+        };
+        assert!(!before.contains(PANE_SELECT_TITLE.trim()), "{before}");
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen = draw(&app, width, height);
+        let lines = rows(&screen);
+        let top = lines[0];
+        let title = top
+            .find("▸ select")
+            .expect("candidate title on the top border");
+        let title_col = top[..title].chars().count() as u16;
+        assert!(
+            title_col > width / 2,
+            "title sits on the right split: {top}"
+        );
+
+        let amber = app.styles().diagnostic_warning;
+        let left_corner = (title_col - 2..title_col)
+            .find(|x| buffer[(*x, 0)].symbol() == "╭")
+            .expect("rounded top-left corner just before the title");
+        assert_eq!(buffer[(left_corner, 0)].fg, amber);
+        assert_eq!(buffer[(width - 1, 0)].symbol(), "╮");
+        let bottom = (0..height)
+            .rev()
+            .find(|y| buffer[(width - 1, *y)].symbol() == "╯")
+            .expect("rounded bottom-right corner");
+        assert_eq!(buffer[(left_corner, bottom)].symbol(), "╰");
+        assert_eq!(buffer[(width - 1, bottom - 1)].symbol(), "│");
+        assert_eq!(buffer[(width - 1, bottom - 1)].fg, amber);
+        for x in 0..left_corner.saturating_sub(1) {
+            for y in 0..height {
+                let cell = &buffer[(x, y)];
+                let border = ["╭", "╮", "╰", "╯", "─", "│"].contains(&cell.symbol());
+                assert!(
+                    !(border && cell.fg == amber),
+                    "left split keeps its look at {x},{y}"
+                );
+            }
+        }
+        let status = lines[height as usize - 1];
+        assert!(status.contains(" PANE "), "{status}");
+        assert!(status.contains("Enter select  Esc cancel"), "{status}");
+        assert!(!status.contains("NORMAL"), "{status}");
+        assert!(!screen.contains('┌') && !screen.contains('┐'));
+    }
+
+    #[test]
+    fn pane_mode_shows_the_candidate_even_in_focus_mode() {
+        use crate::action::{PaneDirection, PaneSelectAction};
+        let mut app = App::new(Buffer::from_text("left\nleft two"), None);
+        app.set_screen_size(80, 12);
+        submit(&mut app, "split-right");
+        app.handle(SemanticAction::InsertText("R\nright two".into()));
+        submit(&mut app, "focus");
+        assert!(app.focus_mode());
+        app.handle(SemanticAction::FocusPrefix);
+        let screen = draw(&app, 80, 12);
+        assert!(screen.contains("▸ select"), "{screen}");
+        assert!(screen.contains("right two"), "{screen}");
+
+        app.handle(SemanticAction::PaneSelect(PaneSelectAction::Move(
+            PaneDirection::Left,
+        )));
+        let screen = draw(&app, 80, 12);
+        assert!(screen.contains("▸ select"), "{screen}");
+        assert!(
+            screen.contains("left two"),
+            "the candidate fills the screen\n{screen}"
+        );
+
+        app.handle(SemanticAction::PaneSelect(PaneSelectAction::Cancel));
+        let screen = draw(&app, 80, 12);
+        assert!(!screen.contains("▸ select"), "{screen}");
+        assert!(screen.contains("right two"), "{screen}");
     }
 }

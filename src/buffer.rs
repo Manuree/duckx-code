@@ -184,6 +184,10 @@ pub enum Movement {
     DocumentEnd,
     PageUp(usize),
     PageDown(usize),
+    /// `Ctrl+Up` / `Ctrl+Down`: the previous or next blank line (empty or only
+    /// whitespace). On a blank line, its run is skipped first. Lands at column 0.
+    ParagraphUp,
+    ParagraphDown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -668,6 +672,8 @@ impl Buffer {
                     Movement::LineEnd => self.line_end(self.rope.char_to_line(head)),
                     Movement::DocumentStart => 0,
                     Movement::DocumentEnd => self.rope.len_chars(),
+                    Movement::ParagraphUp => self.paragraph_stop(head, false),
+                    Movement::ParagraphDown => self.paragraph_stop(head, true),
                     _ => unreachable!("vertical movements handled above"),
                 }
             }
@@ -1403,6 +1409,30 @@ impl Buffer {
         start + if i == 0 { 0 } else { spans[i].0 }
     }
 
+    /// Start of the next (or previous) empty or whitespace-only line. On a blank line,
+    /// its run of blank lines is skipped first. With none, the end (or start) of
+    /// the document.
+    fn paragraph_stop(&self, pos: usize, down: bool) -> usize {
+        let blank = |line: usize| self.line_content(line).trim().is_empty();
+        let lines = self.rope.len_lines();
+        let mut line = self.rope.char_to_line(pos) as isize;
+        let step = if down { 1 } else { -1 };
+        let inside = |line: isize| line >= 0 && (line as usize) < lines;
+        while inside(line) && blank(line as usize) {
+            line += step;
+        }
+        while inside(line) && !blank(line as usize) {
+            line += step;
+        }
+        if inside(line) {
+            self.line_start(line as usize)
+        } else if down {
+            self.rope.len_chars()
+        } else {
+            0
+        }
+    }
+
     /// First `Home` press jumps to the first non-whitespace char; a second press goes to column 0.
     fn smart_line_start(&self, pos: usize) -> usize {
         let line = self.rope.char_to_line(pos);
@@ -2011,6 +2041,30 @@ mod tests {
             stops.push(head(&buf));
         }
         assert_eq!(stops, [20, 17, 16, 13, 11, 5, 0]);
+    }
+
+    #[test]
+    fn paragraph_moves_land_on_blank_lines_past_blank_runs() {
+        let mut buf = Buffer::from_text("one\ntwo\n\n \t\nthree\n\nfour");
+        let mut lines = Vec::new();
+        for _ in 0..3 {
+            buf.move_cursor(Movement::ParagraphDown, false);
+            lines.push(buf.cursor_line_char());
+        }
+        assert_eq!(lines, [(2, 0), (5, 0), (6, 4)]);
+        lines.clear();
+        for _ in 0..3 {
+            buf.move_cursor(Movement::ParagraphUp, false);
+            lines.push(buf.cursor_line_char());
+        }
+        assert_eq!(lines, [(5, 0), (3, 0), (0, 0)]);
+
+        let mut buf = Buffer::from_text("only line");
+        buf.move_to(4, false);
+        buf.move_cursor(Movement::ParagraphDown, false);
+        assert_eq!(head(&buf), 9);
+        buf.move_cursor(Movement::ParagraphUp, true);
+        assert_eq!(buf.selection(), Selection { anchor: 9, head: 0 });
     }
 
     #[test]
