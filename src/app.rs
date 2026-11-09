@@ -557,6 +557,10 @@ pub struct App {
     tree_scan: Option<TreeScan>,
     /// Read-only Markdown windows opened by `preview`.
     previews: Vec<Preview>,
+    /// The side picker opened by bare `preview`.
+    preview_picker: Option<preview::PreviewPicker>,
+    /// The side the picker highlights first: the last side used.
+    preview_side: crate::action::Side,
 }
 
 struct TreeScan {
@@ -642,6 +646,8 @@ impl App {
             lsp_resetting: false,
             tree_scan: None,
             previews: Vec::new(),
+            preview_picker: None,
+            preview_side: crate::action::Side::Right,
         };
         app.configure_syntax(TabId(0));
         app
@@ -1085,6 +1091,8 @@ impl App {
     pub fn focus(&self) -> Focus {
         if self.prompt.is_some() {
             Focus::Prompt
+        } else if self.preview_picker.is_some() {
+            Focus::PreviewSide
         } else if self.command_bar.is_some() {
             Focus::CommandBar
         } else if self.about {
@@ -2333,6 +2341,7 @@ impl App {
             SemanticAction::Prompt(action) => self.handle_prompt(action),
             SemanticAction::Settings(action) => self.handle_settings(action),
             SemanticAction::CloseAbout => self.about = false,
+            SemanticAction::PreviewSide(action) => self.handle_preview_side(action),
             SemanticAction::ToggleAgent => self.toggle_agent(),
             SemanticAction::Agent(action) => self.handle_agent_input(action),
         }
@@ -2914,7 +2923,10 @@ impl App {
                 .iter()
                 .map(|entry| display_rel(&entry.path))
                 .collect(),
-            NameSource::PreviewSide => vec!["split-right".to_string(), "split-down".to_string()],
+            NameSource::PreviewSide => crate::action::Side::ALL
+                .iter()
+                .map(|side| side.token().to_string())
+                .collect(),
             NameSource::Workspace => self
                 .sessions
                 .iter()
@@ -3739,7 +3751,10 @@ impl App {
     }
 
     fn dispatch_spec(&mut self, spec: &CommandSpec, arg: Option<String>, context: CommandContext) {
-        if spec.arg.is_some() && arg.as_ref().is_none_or(|text| text.is_empty()) {
+        if spec.arg.is_some()
+            && !crate::command::optional_arg(spec.id)
+            && arg.as_ref().is_none_or(|text| text.is_empty())
+        {
             if let Some(bar) = self.command_bar.as_mut() {
                 bar.input = completed_input(spec);
                 bar.selected = 0;
@@ -8802,21 +8817,29 @@ mod tests {
         );
         assert!(app.previews().is_empty());
         assert_eq!(leaf_ids(app.layout()).len(), 1);
+        run(&mut app, "preview");
+        assert!(app.preview_picker().is_none(), "no popup for non-Markdown");
+        assert_eq!(app.focus(), Focus::Editor);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("preview works on Markdown (.md) files")
+        );
 
         let mut app = markdown_app("# Header\n");
-        run(&mut app, "preview");
-        let bar = app.command_bar.as_ref().expect("waits for a side");
-        assert_eq!(bar.input, "preview ");
-        assert_eq!(bar.prompted, Some(CommandId::Preview));
-        type_in_bar(&mut app, "split-r");
+        app.handle(SemanticAction::OpenCommandBar);
+        type_in_bar(&mut app, "preview split-r");
         assert_eq!(app.argument_ghost().as_deref(), Some("ight"));
+        app.command_bar = None;
+        app.handle(SemanticAction::OpenCommandBar);
+        type_in_bar(&mut app, "preview split-l");
+        assert_eq!(app.argument_ghost().as_deref(), Some("eft"));
         app.command_bar = None;
 
         run(&mut app, "preview sideways");
         assert!(
             app.message
                 .as_deref()
-                .is_some_and(|m| m.contains("split-right or split-down")),
+                .is_some_and(|m| m.contains("split-left")),
             "{:?}",
             app.message
         );
@@ -8825,6 +8848,125 @@ mod tests {
         let mut app = App::new(Buffer::from_text("x\n"), Some("notes.markdown".into()));
         run(&mut app, "preview right");
         assert_eq!(app.previews().len(), 1);
+    }
+
+    fn pick(app: &mut App, action: crate::action::PreviewSideAction) {
+        app.handle(SemanticAction::PreviewSide(action));
+    }
+
+    #[test]
+    fn bare_preview_opens_the_side_picker_and_each_arrow_opens_that_side() {
+        use crate::action::{PreviewSideAction, Side};
+        for (side, axis, preview_first) in [
+            (Side::Up, Axis::Vertical, true),
+            (Side::Down, Axis::Vertical, false),
+            (Side::Left, Axis::Horizontal, true),
+            (Side::Right, Axis::Horizontal, false),
+        ] {
+            let mut app = markdown_app("# Header\n");
+            let source = app.active_id();
+            run(&mut app, "preview");
+            assert!(app.command_bar.is_none(), "no typed argument is needed");
+            assert_eq!(app.focus(), Focus::PreviewSide);
+            assert!(app.previews().is_empty());
+
+            pick(&mut app, PreviewSideAction::Choose(side));
+            assert!(app.preview_picker().is_none());
+            assert_eq!(app.focus(), Focus::Editor);
+            assert_eq!(app.active_id(), source, "focus stays on the source");
+            assert_eq!(app.previews().len(), 1);
+            let preview = app.previews()[0].pane;
+            assert_eq!(app.previews()[0].side, side);
+            let (first, second) = if preview_first {
+                (preview, source)
+            } else {
+                (source, preview)
+            };
+            assert_eq!(
+                app.layout(),
+                &Layout::Split {
+                    axis,
+                    first: Box::new(Layout::Leaf(first)),
+                    second: Box::new(Layout::Leaf(second)),
+                },
+                "{side:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_side_picker_cancels_with_esc_and_enter_takes_the_highlight() {
+        use crate::action::{PreviewSideAction, Side};
+        let mut app = markdown_app("# Header\n");
+        run(&mut app, "preview");
+        assert_eq!(app.preview_picker().unwrap().selected, Side::Right);
+        pick(&mut app, PreviewSideAction::Cancel);
+        assert!(app.preview_picker().is_none());
+        assert!(app.previews().is_empty());
+        assert_eq!(leaf_ids(app.layout()).len(), 1);
+        assert_eq!(app.focus(), Focus::Editor);
+
+        run(&mut app, "preview");
+        pick(&mut app, PreviewSideAction::Next);
+        assert_eq!(app.preview_picker().unwrap().selected, Side::Up);
+        pick(&mut app, PreviewSideAction::Prev);
+        pick(&mut app, PreviewSideAction::Prev);
+        assert_eq!(app.preview_picker().unwrap().selected, Side::Left);
+        pick(&mut app, PreviewSideAction::Confirm);
+        assert_eq!(app.previews().len(), 1);
+        assert_eq!(app.previews()[0].side, Side::Left);
+
+        run(&mut app, "preview");
+        assert_eq!(
+            app.preview_picker().unwrap().selected,
+            Side::Left,
+            "the picker starts on the last side"
+        );
+        pick(&mut app, PreviewSideAction::Choose(Side::Up));
+        assert_eq!(app.previews().len(), 1, "moved, not stacked");
+        assert_eq!(app.previews()[0].side, Side::Up);
+        assert_eq!(leaf_ids(app.layout()).len(), 2);
+
+        run(&mut app, "preview split-up");
+        assert_eq!(app.message.as_deref(), Some("Preview is already open"));
+        run(&mut app, "preview split-left");
+        assert_eq!(app.previews()[0].side, Side::Left);
+        run(&mut app, "preview up");
+        assert_eq!(app.previews()[0].side, Side::Up);
+        assert_eq!(leaf_ids(app.layout()).len(), 2);
+    }
+
+    #[test]
+    fn side_picker_keys_route_arrows_enter_tab_and_esc() {
+        use crate::action::{PreviewSideAction, Side};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let route = |code| {
+            crate::input::route(
+                &Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+                Focus::PreviewSide,
+                false,
+            )
+        };
+        for (code, side) in [
+            (KeyCode::Up, Side::Up),
+            (KeyCode::Down, Side::Down),
+            (KeyCode::Left, Side::Left),
+            (KeyCode::Right, Side::Right),
+        ] {
+            assert_eq!(
+                route(code),
+                Some(SemanticAction::PreviewSide(PreviewSideAction::Choose(side)))
+            );
+        }
+        assert_eq!(
+            route(KeyCode::Esc),
+            Some(SemanticAction::PreviewSide(PreviewSideAction::Cancel))
+        );
+        assert_eq!(
+            route(KeyCode::Enter),
+            Some(SemanticAction::PreviewSide(PreviewSideAction::Confirm))
+        );
+        assert_eq!(route(KeyCode::Char('x')), None);
     }
 
     #[test]

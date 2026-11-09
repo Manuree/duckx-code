@@ -123,6 +123,27 @@ impl Layout {
         }
     }
 
+    /// Like [`Self::split`], but the new pane goes first: to the left or above `target`.
+    pub fn split_before(self, target: EditorId, split_axis: Axis, new_id: EditorId) -> Self {
+        match self {
+            Layout::Leaf(id) if id == target => Layout::Split {
+                axis: split_axis,
+                first: Box::new(Layout::Leaf(new_id)),
+                second: Box::new(Layout::Leaf(id)),
+            },
+            Layout::Leaf(_) => self,
+            Layout::Split {
+                axis,
+                first,
+                second,
+            } => Layout::Split {
+                axis,
+                first: Box::new((*first).split_before(target, split_axis, new_id)),
+                second: Box::new((*second).split_before(target, split_axis, new_id)),
+            },
+        }
+    }
+
     /// Drops `target` and promotes its sibling. The last remaining pane is returned as `Err`
     /// so the caller still has the tree.
     pub fn close(self, target: EditorId) -> Result<Self, Self> {
