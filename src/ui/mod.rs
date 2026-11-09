@@ -2005,4 +2005,35 @@ mod tests {
         assert_eq!(buffer[(0, deleted)].symbol(), "2");
         assert_eq!(buffer[(0, deleted)].fg, counted.styles().git_deleted);
     }
+
+    #[test]
+    fn sticky_selection_stays_highlighted_after_the_cursor_moves() {
+        let mut app = App::new(Buffer::from_text("hello world\nnext"), None);
+        app.buffer_mut().select_span(0, 5);
+        app.handle(SemanticAction::Move {
+            movement: crate::buffer::Movement::Down,
+            extend: false,
+        });
+        assert!(draw(&app, 60, 8).contains("5 selected"));
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..8)
+            .find(|y| {
+                (0..60)
+                    .map(|x| buffer[(x, *y)].symbol())
+                    .collect::<String>()
+                    .contains("hello world")
+            })
+            .unwrap();
+        let line: String = (0..60).map(|x| buffer[(x, row)].symbol()).collect();
+        let h = line[..line.find("hello").unwrap()].chars().count() as u16;
+        let selected = app.styles().selection.bg;
+        assert_eq!(buffer[(h, row)].bg, selected.unwrap());
+        assert_ne!(buffer[(h + 6, row)].bg, selected.unwrap());
+
+        app.handle(SemanticAction::Deselect);
+        assert!(!draw(&app, 60, 8).contains("selected"));
+    }
 }

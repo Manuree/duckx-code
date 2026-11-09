@@ -293,6 +293,9 @@ pub struct ByteEdit {
 pub struct Buffer {
     rope: Rope,
     selection: Selection,
+    /// A selection the cursor moved away from. It stays highlighted until `deselect`,
+    /// a new selection, or an edit. Only set while `selection` is a caret.
+    sticky: Option<Selection>,
     line_ending: LineEnding,
     indent_style: IndentStyle,
     /// Display width of a tab character, and the size of one space indent.
@@ -320,6 +323,7 @@ impl Buffer {
         Self {
             rope: Rope::from_str(text),
             selection: Selection::point(0),
+            sticky: None,
             line_ending: LineEnding::detect(text),
             indent_style: IndentStyle::Spaces(TAB_WIDTH),
             tab_width: TAB_WIDTH,
@@ -343,8 +347,101 @@ impl Buffer {
         &self.rope
     }
 
+    /// The cursor (`head`) and the range it is extending. A sticky selection the cursor
+    /// moved away from is not here; see [`highlight`](Self::highlight).
     pub fn selection(&self) -> Selection {
         self.selection
+    }
+
+    /// The range drawn as selected and used by copy and cut: the live selection, or the
+    /// sticky one the cursor moved away from. Clamped to the text.
+    pub fn highlight(&self) -> Selection {
+        if !self.selection.is_empty() {
+            return self.selection;
+        }
+        let len = self.rope.len_chars();
+        match self.sticky {
+            Some(sticky) => Selection {
+                anchor: sticky.anchor.min(len),
+                head: sticky.head.min(len),
+            },
+            None => self.selection,
+        }
+    }
+
+    /// Clears the selection, sticky or live. The cursor stays where it is.
+    /// Returns `false` when nothing was selected.
+    pub fn deselect(&mut self) -> bool {
+        let had = !self.highlight().is_empty();
+        self.sticky = None;
+        self.selection = Selection::point(self.selection.head);
+        had
+    }
+
+    /// Before an edit: a caret inside or at an edge of the sticky selection takes it
+    /// back, so the edit replaces it. A caret elsewhere drops it, so the edit happens
+    /// at the caret and text out of view is never deleted.
+    pub fn resolve_sticky(&mut self) {
+        let Some(_) = self.sticky else {
+            return;
+        };
+        let sticky = self.highlight();
+        self.sticky = None;
+        let head = self.selection.head;
+        if self.selection.is_empty() && sticky.from() <= head && head <= sticky.to() {
+            self.selection = sticky;
+        }
+    }
+
+    /// A plain move keeps the current selection on screen as a sticky one.
+    fn keep_sticky(&mut self) {
+        if !self.selection.is_empty() {
+            self.sticky = Some(self.selection);
+        }
+    }
+
+    /// Shift+move: continue the sticky selection when the cursor is back on its
+    /// active end, otherwise start a new one at the cursor.
+    fn take_sticky_for_extend(&mut self) {
+        if let Some(sticky) = self.sticky.take()
+            && self.selection.is_empty()
+            && self.selection.head == sticky.head
+            && sticky.head <= self.rope.len_chars()
+            && sticky.anchor <= self.rope.len_chars()
+        {
+            self.selection = sticky;
+        }
+    }
+
+    /// Keeps the sticky selection on the same text across an edit at `pos`.
+    fn shift_sticky(&mut self, pos: usize, removed: usize, inserted: usize) {
+        let Some(sticky) = self.sticky else {
+            return;
+        };
+        let map = |p: usize, end: bool| {
+            if p < pos || (end && p == pos) {
+                p
+            } else if p >= pos + removed {
+                p - removed + inserted
+            } else {
+                pos
+            }
+        };
+        let forward = sticky.anchor <= sticky.head;
+        let (from, to) = (map(sticky.from(), false), map(sticky.to(), true));
+        let len = self.rope.len_chars();
+        let (from, to) = (from.min(len), to.min(len));
+        self.sticky = (from < to).then_some(if forward {
+            Selection {
+                anchor: from,
+                head: to,
+            }
+        } else {
+            Selection {
+                anchor: to,
+                head: from,
+            }
+        });
     }
 
     pub fn line_ending(&self) -> LineEnding {
@@ -462,10 +559,17 @@ impl Buffer {
         self.rope.slice(sel.from()..sel.to()).to_string()
     }
 
-    /// Text a copy acts on: the selection, or the whole cursor line (with its line ending) when nothing is selected.
+    /// Text of [`highlight`](Self::highlight), sticky selection included.
+    pub fn highlighted_text(&self) -> String {
+        let sel = self.highlight();
+        self.rope.slice(sel.from()..sel.to()).to_string()
+    }
+
+    /// Text a copy acts on: the selection (sticky included), or the whole cursor line
+    /// (with its line ending) when nothing is selected.
     pub fn copy_text(&self) -> String {
-        if !self.selection.is_empty() {
-            return self.selected_text();
+        if !self.highlight().is_empty() {
+            return self.highlighted_text();
         }
         let line = self.rope.char_to_line(self.selection.head);
         let mut text = self.rope.line(line).to_string();
@@ -478,6 +582,10 @@ impl Buffer {
     /// Deletes the text [`copy_text`](Self::copy_text) names, as one undo step.
     /// A last line with no line break also drops the break before it, so the line disappears.
     pub fn cut_text(&mut self) -> String {
+        if !self.highlight().is_empty() {
+            self.selection = self.highlight();
+        }
+        self.sticky = None;
         let text = self.copy_text();
         if !self.selection.is_empty() {
             let sel = self.selection;
@@ -516,6 +624,11 @@ impl Buffer {
         self.history.seal();
         self.target_col = None;
         let head = head.min(self.rope.len_chars());
+        if extend {
+            self.take_sticky_for_extend();
+        } else {
+            self.keep_sticky();
+        }
         self.selection = if extend {
             Selection {
                 anchor: self.selection.anchor,
@@ -528,22 +641,15 @@ impl Buffer {
 
     // ---- Movement ----------------------------------------------------------
 
+    /// Without `extend`, a selection stays highlighted (sticky) while the cursor moves.
     pub fn move_cursor(&mut self, movement: Movement, extend: bool) {
         self.history.seal();
-        let sel = self.selection;
-
-        if !extend && !sel.is_empty() {
-            let collapsed = match movement {
-                Movement::Left => Some(sel.from()),
-                Movement::Right => Some(sel.to()),
-                _ => None,
-            };
-            if let Some(pos) = collapsed {
-                self.selection = Selection::point(pos);
-                self.target_col = None;
-                return;
-            }
+        if extend {
+            self.take_sticky_for_extend();
+        } else {
+            self.keep_sticky();
         }
+        let sel = self.selection;
 
         let head = sel.head;
         let new_head = match movement {
@@ -624,6 +730,7 @@ impl Buffer {
         let len = self.rope.len_chars();
         let start = start.min(len);
         let end = end.min(len).max(start);
+        self.sticky = None;
         self.selection = Selection {
             anchor: end,
             head: start,
@@ -678,6 +785,7 @@ impl Buffer {
         let start = self.line_start(line);
         let end = start + self.line_content_len(line);
         let col = char_col.min(end.saturating_sub(start));
+        self.keep_sticky();
         self.selection = Selection::point(start + col);
     }
 
@@ -686,12 +794,14 @@ impl Buffer {
         self.history.seal();
         self.target_col = None;
         let line = line.min(self.rope.len_lines() - 1);
+        self.keep_sticky();
         self.selection = Selection::point(self.line_start(line));
     }
 
     pub fn select_all(&mut self) {
         self.history.seal();
         self.target_col = None;
+        self.sticky = None;
         self.selection = Selection {
             anchor: 0,
             head: self.rope.len_chars(),
@@ -701,6 +811,7 @@ impl Buffer {
     // ---- Editing -----------------------------------------------------------
 
     pub fn insert_char(&mut self, c: char) {
+        self.resolve_sticky();
         if c == '\n' {
             self.insert_newline();
             return;
@@ -717,6 +828,7 @@ impl Buffer {
 
     /// Inserts a line break and carries over the current line's indentation.
     pub fn insert_newline(&mut self) {
+        self.resolve_sticky();
         let sel = self.selection;
         let line = self.rope.char_to_line(sel.from());
         let col = sel.from() - self.line_start(line);
@@ -737,12 +849,14 @@ impl Buffer {
             LineEnding::Lf => normalized,
             LineEnding::Crlf => normalized.replace('\n', "\r\n"),
         };
+        self.resolve_sticky();
         let sel = self.selection;
         self.apply_edit(sel.from(), sel.to(), &normalized, EditKind::Other);
     }
 
     /// Inside leading spaces, deletes back to the previous indent stop instead of one space.
     pub fn delete_backward(&mut self) {
+        self.resolve_sticky();
         let sel = self.selection;
         if !sel.is_empty() {
             self.apply_edit(sel.from(), sel.to(), "", EditKind::Other);
@@ -773,6 +887,7 @@ impl Buffer {
     /// `Tab`: indents every selected line when the selection spans lines,
     /// otherwise inserts one indent (spaces up to the next stop, or a tab).
     pub fn indent(&mut self) {
+        self.resolve_sticky();
         let sel = self.selection;
         let (first, last) = self.selected_lines();
         let spans_lines = self.rope.char_to_line(sel.from()) != self.rope.char_to_line(sel.to());
@@ -801,6 +916,7 @@ impl Buffer {
 
     /// `Shift+Tab`: removes one indent level from every selected line (or the cursor line).
     pub fn outdent(&mut self) {
+        self.resolve_sticky();
         let (first, last) = self.selected_lines();
         let width = match self.indent_style {
             IndentStyle::Spaces(width) => width,
@@ -829,6 +945,7 @@ impl Buffer {
     /// A caret keeps its column. A selection keeps covering the moved lines.
     /// Returns `false` when the block is already at that edge.
     pub fn move_block(&mut self, down: bool) -> bool {
+        self.resolve_sticky();
         let (first, last) = self.selected_lines();
         let edge = self.last_content_line();
         if down && last >= edge || !down && first == 0 {
@@ -897,6 +1014,7 @@ impl Buffer {
     /// The caret lands at the start of the next line, or at the end of the previous line
     /// when the deleted lines were the end of the file.
     pub fn delete_lines(&mut self) {
+        self.resolve_sticky();
         let (first, last) = self.selected_lines();
         let mut start = self.line_start(first);
         let end = if last + 1 < self.rope.len_lines() {
@@ -919,6 +1037,7 @@ impl Buffer {
     /// Copies every line the selection touches above or below, as one undo step.
     /// A caret keeps its column on the copy. A selection covers that same span on the copy.
     pub fn duplicate_block(&mut self, down: bool) {
+        self.resolve_sticky();
         let (first, last) = self.selected_lines();
         let point = self.selection.is_empty();
         let head = self.selection.head;
@@ -975,6 +1094,7 @@ impl Buffer {
     /// Adds `marker` after the indent of each selected line, or removes one when every
     /// non-blank line already starts with it. One undo step.
     pub fn toggle_comment(&mut self, marker: &str) -> bool {
+        self.resolve_sticky();
         if marker.is_empty() {
             return false;
         }
@@ -1030,6 +1150,7 @@ impl Buffer {
     }
 
     pub fn delete_forward(&mut self) {
+        self.resolve_sticky();
         let sel = self.selection;
         if sel.is_empty() {
             let to = self.right_of(sel.head);
@@ -1052,6 +1173,7 @@ impl Buffer {
             self.finish_edit(change.pos, &change.removed, captured);
         }
         self.selection = tx.before;
+        self.sticky = None;
         self.target_col = None;
         self.history.redo.push(tx);
         true
@@ -1070,6 +1192,7 @@ impl Buffer {
             self.finish_edit(change.pos, &change.inserted, captured);
         }
         self.selection = tx.after;
+        self.sticky = None;
         self.target_col = None;
         self.history.undo.push(tx);
         true
@@ -1085,6 +1208,7 @@ impl Buffer {
         self.rope.remove(from..to);
         self.rope.insert(from, inserted);
         self.finish_edit(from, inserted, captured);
+        self.shift_sticky(from, to - from, inserted.chars().count());
 
         let after = Selection::point(from + inserted.chars().count());
         self.selection = after;
@@ -1132,6 +1256,7 @@ impl Buffer {
             self.rope.remove(pos..pos + removed_len);
             self.rope.insert(pos, &inserted);
             self.finish_edit(pos, &inserted, captured);
+            self.shift_sticky(pos, removed_len, inserted.chars().count());
             changes.push(Change {
                 pos,
                 removed,
@@ -1598,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_extends_and_plain_arrow_collapses() {
+    fn shift_extends_and_plain_arrow_keeps_the_selection() {
         let mut buf = Buffer::from_text("hello world");
         for _ in 0..5 {
             buf.move_cursor(Movement::Right, true);
@@ -1616,7 +1741,184 @@ mod tests {
         );
 
         buf.move_cursor(Movement::Left, false);
-        assert_eq!(buf.selection(), Selection::point(0));
+        assert_eq!(buf.selection(), Selection::point(10));
+        assert_eq!(
+            buf.highlight(),
+            Selection {
+                anchor: 0,
+                head: 11
+            }
+        );
+    }
+
+    fn selected_hello(text: &str) -> Buffer {
+        let mut buf = Buffer::from_text(text);
+        for _ in 0..5 {
+            buf.move_cursor(Movement::Right, true);
+        }
+        buf
+    }
+
+    #[test]
+    fn plain_movement_keeps_the_selection_until_deselect() {
+        let mut buf = selected_hello("hello world\nsecond line\nthird");
+        let kept = Selection { anchor: 0, head: 5 };
+        for movement in [
+            Movement::Right,
+            Movement::Down,
+            Movement::LineEnd,
+            Movement::LineStart,
+            Movement::WordRight,
+            Movement::WordLeft,
+            Movement::PageDown(10),
+            Movement::PageUp(10),
+            Movement::DocumentEnd,
+            Movement::DocumentStart,
+            Movement::Up,
+            Movement::Left,
+        ] {
+            buf.move_cursor(movement, false);
+            assert!(buf.selection().is_empty(), "{movement:?}");
+            assert_eq!(buf.highlight(), kept, "{movement:?}");
+        }
+        buf.goto_line(2);
+        buf.place_cursor(1, 3);
+        buf.move_to(20, false);
+        assert_eq!(buf.highlight(), kept);
+        assert_eq!(buf.highlighted_text(), "hello");
+        assert_eq!(buf.copy_text(), "hello");
+
+        assert!(buf.deselect());
+        assert!(buf.highlight().is_empty());
+        assert_eq!(buf.selection(), Selection::point(20));
+        assert!(!buf.deselect());
+    }
+
+    #[test]
+    fn shift_from_the_active_end_extends_and_elsewhere_starts_fresh() {
+        let mut buf = selected_hello("hello world");
+        buf.move_cursor(Movement::Right, false);
+        buf.move_cursor(Movement::Left, false);
+        assert_eq!(buf.selection(), Selection::point(5));
+        buf.move_cursor(Movement::Right, true);
+        assert_eq!(buf.selection(), Selection { anchor: 0, head: 6 });
+        assert_eq!(buf.highlight(), Selection { anchor: 0, head: 6 });
+
+        buf.move_cursor(Movement::LineEnd, false);
+        buf.move_cursor(Movement::Left, true);
+        assert_eq!(
+            buf.selection(),
+            Selection {
+                anchor: 11,
+                head: 10
+            }
+        );
+        assert_eq!(buf.highlighted_text(), "d");
+    }
+
+    #[test]
+    fn editing_inside_the_sticky_selection_replaces_it() {
+        let mut buf = selected_hello("hello world");
+        buf.move_cursor(Movement::Left, false);
+        buf.move_cursor(Movement::Left, false);
+        buf.insert_char('X');
+        assert_eq!(text(&buf), "X world");
+
+        let mut buf = selected_hello("hello world");
+        buf.move_cursor(Movement::DocumentStart, false);
+        buf.delete_forward();
+        assert_eq!(text(&buf), " world");
+
+        let mut buf = selected_hello("hello world");
+        buf.move_cursor(Movement::Left, false);
+        buf.move_cursor(Movement::Right, false);
+        buf.delete_backward();
+        assert_eq!(text(&buf), " world");
+
+        let mut buf = selected_hello("hello world");
+        buf.move_cursor(Movement::Up, false);
+        buf.insert_text("hi");
+        assert_eq!(text(&buf), "hi world");
+    }
+
+    #[test]
+    fn editing_away_from_the_sticky_selection_drops_it_and_edits_at_the_cursor() {
+        let mut buf = selected_hello("hello world");
+        buf.move_cursor(Movement::LineEnd, false);
+        buf.insert_char('!');
+        assert_eq!(text(&buf), "hello world!");
+        assert!(buf.highlight().is_empty());
+
+        let mut buf = selected_hello("hello world");
+        buf.move_cursor(Movement::LineEnd, false);
+        buf.delete_backward();
+        assert_eq!(text(&buf), "hello worl");
+        assert!(buf.highlight().is_empty());
+
+        let mut buf = selected_hello("hello world");
+        buf.move_to(6, false);
+        buf.delete_forward();
+        assert_eq!(text(&buf), "hello orld");
+        buf.insert_newline();
+        assert_eq!(text(&buf), "hello \norld");
+    }
+
+    #[test]
+    fn cut_takes_the_sticky_selection_wherever_the_cursor_is() {
+        let mut buf = selected_hello("hello world");
+        buf.move_cursor(Movement::LineEnd, false);
+        assert_eq!(buf.cut_text(), "hello");
+        assert_eq!(text(&buf), " world");
+        assert!(buf.highlight().is_empty());
+    }
+
+    #[test]
+    fn sticky_selection_follows_other_edits_and_is_clamped() {
+        let mut buf = Buffer::from_text("ab hello cd");
+        buf.move_to(3, false);
+        for _ in 0..5 {
+            buf.move_cursor(Movement::Right, true);
+        }
+        buf.move_cursor(Movement::LineEnd, false);
+        buf.replace_span(0, 2, "XYZ");
+        assert_eq!(buf.highlighted_text(), "hello");
+        buf.replace_span(0, 9, "");
+        assert!(buf.highlight().is_empty());
+
+        let mut buf = selected_hello("hello world");
+        buf.move_cursor(Movement::LineEnd, false);
+        buf.replace_all("hello world", "x");
+        assert!(buf.highlight().to() <= buf.rope().len_chars());
+    }
+
+    #[test]
+    fn undo_and_redo_after_moving_away_do_not_keep_a_stale_selection() {
+        let mut buf = Buffer::from_text("hello world");
+        buf.move_to(11, false);
+        type_str(&mut buf, " and more text");
+        buf.move_to(0, false);
+        for _ in 0..5 {
+            buf.move_cursor(Movement::Right, true);
+        }
+        buf.move_cursor(Movement::DocumentEnd, false);
+        assert!(buf.undo());
+        assert_eq!(text(&buf), "hello world");
+        assert!(buf.highlight().to() <= buf.rope().len_chars());
+        assert!(buf.redo());
+        assert!(buf.highlight().to() <= buf.rope().len_chars());
+        buf.move_cursor(Movement::Left, false);
+        buf.insert_char('x');
+    }
+
+    #[test]
+    fn select_all_and_find_replace_the_sticky_selection() {
+        let mut buf = selected_hello("hello world");
+        buf.move_cursor(Movement::LineEnd, false);
+        buf.select_span(6, 11);
+        assert_eq!(buf.highlighted_text(), "world");
+        buf.move_cursor(Movement::DocumentStart, false);
+        buf.select_all();
+        assert_eq!(buf.highlighted_text(), "hello world");
     }
 
     #[test]

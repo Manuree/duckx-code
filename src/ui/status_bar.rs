@@ -337,7 +337,7 @@ fn right_spans(app: &App) -> Vec<Span<'static>> {
     let buffer = app.buffer();
     let mut spans = lsp_spans(app);
 
-    let selection = buffer.selection();
+    let selection = buffer.highlight();
     if !selection.is_empty() {
         spans.push(Span::styled(
             format!("{} selected ", selection.to() - selection.from()),
