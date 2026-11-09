@@ -86,10 +86,10 @@ When the Command Bar opens:
 4. **Keyboard Flow:**
    * `Up` / `Down`: Cycle through matching command hints.
    * `Tab`: Leave the bar and open the assistant. `Tab` in the assistant opens the command bar again.
-   * `Right`: Accept the dimmed file or folder name drawn after the typed argument. The block cursor sits on the first character of that hint, the same way a shell draws an inline suggestion. `move` hints folders, `rename` hints names in the same folder, `save` hints files and folders, and `workspace` hints saved folders. The closest name is the shortest match, then A–Z. A name already typed in full stays as it is.
+   * `Right`: Accept the dimmed file or folder name drawn after the typed argument. The block cursor sits on the first character of that hint, the same way a shell draws an inline suggestion. `move` hints folders, `rename` hints names in the same folder, `save` hints files and folders, `new-file` and `new-folder` hint folders (under the focused folder, or from the workspace root after a leading `/`), and `workspace` hints saved folders. The closest name is the shortest match, then A–Z. A name already typed in full stays as it is.
    * `Enter`: Execute the selected command immediately and return focus to the editor. An exact command name in the input (e.g. `goto 42`) wins over the highlighted hint. If the command needs an argument that is missing, `Enter` completes the name instead of failing.
    * `Esc` / `F1`: Dismiss the Command Bar without side effects.
-5. **Focus context:** the bar only lists commands for the surface that was focused when it opened. An editor shows editing commands. The explorer shows `file-picker`, `workspace`, `find`, `replace`, `select`, `reveal`, `explorer`, `setting`, `about`, and `quit`. In FILE mode it also shows `move`, `delete`, and `rename`, in that order after `select`. A command from the other surface is not hinted, and typing its name does not run it. A bare line number is `goto` only while an editor is focused. The ★ recent command is the last one run on this surface, and it is the first hint whenever it is listed.
+5. **Focus context:** the bar only lists commands for the surface that was focused when it opened. An editor shows editing commands. The explorer shows `file-picker`, `workspace`, `find`, `replace`, `select`, `new-file`, `new-folder`, `reveal`, `explorer`, `setting`, `about`, and `quit`. In FILE mode it also shows `move`, `delete`, and `rename`, in that order after `select` and before `new-file`. `new-file` and `new-folder` never need FILE mode, and `new-file` is listed for an editor too. A command from the other surface is not hinted, and typing its name does not run it. A bare line number is `goto` only while an editor is focused. The ★ recent command is the last one run on this surface, and it is the first hint whenever it is listed.
 
 ### 3.3 Built-in Commands
 
@@ -100,6 +100,7 @@ While an editor is focused:
 | `goto` (or just type the number) | `<line>` (1-based) | — |
 | `copy` / `cut` / `paste` | — | `Ctrl + C` / `Ctrl + X` / `Ctrl + V` |
 | `save` | optional path | `Ctrl + S` |
+| `new-file` | `<path>` (nested, e.g. `images/images.rs`) | — |
 | `undo` / `redo` | — | `Ctrl + Z` / `Ctrl + Y` |
 | `select-all` | — | `Ctrl + A` |
 | `indent` | — | `Tab` |
@@ -120,6 +121,8 @@ While an editor is focused:
 | `about` | — | — |
 | `quit` | — | `Ctrl + Q` |
 
+`new-file` creates an empty file and opens it, without FILE mode. From an editor the path is relative to the workspace root, and a leading `/` or `\` also means the workspace root (never the disk root). Missing folders in a nested path are made. It refuses an existing path, a path outside the workspace, or no open folder.
+
 While the explorer is focused:
 
 | Command | Argument | What it does |
@@ -128,6 +131,8 @@ While the explorer is focused:
 | `move` | `<dir>` | FILE mode only. Move the marked files (or the focused file) into a folder inside the workspace. |
 | `delete` | — | FILE mode only. Delete those files. Asks first. Refuses while an open editor has unsaved changes for that file. |
 | `rename` | `<name>` | FILE mode only. Rename the focused file or folder. The new name stays in the same folder. |
+| `new-file` | `<path>` | No FILE mode needed. Create an empty file and open it. A relative path starts in the focused folder (or the folder of the focused file); a leading `/` or `\` starts at the workspace root. Nested paths such as `images/images.rs` make the missing folders. Refuses an existing path or a path outside the workspace. |
+| `new-folder` | `<path>` | No FILE mode needed; explorer only. Create a folder in the focused folder (or the folder of the focused file), for example `dogs`. A leading `/` starts at the workspace root, so `/images/dogs` makes `images/dogs` and any missing parent. The tree refreshes and selects the new folder. Refuses an existing path or a path outside the workspace. |
 | `explorer` | — | Toggle the sidebar (`Ctrl + B`) |
 | `file-picker` | — | Open a workspace file by name (`Ctrl + P`) |
 | `workspace` | `<folder>` | Open another folder. An empty argument lists saved folders. |
@@ -180,9 +185,9 @@ Modeled on the snacks.nvim explorer (LazyVim):
 * **What is shown:** `.gitignore` is respected and dotfiles are hidden. Folders come first, then files, both sorted case-insensitively.
 * **Git markers:** `M` modified, `A` added, `D` deleted, `R` renamed, `?` untracked, colored at the right edge. A folder shows the strongest status found inside it.
 * **`Enter` opens a file** as a tab in the focused window and moves focus there. A file that is already open is focused instead of loaded again. A clean untitled tab is reused; a tab that already has a path, or unsaved edits, stays open and the file loads in a new tab beside it. `Enter` on a folder still expands or collapses it.
-* **File commands:** `select` is listed while the explorer is focused. `move`, `delete`, and `rename` are listed only in FILE mode. Editor commands such as `goto` and `indent` are not listed there. See §3.2.
+* **File commands:** `select`, `new-file`, and `new-folder` are listed while the explorer is focused. `move`, `delete`, and `rename` are listed only in FILE mode. Editor commands such as `goto` and `indent` are not listed there. See §3.2.
 * **Marks:** `select` enters FILE mode (the status badge reads `FILE`). `Space` toggles a mark on the focused row (a green `●`). Hold `Shift` and move to cover rows (a green `○` and a selection background); release `Shift` and press `Space` to mark that cover, or to unmark it when every covered row is already marked. `Shift + Space` opens the Command Bar, so `move`, `delete`, and `rename` run without leaving the mode. Movement without `Shift` clears the cover and leaves marks in place. `Esc`, closing the sidebar, or moving focus to an editor returns to NORMAL and clears every mark. A marked folder includes everything inside it. `rename` always renames the focused row.
-* The scan and `git status` run in the background, so the editor stays responsive on large trees (`Loading…` is shown meanwhile). A file or folder created, removed, or renamed on disk refreshes an open tree the same way. The rows stay up until that scan arrives, so a later refresh does not flash `Loading…`. Deletes, renames, and moves also run in the background and then refresh the tree. An open editor follows a rename or move. Deleting a file that is open keeps its text and marks that editor unsaved.
+* The scan and `git status` run in the background, so the editor stays responsive on large trees (`Loading…` is shown meanwhile). A file or folder created, removed, or renamed on disk refreshes an open tree the same way. The rows stay up until that scan arrives, so a later refresh does not flash `Loading…`. Deletes, renames, moves, and `new-file` / `new-folder` also run in the background and then refresh the tree. An open editor follows a rename or move. Deleting a file that is open keeps its text and marks that editor unsaved.
 
 ### Editor Windows
 * **`split-right` / `split-down`:** split only the focused editor in half. The new pane is an empty `[No Name]` buffer with its own cursor and undo history, and it receives focus. There is no shortcut yet.

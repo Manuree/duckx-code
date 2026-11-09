@@ -462,6 +462,9 @@ pub struct App {
     pub explorer: Explorer,
     /// Workspace-relative file to select once the tree scan that `reveal` started finishes.
     reveal_file: Option<PathBuf>,
+    /// Workspace-relative entry made by `new-file` or `new-folder`, selected once a
+    /// tree scan lists it.
+    reveal_created: Option<PathBuf>,
     /// Preferred explorer column width. Drawing clamps it to half the terminal.
     sidebar_width: u16,
     /// File picker modal. `None` while it is closed.
@@ -581,6 +584,7 @@ impl App {
             branch: None,
             explorer: Explorer::new(PathBuf::from(".")),
             reveal_file: None,
+            reveal_created: None,
             sidebar_width: layout::SIDEBAR_WIDTH,
             file_picker: None,
             file_index: None,
@@ -1110,6 +1114,7 @@ impl App {
             AppEvent::TreeScanned { root, entries } if self.same_root(&root) => {
                 self.explorer.set_entries(entries);
                 self.finish_reveal_file();
+                self.finish_reveal_created();
                 if self.file_find.is_some() {
                     self.refresh_file_find();
                 }
@@ -1717,6 +1722,21 @@ impl App {
         };
         if !self.explorer.reveal_file(&path) {
             self.message = Some("File is not in the explorer".to_string());
+        }
+    }
+
+    /// Selects the entry `new-file` or `new-folder` made, once the scan lists it.
+    /// A scan that started before the entry existed keeps the request for its follow-up.
+    fn finish_reveal_created(&mut self) {
+        let Some(path) = self.reveal_created.take() else {
+            return;
+        };
+        if self.explorer.reveal_entry(&path) {
+            return;
+        }
+        let more = self.tree_scan.as_ref().is_some_and(|scan| scan.dirty);
+        if more {
+            self.reveal_created = Some(path);
         }
     }
 
@@ -2873,6 +2893,30 @@ impl App {
                 })
                 .map(|session| session.root.display().to_string())
                 .collect(),
+            NameSource::NewEntry => {
+                let bar = self.command_bar.as_ref();
+                let typed = bar.and_then(CommandBar::argument).unwrap_or("");
+                let rooted = typed.starts_with(['/', '\\']);
+                let in_explorer = bar.is_some_and(|bar| bar.context == CommandContext::Explorer);
+                let base = if rooted || !in_explorer {
+                    PathBuf::new()
+                } else {
+                    self.new_entry_base()
+                };
+                entries
+                    .iter()
+                    .filter(|entry| entry.is_dir)
+                    .filter_map(|entry| entry.path.strip_prefix(&base).ok())
+                    .filter(|rel| !rel.as_os_str().is_empty())
+                    .map(|rel| {
+                        if rooted {
+                            format!("/{}", display_rel(rel))
+                        } else {
+                            display_rel(rel)
+                        }
+                    })
+                    .collect()
+            }
             NameSource::Sibling => {
                 let Some(selected) = self.explorer.selected() else {
                     return Vec::new();
@@ -3756,6 +3800,8 @@ impl App {
             }
             CommandId::Reload => self.reload_file(arg),
             CommandId::Encoding => self.set_encoding(arg),
+            CommandId::NewFile => self.begin_create(arg.unwrap_or(""), false)?,
+            CommandId::NewFolder => self.begin_create(arg.unwrap_or(""), true)?,
             CommandId::Select => self.enter_select(),
             CommandId::Move => self.begin_move(arg.unwrap_or(""))?,
             CommandId::Delete => self.begin_delete()?,
@@ -4005,6 +4051,57 @@ impl App {
         Ok(())
     }
 
+    /// Folder a relative `new-file` or `new-folder` path starts from while the explorer
+    /// is focused: the focused folder, or the folder holding the focused file.
+    /// Workspace-relative; empty means the workspace root.
+    fn new_entry_base(&self) -> PathBuf {
+        let Some(selected) = self.explorer.selected() else {
+            return PathBuf::new();
+        };
+        let is_dir = self
+            .explorer
+            .entries()
+            .iter()
+            .any(|entry| entry.is_dir && entry.path == selected);
+        if is_dir {
+            selected.to_path_buf()
+        } else {
+            selected.parent().map(Path::to_path_buf).unwrap_or_default()
+        }
+    }
+
+    /// `new-file` (`dir: false`) and `new-folder` (`dir: true`). Neither needs FILE mode.
+    /// A leading `/` or `\` starts at the workspace root. Otherwise the editor starts
+    /// at the root and the explorer starts at the focused folder. Missing folders on the
+    /// way are created. The disk work runs as a background job like `rename`.
+    fn begin_create(&mut self, arg: &str, dir: bool) -> Result<(), String> {
+        let in_explorer = self.explorer.open && self.explorer.focused;
+        if dir && !in_explorer {
+            return Err("new-folder applies to the explorer".to_string());
+        }
+        let root = self.explorer.root.clone();
+        if root.as_os_str().is_empty() || !root.is_dir() {
+            return Err("No workspace folder is open".to_string());
+        }
+        let base = if in_explorer {
+            self.new_entry_base()
+        } else {
+            PathBuf::new()
+        };
+        let rel = new_entry_rel(&base, arg, dir)?;
+        let path = ensure_inside(&root, &root.join(&rel), false)?;
+        let shown = display_rel(&rel);
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return Err(format!("{shown} already exists"));
+        }
+        self.message = Some(format!("Creating {shown}…"));
+        self.jobs.push(Job::Files {
+            root,
+            change: Change::Create { path, dir },
+        });
+        Ok(())
+    }
+
     fn begin_move(&mut self, dest_arg: &str) -> Result<(), String> {
         let rels = self.explorer.targets();
         if rels.is_empty() {
@@ -4097,9 +4194,24 @@ impl App {
                 self.mark_deleted_editors(path);
             }
         }
+        let created = outcome.created.clone();
         self.message = Some(outcome.error.unwrap_or(outcome.summary));
         self.refresh_picker_index();
         self.queue_tree_scan(true);
+        if let Some((path, dir)) = created {
+            self.reveal_created = self
+                .explorer
+                .open
+                .then(|| relative_to(&self.explorer.root, &path))
+                .flatten();
+            if !dir {
+                let message = self.message.take();
+                self.open_path(path);
+                if self.message.is_none() {
+                    self.message = message;
+                }
+            }
+        }
     }
 
     fn retarget_editors(&mut self, from: &Path, to: &Path) {
@@ -4607,6 +4719,7 @@ impl App {
         self.file_find = None;
         self.reveal_find = None;
         self.reveal_file = None;
+        self.reveal_created = None;
         self.replace_notice = None;
         self.settings = None;
         self.about = false;
@@ -5403,6 +5516,45 @@ fn single_name(arg: &str) -> Result<&str, String> {
         return Err("Enter a file name with no folders".to_string());
     }
     Ok(name)
+}
+
+/// Workspace-relative target of `new-file` / `new-folder`. `base` is the folder a
+/// relative path starts from. A leading `/` or `\` starts at the workspace root.
+/// `/` and `\` both separate folders; `.` is skipped and `..` climbs, but never above
+/// the workspace.
+fn new_entry_rel(base: &Path, arg: &str, dir: bool) -> Result<PathBuf, String> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Err("Enter a path".to_string());
+    }
+    if arg.chars().any(char::is_control) {
+        return Err("That name has a control character".to_string());
+    }
+    if !dir && arg.ends_with(['/', '\\']) {
+        return Err("Enter a file name after the last /".to_string());
+    }
+    let mut parts: Vec<String> = if arg.starts_with(['/', '\\']) {
+        Vec::new()
+    } else {
+        base.components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect()
+    };
+    for part in arg.split(['/', '\\']) {
+        match part.trim() {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err("That path is outside the workspace".to_string());
+                }
+            }
+            _ => parts.push(part.to_string()),
+        }
+    }
+    if parts.is_empty() {
+        return Err("That path is the workspace itself".to_string());
+    }
+    Ok(parts.iter().collect())
 }
 
 fn abs_in(root: &Path, rel: &Path) -> Result<PathBuf, String> {
@@ -7705,6 +7857,8 @@ mod tests {
                 "find",
                 "replace",
                 "select",
+                "new-file",
+                "new-folder",
                 "reveal",
                 "explorer",
                 "wider",
@@ -8335,6 +8489,258 @@ mod tests {
         assert_eq!(
             saved.as_deref().and_then(|path| path.parent()),
             Some(std::path::absolute(&right).unwrap().as_path())
+        );
+    }
+
+    fn dir_entry(path: &str) -> crate::explorer::FileEntry {
+        let mut entry = file_entry(path);
+        entry.is_dir = true;
+        entry
+    }
+
+    /// Runs the queued create job, the tree scan it queues, and the file load.
+    fn settle(app: &mut App) {
+        for _ in 0..4 {
+            finish_jobs(app);
+        }
+    }
+
+    #[test]
+    fn new_file_from_the_editor_makes_nested_folders_and_opens_the_file() {
+        let (dir, _guard) = temp_dir();
+        let mut app = App::new(Buffer::new(), None);
+        app.explorer = Explorer::new(dir.clone());
+
+        run(&mut app, "new-file /images/images.rs");
+        settle(&mut app);
+        let made = dir.join("images").join("images.rs");
+        assert!(made.is_file(), "{:?}", app.message);
+        assert_eq!(std::fs::read(&made).unwrap(), b"");
+        assert_eq!(app.path(), Some(made.as_path()));
+        assert_eq!(app.focus(), Focus::Editor);
+        assert_eq!(app.recent_command, Some(CommandId::NewFile));
+
+        run(&mut app, "new-file images\\more\\b.rs");
+        settle(&mut app);
+        let made = dir.join("images").join("more").join("b.rs");
+        assert!(made.is_file(), "{:?}", app.message);
+        assert_eq!(app.path(), Some(made.as_path()));
+    }
+
+    #[test]
+    fn new_file_without_a_path_waits_for_one() {
+        let (dir, _guard) = temp_dir();
+        let mut app = App::new(Buffer::new(), None);
+        app.explorer = Explorer::new(dir.clone());
+        run(&mut app, "new-file");
+        let bar = app.command_bar.as_ref().expect("bar stays open");
+        assert_eq!(bar.input, "new-file ");
+        assert_eq!(bar.prompted, Some(CommandId::NewFile));
+        assert!(app.take_jobs().is_empty());
+    }
+
+    #[test]
+    fn explorer_new_file_and_new_folder_use_the_focused_folder_without_file_mode() {
+        let (dir, _guard) = temp_dir();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src").join("lib.rs"), "").unwrap();
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        let mut app = App::new(Buffer::new(), None);
+        focus_tree(
+            &mut app,
+            dir.clone(),
+            vec![
+                dir_entry("images"),
+                dir_entry("src"),
+                file_entry("src/lib.rs"),
+            ],
+        );
+        assert!(!app.explorer.selecting);
+
+        assert!(app.explorer.reveal_entry(Path::new("src")));
+        run(&mut app, "new-file images.rs");
+        settle(&mut app);
+        assert!(
+            dir.join("src").join("images.rs").is_file(),
+            "{:?}",
+            app.message
+        );
+        assert_eq!(
+            app.path(),
+            Some(dir.join("src").join("images.rs").as_path())
+        );
+
+        focus_tree(
+            &mut app,
+            dir.clone(),
+            vec![
+                dir_entry("images"),
+                dir_entry("src"),
+                file_entry("src/lib.rs"),
+            ],
+        );
+        assert!(app.explorer.reveal_entry(&Path::new("src").join("lib.rs")));
+        run(&mut app, "new-file nested/x.rs");
+        settle(&mut app);
+        assert!(
+            dir.join("src").join("nested").join("x.rs").is_file(),
+            "{:?}",
+            app.message
+        );
+
+        focus_tree(
+            &mut app,
+            dir.clone(),
+            vec![dir_entry("images"), dir_entry("src")],
+        );
+        assert!(app.explorer.reveal_entry(Path::new("images")));
+        run(&mut app, "new-folder dogs");
+        settle(&mut app);
+        assert!(
+            dir.join("images").join("dogs").is_dir(),
+            "{:?}",
+            app.message
+        );
+        assert!(!app.explorer.selecting);
+        assert_eq!(app.recent_explorer, Some(CommandId::NewFolder));
+        assert_eq!(
+            app.explorer.selected(),
+            Some(Path::new("images").join("dogs").as_path())
+        );
+        assert!(app.explorer.focused);
+
+        assert!(app.explorer.reveal_entry(Path::new("src")));
+        run(&mut app, "new-folder /images/cats/small");
+        settle(&mut app);
+        assert!(
+            dir.join("images").join("cats").join("small").is_dir(),
+            "{:?}",
+            app.message
+        );
+        assert!(!dir.join("src").join("images").exists());
+
+        assert!(app.explorer.reveal_entry(Path::new("src")));
+        run(&mut app, "new-file \\top.rs");
+        settle(&mut app);
+        assert!(dir.join("top.rs").is_file(), "{:?}", app.message);
+        assert!(!dir.join("src").join("top.rs").exists());
+    }
+
+    #[test]
+    fn new_file_and_new_folder_refuse_existing_and_outside_paths() {
+        let (dir, _guard) = temp_dir();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src").join("lib.rs"), "keep").unwrap();
+        let mut app = App::new(Buffer::new(), None);
+        app.explorer = Explorer::new(dir.clone());
+
+        run(&mut app, "new-file src/lib.rs");
+        assert_eq!(app.message.as_deref(), Some("src/lib.rs already exists"));
+        assert!(app.take_jobs().is_empty());
+        assert_eq!(
+            std::fs::read(dir.join("src").join("lib.rs")).unwrap(),
+            b"keep"
+        );
+
+        run(&mut app, "new-file /src");
+        assert_eq!(app.message.as_deref(), Some("src already exists"));
+
+        run(&mut app, "new-file ../escape.rs");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("That path is outside the workspace")
+        );
+        run(&mut app, "new-file /src/../../escape.rs");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("That path is outside the workspace")
+        );
+        assert!(app.take_jobs().is_empty());
+        assert!(!dir.parent().unwrap().join("escape.rs").exists());
+
+        focus_tree(&mut app, dir.clone(), vec![dir_entry("src")]);
+        assert!(app.explorer.reveal_entry(Path::new("src")));
+        run(&mut app, "new-folder /src");
+        assert_eq!(app.message.as_deref(), Some("src already exists"));
+        run(&mut app, "new-folder ../../out");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("That path is outside the workspace")
+        );
+        assert!(app.take_jobs().is_empty());
+    }
+
+    #[test]
+    fn new_folder_is_explorer_only_and_creation_needs_a_workspace() {
+        let (dir, _guard) = temp_dir();
+        let mut app = App::new(Buffer::new(), None);
+        app.explorer = Explorer::new(dir.clone());
+        run(&mut app, "new-folder dogs");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("new-folder applies to the explorer")
+        );
+        assert!(app.run_command(CommandId::NewFolder, Some("dogs")).is_err());
+        assert!(!dir.join("dogs").exists());
+
+        app.explorer = Explorer::new(dir.join("missing"));
+        assert_eq!(
+            app.run_command(CommandId::NewFile, Some("a.rs")),
+            Err("No workspace folder is open".to_string())
+        );
+        assert!(app.take_jobs().is_empty());
+    }
+
+    #[test]
+    fn new_entry_paths_treat_a_leading_slash_as_the_workspace_root() {
+        let base = Path::new("src").join("ui");
+        assert_eq!(
+            new_entry_rel(&base, "/images/dogs", true).unwrap(),
+            Path::new("images").join("dogs")
+        );
+        assert_eq!(
+            new_entry_rel(&base, "\\images\\dogs", true).unwrap(),
+            Path::new("images").join("dogs")
+        );
+        assert_eq!(
+            new_entry_rel(&base, "images/images.rs", false).unwrap(),
+            base.join("images").join("images.rs")
+        );
+        assert_eq!(
+            new_entry_rel(&base, "../x.rs", false).unwrap(),
+            Path::new("src").join("x.rs")
+        );
+        assert_eq!(
+            new_entry_rel(&base, "./a//b/", true).unwrap(),
+            base.join("a").join("b")
+        );
+        assert!(new_entry_rel(&base, "../../../x.rs", false).is_err());
+        assert!(new_entry_rel(&base, "/", true).is_err());
+        assert!(new_entry_rel(&base, "", false).is_err());
+        assert!(new_entry_rel(&base, "dir/", false).is_err());
+    }
+
+    #[test]
+    fn new_entry_hints_complete_folders_from_the_focused_folder_or_root() {
+        let (dir, _guard) = temp_dir();
+        let mut app = App::new(Buffer::new(), None);
+        focus_tree(
+            &mut app,
+            dir.clone(),
+            vec![dir_entry("src"), dir_entry("src/ui"), dir_entry("images")],
+        );
+        assert!(app.explorer.reveal_entry(Path::new("src")));
+        app.handle(SemanticAction::OpenCommandBar);
+        type_in_bar(&mut app, "new-folder u");
+        assert_eq!(app.argument_ghost().as_deref(), Some("i"));
+        app.command_bar = None;
+        app.handle(SemanticAction::OpenCommandBar);
+        type_in_bar(&mut app, "new-file /im");
+        assert_eq!(app.argument_ghost().as_deref(), Some("ages"));
+        bar(&mut app, CommandBarAction::AcceptHint);
+        assert_eq!(
+            app.command_bar.as_ref().map(|bar| bar.input.as_str()),
+            Some("new-file /images")
         );
     }
 }

@@ -307,11 +307,20 @@ impl Explorer {
     /// search is cleared, and a `Shift` cover is dropped. Marks stay. Returns false
     /// when `path` is not a file in the scanned tree.
     pub fn reveal_file(&mut self, path: &Path) -> bool {
+        self.reveal(path, false)
+    }
+
+    /// Like [`Self::reveal_file`], but a folder can be selected too.
+    pub fn reveal_entry(&mut self, path: &Path) -> bool {
+        self.reveal(path, true)
+    }
+
+    fn reveal(&mut self, path: &Path, folders: bool) -> bool {
         let path: PathBuf = path.components().collect();
         let found = self
             .entries
             .iter()
-            .any(|entry| !entry.is_dir && entry.path == path);
+            .any(|entry| (folders || !entry.is_dir) && entry.path == path);
         if !found {
             return false;
         }

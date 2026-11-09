@@ -81,6 +81,10 @@ pub enum CommandId {
     JumpBack,
     /// Undo [`CommandId::JumpBack`].
     JumpForward,
+    /// Create an empty file and open it. Runs without FILE mode.
+    NewFile,
+    /// Create a folder from the explorer. Runs without FILE mode.
+    NewFolder,
     /// Enter FILE mode in the explorer.
     Select,
     /// Move explorer entries into a directory.
@@ -573,6 +577,24 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: true,
     },
     CommandSpec {
+        id: CommandId::NewFile,
+        name: "new-file",
+        description: "Create a file and open it, making missing folders",
+        shortcut: "",
+        arg: Some("<path>"),
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
+        id: CommandId::NewFolder,
+        name: "new-folder",
+        description: "Create a folder in the focused folder",
+        shortcut: "",
+        arg: Some("<path>"),
+        editor: false,
+        explorer: true,
+    },
+    CommandSpec {
         id: CommandId::Select,
         name: "select",
         description: "Enter FILE mode to mark files with space",
@@ -667,6 +689,8 @@ fn importance(id: CommandId) -> u16 {
         CommandId::Move => 230,
         CommandId::Delete => 240,
         CommandId::Rename => 250,
+        CommandId::NewFile => 251,
+        CommandId::NewFolder => 252,
         CommandId::ToggleExplorer => 260,
         CommandId::SidebarWider => 262,
         CommandId::SidebarNarrower => 264,
@@ -727,6 +751,7 @@ pub fn spec(id: CommandId) -> &'static CommandSpec {
 }
 
 /// `move`, `delete`, and `rename` run only while FILE mode is on.
+/// `new-file` and `new-folder` are explorer file commands too, but they never need it.
 pub fn manages_files(id: CommandId) -> bool {
     matches!(id, CommandId::Move | CommandId::Delete | CommandId::Rename)
 }
@@ -775,6 +800,9 @@ pub enum NameSource {
     Path,
     /// Saved folder paths (`workspace`).
     Workspace,
+    /// Folders a new entry can go into (`new-file`, `new-folder`). A leading `/`
+    /// lists workspace-relative folders; otherwise folders under the focused folder.
+    NewEntry,
 }
 
 /// Commands whose argument is a file or folder name.
@@ -784,6 +812,7 @@ pub fn name_source(id: CommandId) -> Option<NameSource> {
         CommandId::Rename => Some(NameSource::Sibling),
         CommandId::Save => Some(NameSource::Path),
         CommandId::Workspace => Some(NameSource::Workspace),
+        CommandId::NewFile | CommandId::NewFolder => Some(NameSource::NewEntry),
         _ => None,
     }
 }
@@ -998,6 +1027,7 @@ mod tests {
                 "rename-symbol",
                 "jump-back",
                 "jump-forward",
+                "new-file",
                 "diff",
                 "focus",
                 "reveal",
@@ -1032,6 +1062,8 @@ mod tests {
                 "find",
                 "replace",
                 "select",
+                "new-file",
+                "new-folder",
                 "reveal",
                 "explorer",
                 "wider",
@@ -1055,6 +1087,8 @@ mod tests {
                 "select",
                 "move",
                 "rename",
+                "new-file",
+                "new-folder",
                 "reveal",
                 "explorer",
                 "wider",
@@ -1147,6 +1181,45 @@ mod tests {
         assert_eq!(
             names_in("select", None, CommandContext::Explorer),
             ["select"]
+        );
+    }
+
+    #[test]
+    fn new_file_and_new_folder_do_not_need_file_mode() {
+        for files in [false, true] {
+            let explorer = catalog(CommandContext::Explorer, files);
+            assert!(explorer.iter().any(|spec| spec.id == CommandId::NewFile));
+            assert!(explorer.iter().any(|spec| spec.id == CommandId::NewFolder));
+        }
+        let editor = catalog(CommandContext::Editor, false);
+        assert!(editor.iter().any(|spec| spec.id == CommandId::NewFile));
+        assert!(!editor.iter().any(|spec| spec.id == CommandId::NewFolder));
+        assert!(!manages_files(CommandId::NewFile));
+        assert!(!manages_files(CommandId::NewFolder));
+        assert_eq!(
+            find_command("new-folder", CommandContext::Explorer, false).map(|spec| spec.id),
+            Some(CommandId::NewFolder)
+        );
+        assert_eq!(
+            find_command("new-file", CommandContext::Editor, false).map(|spec| spec.id),
+            Some(CommandId::NewFile)
+        );
+        assert!(find_command("new-folder", CommandContext::Editor, false).is_none());
+        assert_eq!(
+            unavailable_reason("new-folder", CommandContext::Editor),
+            "new-folder applies to the explorer"
+        );
+        assert_eq!(
+            names_in("new", None, CommandContext::Explorer)[..2],
+            ["new-file", "new-folder"]
+        );
+        assert_eq!(names("new", None)[0], "new-file");
+        assert_eq!(spec(CommandId::NewFile).arg, Some("<path>"));
+        assert_eq!(spec(CommandId::NewFolder).arg, Some("<path>"));
+        assert_eq!(name_source(CommandId::NewFile), Some(NameSource::NewEntry));
+        assert_eq!(
+            name_source(CommandId::NewFolder),
+            Some(NameSource::NewEntry)
         );
     }
 
