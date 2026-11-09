@@ -123,15 +123,10 @@ pub enum SemanticAction {
     Sidebar(SidebarAction),
     /// Move focus to the neighboring surface. Does not move the text cursor.
     FocusAdjacent(PaneDirection),
-    /// `Ctrl+W`: the next arrow moves focus to the pane on that side.
+    /// `Ctrl+W`: enter PANE mode, or confirm the candidate while already in it.
     FocusPrefix,
-    /// A key other than an arrow after `Ctrl+W`: drop it and the prefix.
-    CancelFocusPrefix,
-    /// `Ctrl+Up` / `Ctrl+Down`: scroll the view one line. The cursor moves only
-    /// when it would leave the view.
-    ScrollLine {
-        down: bool,
-    },
+    /// A key while PANE mode is on. See [`PaneSelectAction`].
+    PaneSelect(PaneSelectAction),
     /// Select the previous or next tab in the focused pane. Does not move the cursor.
     CycleTab {
         next: bool,
@@ -382,4 +377,15 @@ pub enum CommandBarAction {
     AcceptHint,
     Submit,
     Close,
+}
+
+/// PANE mode (after `Ctrl+W`). Focus stays where it was until `Confirm`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneSelectAction {
+    /// Move the candidate highlight to the window on that side.
+    Move(PaneDirection),
+    /// `Enter` or `Ctrl+W`: focus the candidate.
+    Confirm,
+    /// `Esc`: leave focus where it was.
+    Cancel,
 }

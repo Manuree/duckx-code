@@ -265,8 +265,8 @@ async fn drive(
                     break;
                 };
                 let event = event?;
-                let action = if app.focus_prefix {
-                    input::route_focus_prefix(&event)
+                let action = if app.pane_select.is_some() {
+                    input::route_pane_select(&event, app.keys())
                 } else {
                     input::route_flags(
                         &event,

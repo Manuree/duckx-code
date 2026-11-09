@@ -48,7 +48,9 @@ fn separator(glyph: &'static str, fg: Color, bg: Color) -> Span<'static> {
 /// `(spans, cursor column relative to the left edge)`. The cursor is only used while the command bar is open.
 fn left_line(app: &App) -> (Vec<Span<'static>>, usize) {
     let theme = *app.styles();
-    if app.command_bar.is_some() {
+    if app.pane_select.is_some() {
+        (pane_line(app), 0)
+    } else if app.command_bar.is_some() {
         command_line(app)
     } else if app.replace_mode.is_some() {
         replace_line(app)
@@ -105,6 +107,17 @@ fn left_line(app: &App) -> (Vec<Span<'static>>, usize) {
             0,
         )
     }
+}
+
+/// PANE mode: an amber `PANE` badge and the keys.
+fn pane_line(app: &App) -> Vec<Span<'static>> {
+    let theme = *app.styles();
+    let accent = theme.diagnostic_warning;
+    vec![
+        Span::styled(" PANE ", theme.status_a.bg(accent)),
+        separator(SEPARATOR_LEFT, accent, theme.status_c_bg),
+        Span::styled(" ← ↑ ↓ → move  Enter select  Esc cancel", theme.status_c),
+    ]
 }
 
 fn command_line(app: &App) -> (Vec<Span<'static>>, usize) {

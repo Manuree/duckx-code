@@ -2,7 +2,8 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::action::{
     AgentAction, CommandBarAction, CompletionAction, FindAction, Focus, PaneDirection,
-    PickerAction, PromptAction, ReplaceAction, SemanticAction, SettingsAction, SidebarAction,
+    PaneSelectAction, PickerAction, PromptAction, ReplaceAction, SemanticAction, SettingsAction,
+    SidebarAction,
 };
 use crate::buffer::Movement;
 
@@ -524,25 +525,29 @@ fn route_completion(event: &Event, keys: &crate::keys::KeyMap) -> Option<Semanti
     }
 }
 
-/// The key after `Ctrl+W`. An arrow (with or without modifiers still held) moves
-/// focus that way. Any other key cancels and is dropped. Releases and bare
-/// modifier presses keep waiting.
-pub fn route_focus_prefix(event: &Event) -> Option<SemanticAction> {
-    let key = match event {
-        Event::Key(key) if key.kind != KeyEventKind::Release => key,
-        Event::Key(_) => return None,
-        Event::Paste(_) => return Some(SemanticAction::CancelFocusPrefix),
+/// Keys while PANE mode is on. Arrows (with or without `Ctrl` held) move the
+/// candidate, `Enter` or the mode key again (`Ctrl+W`) confirms, `Esc` cancels.
+/// Everything else, paste included, is swallowed so nothing is typed.
+pub fn route_pane_select(event: &Event, keys: &crate::keys::KeyMap) -> Option<SemanticAction> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    let action = match key.code {
+        KeyCode::Left => PaneSelectAction::Move(PaneDirection::Left),
+        KeyCode::Right => PaneSelectAction::Move(PaneDirection::Right),
+        KeyCode::Up => PaneSelectAction::Move(PaneDirection::Up),
+        KeyCode::Down => PaneSelectAction::Move(PaneDirection::Down),
+        KeyCode::Enter => PaneSelectAction::Confirm,
+        KeyCode::Esc => PaneSelectAction::Cancel,
+        _ if crate::keys::dispatch(key, keys) == Some(SemanticAction::FocusPrefix) => {
+            PaneSelectAction::Confirm
+        }
         _ => return None,
     };
-    let direction = match key.code {
-        KeyCode::Left => PaneDirection::Left,
-        KeyCode::Right => PaneDirection::Right,
-        KeyCode::Up => PaneDirection::Up,
-        KeyCode::Down => PaneDirection::Down,
-        KeyCode::Modifier(_) => return None,
-        _ => return Some(SemanticAction::CancelFocusPrefix),
-    };
-    Some(SemanticAction::FocusAdjacent(direction))
+    Some(SemanticAction::PaneSelect(action))
 }
 
 fn route_editor(event: &Event, keys: &crate::keys::KeyMap) -> Option<SemanticAction> {
@@ -579,8 +584,8 @@ fn route_editor_key(key: &KeyEvent, keys: &crate::keys::KeyMap) -> Option<Semant
     };
 
     match key.code {
-        KeyCode::Up if ctrl && !alt => Some(SemanticAction::ScrollLine { down: false }),
-        KeyCode::Down if ctrl && !alt => Some(SemanticAction::ScrollLine { down: true }),
+        KeyCode::Up if ctrl && !alt => movement(Movement::ParagraphUp),
+        KeyCode::Down if ctrl && !alt => movement(Movement::ParagraphDown),
         KeyCode::Left if ctrl != alt => movement(Movement::WordLeft),
         KeyCode::Left => movement(Movement::Left),
         KeyCode::Right if ctrl != alt => movement(Movement::WordRight),
@@ -1081,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_and_alt_arrows_move_by_word_and_ctrl_up_down_scroll() {
+    fn ctrl_and_alt_arrows_move_by_word_and_ctrl_up_down_by_paragraph() {
         assert_eq!(
             editor(key(KeyCode::Left, KeyModifiers::CONTROL)),
             Some(SemanticAction::Move {
@@ -1101,11 +1106,17 @@ mod tests {
         );
         assert_eq!(
             editor(key(KeyCode::Up, KeyModifiers::CONTROL)),
-            Some(SemanticAction::ScrollLine { down: false })
+            Some(SemanticAction::Move {
+                movement: Movement::ParagraphUp,
+                extend: false
+            })
         );
         assert_eq!(
             editor(key(KeyCode::Down, KeyModifiers::CONTROL)),
-            Some(SemanticAction::ScrollLine { down: true })
+            Some(SemanticAction::Move {
+                movement: Movement::ParagraphDown,
+                extend: false
+            })
         );
         assert_eq!(
             editor(key(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT)),
@@ -1451,50 +1462,56 @@ mod tests {
     }
 
     #[test]
-    fn the_key_after_the_prefix_is_an_arrow_or_a_cancel() {
+    fn pane_mode_keys_move_confirm_cancel_and_swallow_the_rest() {
         use crossterm::event::{KeyEventKind, ModifierKeyCode};
-        let arrow = |code, modifiers| route_focus_prefix(&key(code, modifiers));
+        let keys = crate::keys::KeyMap::defaults();
+        let pane = |code, modifiers| route_pane_select(&key(code, modifiers), &keys);
+        let action = |action| Some(SemanticAction::PaneSelect(action));
         assert_eq!(
-            arrow(KeyCode::Left, KeyModifiers::NONE),
-            Some(SemanticAction::FocusAdjacent(PaneDirection::Left))
+            pane(KeyCode::Left, KeyModifiers::NONE),
+            action(PaneSelectAction::Move(PaneDirection::Left))
         );
         assert_eq!(
-            arrow(KeyCode::Right, KeyModifiers::CONTROL),
-            Some(SemanticAction::FocusAdjacent(PaneDirection::Right))
+            pane(KeyCode::Right, KeyModifiers::CONTROL),
+            action(PaneSelectAction::Move(PaneDirection::Right))
         );
         assert_eq!(
-            arrow(KeyCode::Up, KeyModifiers::NONE),
-            Some(SemanticAction::FocusAdjacent(PaneDirection::Up))
+            pane(KeyCode::Up, KeyModifiers::CONTROL),
+            action(PaneSelectAction::Move(PaneDirection::Up))
         );
         assert_eq!(
-            arrow(KeyCode::Down, KeyModifiers::NONE),
-            Some(SemanticAction::FocusAdjacent(PaneDirection::Down))
-        );
-        for code in [
-            KeyCode::Char('x'),
-            KeyCode::Esc,
-            KeyCode::Enter,
-            KeyCode::Char('w'),
-        ] {
-            assert_eq!(
-                arrow(code, KeyModifiers::NONE),
-                Some(SemanticAction::CancelFocusPrefix)
-            );
-        }
-        assert_eq!(
-            route_focus_prefix(&Event::Paste("text".into())),
-            Some(SemanticAction::CancelFocusPrefix)
+            pane(KeyCode::Down, KeyModifiers::NONE),
+            action(PaneSelectAction::Move(PaneDirection::Down))
         );
         assert_eq!(
-            arrow(
+            pane(KeyCode::Enter, KeyModifiers::NONE),
+            action(PaneSelectAction::Confirm)
+        );
+        assert_eq!(
+            pane(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            action(PaneSelectAction::Confirm)
+        );
+        assert_eq!(
+            pane(KeyCode::Esc, KeyModifiers::NONE),
+            action(PaneSelectAction::Cancel)
+        );
+        for (code, modifiers) in [
+            (KeyCode::Char('x'), KeyModifiers::NONE),
+            (KeyCode::Char('w'), KeyModifiers::NONE),
+            (KeyCode::Char('q'), KeyModifiers::CONTROL),
+            (KeyCode::Backspace, KeyModifiers::NONE),
+            (KeyCode::Tab, KeyModifiers::NONE),
+            (
                 KeyCode::Modifier(ModifierKeyCode::LeftControl),
-                KeyModifiers::CONTROL
+                KeyModifiers::CONTROL,
             ),
-            None
-        );
-        let mut release = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        ] {
+            assert_eq!(pane(code, modifiers), None, "{code:?}");
+        }
+        assert_eq!(route_pane_select(&Event::Paste("text".into()), &keys), None);
+        let mut release = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
-        assert_eq!(route_focus_prefix(&Event::Key(release)), None);
+        assert_eq!(route_pane_select(&Event::Key(release), &keys), None);
     }
 
     #[test]

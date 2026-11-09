@@ -331,15 +331,14 @@ impl App {
             SemanticAction::Move { movement, .. } => match movement {
                 Movement::Up => self.scroll_preview(line(-1)),
                 Movement::Down => self.scroll_preview(line(1)),
+                Movement::ParagraphUp => self.scroll_preview(line(-1)),
+                Movement::ParagraphDown => self.scroll_preview(line(1)),
                 Movement::PageUp(_) => self.scroll_preview(|s, p| s as isize - p as isize),
                 Movement::PageDown(_) => self.scroll_preview(|s, p| (s + p) as isize),
                 Movement::DocumentStart => self.scroll_preview(|_, _| 0),
                 Movement::DocumentEnd => self.scroll_preview(|_, _| isize::MAX),
                 _ => {}
             },
-            SemanticAction::ScrollLine { down } => {
-                self.scroll_preview(line(if *down { 1 } else { -1 }))
-            }
             SemanticAction::PageUp { .. } => self.scroll_preview(|s, p| s as isize - p as isize),
             SemanticAction::PageDown { .. } => self.scroll_preview(|s, p| (s + p) as isize),
             SemanticAction::OpenCommandBar
@@ -351,7 +350,7 @@ impl App {
             | SemanticAction::Sidebar(_)
             | SemanticAction::FocusAdjacent(_)
             | SemanticAction::FocusPrefix
-            | SemanticAction::CancelFocusPrefix
+            | SemanticAction::PaneSelect(_)
             | SemanticAction::CycleTab { .. }
             | SemanticAction::Quit
             | SemanticAction::Prompt(_)
