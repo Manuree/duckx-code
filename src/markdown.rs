@@ -1306,4 +1306,504 @@ mod tests {
         assert_eq!(widths.iter().sum::<usize>(), 30);
         assert!(widths[0] > widths[1] && widths[2] == 4, "{widths:?}");
     }
+
+    /// Renders `source` at `width` and checks every line exactly, and that no line is
+    /// wider than the pane.
+    fn assert_table(source: &str, width: u16, expected: &[&str]) {
+        let lines = plain(&render(source, width, &styles()));
+        assert_eq!(lines, expected, "table at width {width}");
+        for line in &lines {
+            assert!(
+                line.width() <= usize::from(width),
+                "{line:?} overflows {width}"
+            );
+        }
+    }
+
+    const TABLE_WIDE_FITS: &str = "| Key | Action | N |\n| :-- | :--: | --: |\n| a | open file | 1 |\n| `Ctrl+W` | pane | 10 |\n";
+
+    const TABLE_SLIGHTLY_NARROW: &str = "| Command | What it does | Keys |\n| --- | --- | --- |\n| new-file | Create a file in the focused folder | Ctrl+N |\n| rename | Rename the open file | F2 |\n";
+
+    const TABLE_VERY_NARROW_FALLBACK: &str =
+        "| a | b | c | d |\n| - | - | - | - |\n| one | two | three | four |\n";
+
+    const TABLE_THAI_ENGLISH_EMOJI: &str = "| ชื่อ | Status | หมายเหตุ |\n| --- | :-: | --- |\n| แมว 🐱 | ok ✅ | น่ารักมาก very cute |\n| Dog 🐶 | ไม่ ❌ | ชอบวิ่งเล่น in the park |\n";
+
+    const TABLE_ALIGNMENT: &str = "| Left | Centre | Right |\n| :--- | :----: | ----: |\n| a | b | c |\n| longer left | mid | 12345 |\n| x | wider centre text | 7 |\n";
+
+    const TABLE_SINGLE_COLUMN: &str =
+        "| Notes |\n| --- |\n| short |\n| a much longer note that has to wrap somewhere |\n";
+
+    const TABLE_MANY_COLUMNS: &str = "| A | B | C | D | E | F | G | H |\n| - | - | - | - | - | - | - | - |\n| alpha | beta | gamma | delta | epsilon | zeta | eta | theta |\n";
+
+    const TABLE_EMPTY_CELLS: &str = "| Name | Value | Comment |\n| --- | --- | --- |\n| a |  |  |\n|  | 2 |  |\n|  |  | only a comment here |\n";
+
+    const TABLE_LONG_CELL_BESIDE_SHORT: &str = "| # | Description | OK |\n| - | --- | - |\n| 1 | This description is very long and will certainly not fit on a single line of the preview | y |\n| 2 | short | n |\n";
+
+    #[test]
+    fn table_snapshot_wide_fits() {
+        assert_table(
+            TABLE_WIDE_FITS,
+            60,
+            &[
+                "╭────────┬───────────┬────╮",
+                "│ Key    │  Action   │  N │",
+                "├────────┼───────────┼────┤",
+                "│ a      │ open file │  1 │",
+                "│ Ctrl+W │   pane    │ 10 │",
+                "╰────────┴───────────┴────╯",
+            ],
+        );
+        assert_table(
+            TABLE_WIDE_FITS,
+            27,
+            &[
+                "╭────────┬───────────┬────╮",
+                "│ Key    │  Action   │  N │",
+                "├────────┼───────────┼────┤",
+                "│ a      │ open file │  1 │",
+                "│ Ctrl+W │   pane    │ 10 │",
+                "╰────────┴───────────┴────╯",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_slightly_narrow() {
+        assert_table(
+            TABLE_SLIGHTLY_NARROW,
+            64,
+            &[
+                "╭──────────┬─────────────────────────────────────┬────────╮",
+                "│ Command  │ What it does                        │ Keys   │",
+                "├──────────┼─────────────────────────────────────┼────────┤",
+                "│ new-file │ Create a file in the focused folder │ Ctrl+N │",
+                "│ rename   │ Rename the open file                │ F2     │",
+                "╰──────────┴─────────────────────────────────────┴────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_SLIGHTLY_NARROW,
+            58,
+            &[
+                "╭─────────┬─────────────────────────────────────┬────────╮",
+                "│ Command │ What it does                        │ Keys   │",
+                "├─────────┼─────────────────────────────────────┼────────┤",
+                "│ new-fil │ Create a file in the focused folder │ Ctrl+N │",
+                "│ e       │                                     │        │",
+                "│ rename  │ Rename the open file                │ F2     │",
+                "╰─────────┴─────────────────────────────────────┴────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_SLIGHTLY_NARROW,
+            50,
+            &[
+                "╭─────────┬─────────────────────────────┬────────╮",
+                "│ Command │ What it does                │ Keys   │",
+                "├─────────┼─────────────────────────────┼────────┤",
+                "│ new-fil │ Create a file in the        │ Ctrl+N │",
+                "│ e       │ focused folder              │        │",
+                "│ rename  │ Rename the open file        │ F2     │",
+                "╰─────────┴─────────────────────────────┴────────╯",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_very_narrow_fallback() {
+        assert_table(
+            TABLE_VERY_NARROW_FALLBACK,
+            20,
+            &["a │ b │ c │ d", "one │ two │ three │", "four"],
+        );
+        assert_table(
+            TABLE_VERY_NARROW_FALLBACK,
+            16,
+            &["a │ b │ c │ d", "one │ two │", "three │ four"],
+        );
+        assert_table(
+            TABLE_VERY_NARROW_FALLBACK,
+            12,
+            &["a │ b │ c │", "d", "one │ two │", "three │ four"],
+        );
+        assert_table(
+            TABLE_VERY_NARROW_FALLBACK,
+            6,
+            &["a │ b", "│ c │", "d", "one │", "two │", "three", "│ four"],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_thai_english_emoji() {
+        assert_table(
+            TABLE_THAI_ENGLISH_EMOJI,
+            60,
+            &[
+                "╭────────┬────────┬──────────────────────╮",
+                "│ ชื่อ     │ Status │ หมายเหตุ              │",
+                "├────────┼────────┼──────────────────────┤",
+                "│ แมว 🐱 │ ok ✅  │ น่ารักมาก very cute    │",
+                "│ Dog 🐶 │ ไม่ ❌  │ ชอบวิ่งเล่น in the park │",
+                "╰────────┴────────┴──────────────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_THAI_ENGLISH_EMOJI,
+            36,
+            &[
+                "╭────────┬────────┬────────────────╮",
+                "│ ชื่อ     │ Status │ หมายเหตุ        │",
+                "├────────┼────────┼────────────────┤",
+                "│ แมว 🐱 │ ok ✅  │ น่ารักมาก very   │",
+                "│        │        │ cute           │",
+                "│ Dog 🐶 │ ไม่ ❌  │ ชอบวิ่งเล่น in    │",
+                "│        │        │ the park       │",
+                "╰────────┴────────┴────────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_THAI_ENGLISH_EMOJI,
+            28,
+            &[
+                "╭────────┬────────┬────────╮",
+                "│ ชื่อ     │ Status │ หมายเห │",
+                "│        │        │ ตุ      │",
+                "├────────┼────────┼────────┤",
+                "│ แมว 🐱 │ ok ✅  │ น่ารักมา │",
+                "│        │        │ ก very │",
+                "│        │        │ cute   │",
+                "│ Dog 🐶 │ ไม่ ❌  │ ชอบวิ่งเ │",
+                "│        │        │ ล่น in  │",
+                "│        │        │ the    │",
+                "│        │        │ park   │",
+                "╰────────┴────────┴────────╯",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_alignment() {
+        assert_table(
+            TABLE_ALIGNMENT,
+            60,
+            &[
+                "╭─────────────┬───────────────────┬───────╮",
+                "│ Left        │      Centre       │ Right │",
+                "├─────────────┼───────────────────┼───────┤",
+                "│ a           │         b         │     c │",
+                "│ longer left │        mid        │ 12345 │",
+                "│ x           │ wider centre text │     7 │",
+                "╰─────────────┴───────────────────┴───────╯",
+            ],
+        );
+        assert_table(
+            TABLE_ALIGNMENT,
+            34,
+            &[
+                "╭──────────┬─────────────┬───────╮",
+                "│ Left     │   Centre    │ Right │",
+                "├──────────┼─────────────┼───────┤",
+                "│ a        │      b      │     c │",
+                "│ longer   │     mid     │ 12345 │",
+                "│ left     │             │       │",
+                "│ x        │    wider    │     7 │",
+                "│          │ centre text │       │",
+                "╰──────────┴─────────────┴───────╯",
+            ],
+        );
+        assert_table(
+            TABLE_ALIGNMENT,
+            26,
+            &[
+                "╭───────┬───────┬───────╮",
+                "│ Left  │ Centr │ Right │",
+                "│       │   e   │       │",
+                "├───────┼───────┼───────┤",
+                "│ a     │   b   │     c │",
+                "│ longe │  mid  │ 12345 │",
+                "│ r     │       │       │",
+                "│ left  │       │       │",
+                "│ x     │ wider │     7 │",
+                "│       │ centr │       │",
+                "│       │   e   │       │",
+                "│       │ text  │       │",
+                "╰───────┴───────┴───────╯",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_single_column() {
+        assert_table(
+            TABLE_SINGLE_COLUMN,
+            60,
+            &[
+                "╭───────────────────────────────────────────────╮",
+                "│ Notes                                         │",
+                "├───────────────────────────────────────────────┤",
+                "│ short                                         │",
+                "│ a much longer note that has to wrap somewhere │",
+                "╰───────────────────────────────────────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_SINGLE_COLUMN,
+            20,
+            &[
+                "╭──────────────────╮",
+                "│ Notes            │",
+                "├──────────────────┤",
+                "│ short            │",
+                "│ a much longer    │",
+                "│ note that has to │",
+                "│ wrap somewhere   │",
+                "╰──────────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_SINGLE_COLUMN,
+            6,
+            &[
+                "╭────╮",
+                "│ No │",
+                "│ te │",
+                "│ s  │",
+                "├────┤",
+                "│ sh │",
+                "│ or │",
+                "│ t  │",
+                "│ a  │",
+                "│ mu │",
+                "│ ch │",
+                "│ lo │",
+                "│ ng │",
+                "│ er │",
+                "│ no │",
+                "│ te │",
+                "│ th │",
+                "│ at │",
+                "│ ha │",
+                "│ s  │",
+                "│ to │",
+                "│ wr │",
+                "│ ap │",
+                "│ so │",
+                "│ me │",
+                "│ wh │",
+                "│ er │",
+                "│ e  │",
+                "╰────╯",
+            ],
+        );
+        assert_table(
+            TABLE_SINGLE_COLUMN,
+            4,
+            &[
+                "Note", "s", "shor", "t", "a", "much", "long", "er", "note", "that", "has", "to",
+                "wrap", "some", "wher", "e",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_many_columns() {
+        assert_table(
+            TABLE_MANY_COLUMNS,
+            80,
+            &[
+                "╭───────┬──────┬───────┬───────┬─────────┬──────┬─────┬───────╮",
+                "│ A     │ B    │ C     │ D     │ E       │ F    │ G   │ H     │",
+                "├───────┼──────┼───────┼───────┼─────────┼──────┼─────┼───────┤",
+                "│ alpha │ beta │ gamma │ delta │ epsilon │ zeta │ eta │ theta │",
+                "╰───────┴──────┴───────┴───────┴─────────┴──────┴─────┴───────╯",
+            ],
+        );
+        assert_table(
+            TABLE_MANY_COLUMNS,
+            50,
+            &[
+                "╭─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────╮",
+                "│ A   │ B   │ C   │ D   │ E   │ F   │ G   │ H   │",
+                "├─────┼─────┼─────┼─────┼─────┼─────┼─────┼─────┤",
+                "│ alp │ bet │ gam │ del │ eps │ zet │ eta │ the │",
+                "│ ha  │ a   │ ma  │ ta  │ ilo │ a   │     │ ta  │",
+                "│     │     │     │     │ n   │     │     │     │",
+                "╰─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────╯",
+            ],
+        );
+        assert_table(
+            TABLE_MANY_COLUMNS,
+            40,
+            &[
+                "A │ B │ C │ D │ E │ F │ G │ H",
+                "alpha │ beta │ gamma │ delta │ epsilon │",
+                "zeta │ eta │ theta",
+            ],
+        );
+        assert_table(
+            TABLE_MANY_COLUMNS,
+            30,
+            &[
+                "A │ B │ C │ D │ E │ F │ G │ H",
+                "alpha │ beta │ gamma │ delta │",
+                "epsilon │ zeta │ eta │ theta",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_empty_cells() {
+        assert_table(
+            TABLE_EMPTY_CELLS,
+            50,
+            &[
+                "╭──────┬───────┬─────────────────────╮",
+                "│ Name │ Value │ Comment             │",
+                "├──────┼───────┼─────────────────────┤",
+                "│ a    │       │                     │",
+                "│      │ 2     │                     │",
+                "│      │       │ only a comment here │",
+                "╰──────┴───────┴─────────────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_EMPTY_CELLS,
+            30,
+            &[
+                "╭──────┬───────┬─────────────╮",
+                "│ Name │ Value │ Comment     │",
+                "├──────┼───────┼─────────────┤",
+                "│ a    │       │             │",
+                "│      │ 2     │             │",
+                "│      │       │ only a      │",
+                "│      │       │ comment     │",
+                "│      │       │ here        │",
+                "╰──────┴───────┴─────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_EMPTY_CELLS,
+            24,
+            &[
+                "╭──────┬──────┬──────╮",
+                "│ Name │ Valu │ Comm │",
+                "│      │ e    │ ent  │",
+                "├──────┼──────┼──────┤",
+                "│ a    │      │      │",
+                "│      │ 2    │      │",
+                "│      │      │ only │",
+                "│      │      │ a co │",
+                "│      │      │ mmen │",
+                "│      │      │ t    │",
+                "│      │      │ here │",
+                "╰──────┴──────┴──────╯",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_long_cell_beside_short() {
+        assert_table(
+            TABLE_LONG_CELL_BESIDE_SHORT,
+            120,
+            &[
+                "╭───┬──────────────────────────────────────────────────────────────────────────────────────────┬────╮",
+                "│ # │ Description                                                                              │ OK │",
+                "├───┼──────────────────────────────────────────────────────────────────────────────────────────┼────┤",
+                "│ 1 │ This description is very long and will certainly not fit on a single line of the preview │ y  │",
+                "│ 2 │ short                                                                                    │ n  │",
+                "╰───┴──────────────────────────────────────────────────────────────────────────────────────────┴────╯",
+            ],
+        );
+        assert_table(
+            TABLE_LONG_CELL_BESIDE_SHORT,
+            60,
+            &[
+                "╭───┬─────────────────────────────────────────────────┬────╮",
+                "│ # │ Description                                     │ OK │",
+                "├───┼─────────────────────────────────────────────────┼────┤",
+                "│ 1 │ This description is very long and will          │ y  │",
+                "│   │ certainly not fit on a single line of the       │    │",
+                "│   │ preview                                         │    │",
+                "│ 2 │ short                                           │ n  │",
+                "╰───┴─────────────────────────────────────────────────┴────╯",
+            ],
+        );
+        assert_table(
+            TABLE_LONG_CELL_BESIDE_SHORT,
+            30,
+            &[
+                "╭───┬───────────────────┬────╮",
+                "│ # │ Description       │ OK │",
+                "├───┼───────────────────┼────┤",
+                "│ 1 │ This description  │ y  │",
+                "│   │ is very long and  │    │",
+                "│   │ will certainly    │    │",
+                "│   │ not fit on a      │    │",
+                "│   │ single line of    │    │",
+                "│   │ the preview       │    │",
+                "│ 2 │ short             │ n  │",
+                "╰───┴───────────────────┴────╯",
+            ],
+        );
+        assert_table(
+            TABLE_LONG_CELL_BESIDE_SHORT,
+            18,
+            &[
+                "╭───┬────┬────╮",
+                "│ # │ De │ OK │",
+                "│   │ sc │    │",
+                "│   │ ri │    │",
+                "│   │ pt │    │",
+                "│   │ io │    │",
+                "│   │ n  │    │",
+                "├───┼────┼────┤",
+                "│ 1 │ Th │ y  │",
+                "│   │ is │    │",
+                "│   │ de │    │",
+                "│   │ sc │    │",
+                "│   │ ri │    │",
+                "│   │ pt │    │",
+                "│   │ io │    │",
+                "│   │ n  │    │",
+                "│   │ is │    │",
+                "│   │ ve │    │",
+                "│   │ ry │    │",
+                "│   │ lo │    │",
+                "│   │ ng │    │",
+                "│   │ an │    │",
+                "│   │ d  │    │",
+                "│   │ wi │    │",
+                "│   │ ll │    │",
+                "│   │ ce │    │",
+                "│   │ rt │    │",
+                "│   │ ai │    │",
+                "│   │ nl │    │",
+                "│   │ y  │    │",
+                "│   │ no │    │",
+                "│   │ t  │    │",
+                "│   │ fi │    │",
+                "│   │ t  │    │",
+                "│   │ on │    │",
+                "│   │ a  │    │",
+                "│   │ si │    │",
+                "│   │ ng │    │",
+                "│   │ le │    │",
+                "│   │ li │    │",
+                "│   │ ne │    │",
+                "│   │ of │    │",
+                "│   │ th │    │",
+                "│   │ e  │    │",
+                "│   │ pr │    │",
+                "│   │ ev │    │",
+                "│   │ ie │    │",
+                "│   │ w  │    │",
+                "│ 2 │ sh │ n  │",
+                "│   │ or │    │",
+                "│   │ t  │    │",
+                "╰───┴────┴────╯",
+            ],
+        );
+    }
 }
