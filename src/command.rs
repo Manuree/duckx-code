@@ -32,6 +32,8 @@ pub enum CommandId {
     Diff,
     /// Show only the focused buffer, without the title or status bar.
     Focus,
+    /// Open a read-only Markdown preview beside the focused file.
+    Preview,
     /// Scroll the explorer to the file in the focused tab.
     Reveal,
     SplitRight,
@@ -213,6 +215,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Show only this buffer, without the title or status bar",
         shortcut: "",
         arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::Preview,
+        name: "preview",
+        description: "Preview this Markdown file (read-only) beside it",
+        shortcut: "",
+        arg: Some("<split-right|split-down>"),
         editor: true,
         explorer: false,
     },
@@ -684,6 +695,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::JumpForward => 210,
         CommandId::Diff => 255,
         CommandId::Focus => 258,
+        CommandId::Preview => 257,
         CommandId::Reveal => 259,
         CommandId::Select => 220,
         CommandId::Move => 230,
@@ -800,6 +812,8 @@ pub enum NameSource {
     Path,
     /// Saved folder paths (`workspace`).
     Workspace,
+    /// `split-right` and `split-down` (`preview`).
+    PreviewSide,
     /// Folders a new entry can go into (`new-file`, `new-folder`). A leading `/`
     /// lists workspace-relative folders; otherwise folders under the focused folder.
     NewEntry,
@@ -812,6 +826,7 @@ pub fn name_source(id: CommandId) -> Option<NameSource> {
         CommandId::Rename => Some(NameSource::Sibling),
         CommandId::Save => Some(NameSource::Path),
         CommandId::Workspace => Some(NameSource::Workspace),
+        CommandId::Preview => Some(NameSource::PreviewSide),
         CommandId::NewFile | CommandId::NewFolder => Some(NameSource::NewEntry),
         _ => None,
     }
@@ -1029,6 +1044,7 @@ mod tests {
                 "jump-forward",
                 "new-file",
                 "diff",
+                "preview",
                 "focus",
                 "reveal",
                 "explorer",

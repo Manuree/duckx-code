@@ -30,6 +30,9 @@ use crate::theme::SyntaxRole;
 mod agent;
 mod lsp_nav;
 mod lsp_sync;
+mod preview;
+
+pub use preview::Preview;
 
 pub use lsp_nav::{ActionView, ReferenceView};
 
@@ -552,6 +555,8 @@ pub struct App {
     lsp_resetting: bool,
     /// Tree scan that has been queued or is running. `dirty` asks for one more pass.
     tree_scan: Option<TreeScan>,
+    /// Read-only Markdown windows opened by `preview`.
+    previews: Vec<Preview>,
 }
 
 struct TreeScan {
@@ -636,6 +641,7 @@ impl App {
             sessions: Vec::new(),
             lsp_resetting: false,
             tree_scan: None,
+            previews: Vec::new(),
         };
         app.configure_syntax(TabId(0));
         app
@@ -768,6 +774,7 @@ impl App {
             tab.view.resize(width, height);
             let (line, col) = tab.buffer.cursor_line_col();
             tab.view.scroll_to(line, col);
+            self.size_preview(id, width, height);
         }
     }
 
@@ -878,6 +885,12 @@ impl App {
                     active,
                     tabs,
                 }
+            }
+            Layout::Split { first, second, .. } if matches!(**first, Layout::Leaf(id) if self.is_preview(id)) => {
+                self.snapshot_layout(second, root)
+            }
+            Layout::Split { first, second, .. } if matches!(**second, Layout::Leaf(id) if self.is_preview(id)) => {
+                self.snapshot_layout(first, root)
             }
             Layout::Split {
                 axis,
@@ -1110,6 +1123,11 @@ impl App {
 
     /// Results from background jobs. Stale results for a different root are dropped.
     pub fn handle_event(&mut self, event: AppEvent) {
+        self.handle_event_inner(event);
+        self.prune_previews();
+    }
+
+    fn handle_event_inner(&mut self, event: AppEvent) {
         match event {
             AppEvent::TreeScanned { root, entries } if self.same_root(&root) => {
                 self.explorer.set_entries(entries);
@@ -2089,6 +2107,17 @@ impl App {
     }
 
     pub fn handle(&mut self, action: SemanticAction) {
+        if self.preview_focused() {
+            self.message = None;
+            if self.handle_preview_action(&action) {
+                return;
+            }
+        }
+        self.handle_inner(action);
+        self.prune_previews();
+    }
+
+    fn handle_inner(&mut self, action: SemanticAction) {
         self.message = None;
         match action {
             SemanticAction::Move { movement, extend } => {
@@ -2885,6 +2914,7 @@ impl App {
                 .iter()
                 .map(|entry| display_rel(&entry.path))
                 .collect(),
+            NameSource::PreviewSide => vec!["split-right".to_string(), "split-down".to_string()],
             NameSource::Workspace => self
                 .sessions
                 .iter()
@@ -3735,6 +3765,7 @@ impl App {
     }
 
     fn run_command(&mut self, id: CommandId, arg: Option<&str>) -> Result<(), String> {
+        self.check_preview_command(id)?;
         if crate::command::manages_files(id) && !self.explorer.selecting {
             return Err(format!("{} applies in FILE mode", spec(id).name));
         }
@@ -3822,6 +3853,7 @@ impl App {
             CommandId::Workspace => self.request_workspace(arg.unwrap_or(""))?,
             CommandId::Diff => self.toggle_diff(),
             CommandId::Focus => self.toggle_focus(),
+            CommandId::Preview => self.open_preview(arg.unwrap_or(""))?,
         }
         Ok(())
     }
@@ -4560,6 +4592,7 @@ impl App {
     /// Opens `path`. `line` is 1-based and moves the cursor when the file is already open.
     /// A file that still has to load keeps the line in the load request.
     fn open_at(&mut self, path: PathBuf, line: Option<usize>) {
+        self.leave_preview_window();
         let path = crate::agent::strip_verbatim(&path);
         self.remember_file(&path);
         if let Some(tab_id) = self.tab_with_path(&path) {
@@ -8742,5 +8775,225 @@ mod tests {
             app.command_bar.as_ref().map(|bar| bar.input.as_str()),
             Some("new-file /images")
         );
+    }
+
+    fn markdown_app(text: &str) -> App {
+        App::new(Buffer::from_text(text), Some(PathBuf::from("README.md")))
+    }
+
+    fn leaf_ids(layout: &Layout) -> Vec<EditorId> {
+        match layout {
+            Layout::Leaf(id) => vec![*id],
+            Layout::Split { first, second, .. } => {
+                let mut ids = leaf_ids(first);
+                ids.extend(leaf_ids(second));
+                ids
+            }
+        }
+    }
+
+    #[test]
+    fn preview_needs_a_markdown_file_and_a_side() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), Some("main.rs".into()));
+        run(&mut app, "preview split-right");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("preview works on Markdown (.md) files")
+        );
+        assert!(app.previews().is_empty());
+        assert_eq!(leaf_ids(app.layout()).len(), 1);
+
+        let mut app = markdown_app("# Header\n");
+        run(&mut app, "preview");
+        let bar = app.command_bar.as_ref().expect("waits for a side");
+        assert_eq!(bar.input, "preview ");
+        assert_eq!(bar.prompted, Some(CommandId::Preview));
+        type_in_bar(&mut app, "split-r");
+        assert_eq!(app.argument_ghost().as_deref(), Some("ight"));
+        app.command_bar = None;
+
+        run(&mut app, "preview sideways");
+        assert!(
+            app.message
+                .as_deref()
+                .is_some_and(|m| m.contains("split-right or split-down")),
+            "{:?}",
+            app.message
+        );
+        assert!(app.previews().is_empty());
+
+        let mut app = App::new(Buffer::from_text("x\n"), Some("notes.markdown".into()));
+        run(&mut app, "preview right");
+        assert_eq!(app.previews().len(), 1);
+    }
+
+    #[test]
+    fn preview_opens_right_or_down_keeps_focus_and_never_stacks() {
+        let mut app = markdown_app("# Header\n");
+        let source = app.active_id();
+        run(&mut app, "preview split-right");
+        assert_eq!(app.previews().len(), 1);
+        let preview = app.previews()[0].pane;
+        assert_eq!(
+            app.layout(),
+            &Layout::Split {
+                axis: Axis::Horizontal,
+                first: Box::new(Layout::Leaf(source)),
+                second: Box::new(Layout::Leaf(preview)),
+            }
+        );
+        assert_eq!(app.active_id(), source);
+        assert_eq!(app.focus(), Focus::Editor);
+        assert!(!app.preview_focused());
+
+        run(&mut app, "preview split-right");
+        assert_eq!(app.previews().len(), 1);
+        assert_eq!(app.previews()[0].pane, preview);
+        assert_eq!(app.message.as_deref(), Some("Preview is already open"));
+
+        run(&mut app, "preview split-down");
+        assert_eq!(app.previews().len(), 1);
+        let moved = app.previews()[0].pane;
+        assert_eq!(
+            app.layout(),
+            &Layout::Split {
+                axis: Axis::Vertical,
+                first: Box::new(Layout::Leaf(source)),
+                second: Box::new(Layout::Leaf(moved)),
+            }
+        );
+        assert_eq!(app.active_id(), source);
+        assert_eq!(app.editors.len(), 2);
+
+        let root = std::env::temp_dir();
+        assert!(matches!(
+            app.snapshot_layout(&app.layout, &root),
+            crate::session::SessionLayout::Leaf { .. }
+        ));
+    }
+
+    #[test]
+    fn the_preview_is_read_only_and_scrolls() {
+        let text: String = (1..=40).map(|n| format!("line {n}\n\n")).collect();
+        let mut app = markdown_app(&text);
+        run(&mut app, "preview split-right");
+        let preview = app.previews()[0].pane;
+        app.resize_panes(&[(preview, 30, 12)]);
+        app.handle(SemanticAction::FocusAdjacent(
+            crate::action::PaneDirection::Right,
+        ));
+        assert_eq!(app.active_id(), preview);
+        assert!(app.preview_focused());
+        app.take_jobs();
+
+        app.handle(SemanticAction::InsertChar('x'));
+        assert_eq!(app.message.as_deref(), Some("The preview is read-only"));
+        app.handle(SemanticAction::InsertNewline);
+        app.handle(SemanticAction::Paste);
+        app.handle(SemanticAction::Undo);
+        app.handle(SemanticAction::Save);
+        assert!(
+            app.message
+                .as_deref()
+                .is_some_and(|m| m.contains("read-only")),
+            "{:?}",
+            app.message
+        );
+        assert!(
+            !app.take_jobs()
+                .iter()
+                .any(|job| matches!(job, Job::SaveFile { .. }))
+        );
+        assert!(!app.editor(preview).tab().dirty);
+        assert_eq!(app.editor(preview).tab().buffer.rope().len_chars(), 0);
+        run(&mut app, "goto 3");
+        assert_eq!(app.message.as_deref(), Some("The preview is read-only"));
+        run(&mut app, "save");
+        assert_eq!(app.message.as_deref(), Some("The preview is read-only"));
+
+        app.handle(SemanticAction::Move {
+            movement: Movement::Down,
+            extend: false,
+        });
+        assert_eq!(app.preview(preview).unwrap().scroll, 1);
+        app.handle(SemanticAction::PageDown { extend: false });
+        assert_eq!(app.preview(preview).unwrap().scroll, 11);
+        app.handle(SemanticAction::Move {
+            movement: Movement::DocumentEnd,
+            extend: false,
+        });
+        let rows = crate::markdown::render(&text, 26, &app.markdown_styles()).len();
+        assert_eq!(app.preview(preview).unwrap().scroll, rows - 10);
+        app.handle(SemanticAction::Move {
+            movement: Movement::DocumentStart,
+            extend: false,
+        });
+        assert_eq!(app.preview(preview).unwrap().scroll, 0);
+
+        let source_text = app
+            .editor(first_leaf(app.layout()))
+            .tab()
+            .buffer
+            .rope()
+            .to_string();
+        assert_eq!(source_text, text);
+    }
+
+    #[test]
+    fn closing_the_source_closes_its_preview_and_close_on_the_preview_keeps_the_source() {
+        let mut app = markdown_app("# Header\n");
+        let source = app.active_id();
+        run(&mut app, "preview split-right");
+        app.handle(SemanticAction::FocusAdjacent(
+            crate::action::PaneDirection::Right,
+        ));
+        run(&mut app, "close");
+        assert!(app.previews().is_empty());
+        assert_eq!(app.layout(), &Layout::Leaf(source));
+        assert_eq!(app.active_id(), source);
+        assert!(app.path().is_some_and(|path| path.ends_with("README.md")));
+
+        run(&mut app, "preview split-down");
+        assert_eq!(app.previews().len(), 1);
+        run(&mut app, "close");
+        assert!(app.previews().is_empty());
+        assert_eq!(leaf_ids(app.layout()).len(), 1);
+        assert_eq!(app.path(), None);
+    }
+
+    #[test]
+    fn closing_one_tab_of_several_drops_only_that_tabs_preview() {
+        let (dir, _guard) = temp_dir();
+        let readme = dir.join("README.md");
+        let notes = dir.join("notes.md");
+        std::fs::write(&readme, "# Readme\n").unwrap();
+        std::fs::write(&notes, "# Notes\n").unwrap();
+        let mut app = App::new(Buffer::from_text("# Readme\n"), Some(readme.clone()));
+        app.explorer = Explorer::new(dir.clone());
+        run(&mut app, "preview split-right");
+        let preview = app.previews()[0].pane;
+
+        app.handle(SemanticAction::FocusAdjacent(
+            crate::action::PaneDirection::Right,
+        ));
+        app.open_path(notes.clone());
+        finish_jobs(&mut app);
+        assert_eq!(
+            app.editor(preview).tabs().len(),
+            1,
+            "files never open in a preview"
+        );
+        assert_eq!(app.path(), Some(notes.as_path()));
+        assert_eq!(app.previews().len(), 1);
+
+        run(&mut app, "close");
+        assert_eq!(
+            app.previews().len(),
+            1,
+            "closing notes.md keeps README.md's preview"
+        );
+        assert_eq!(app.path(), Some(readme.as_path()));
+        run(&mut app, "close");
+        assert!(app.previews().is_empty());
     }
 }

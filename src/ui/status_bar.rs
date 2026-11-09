@@ -89,6 +89,11 @@ fn left_line(app: &App) -> (Vec<Span<'static>>, usize) {
             file_line(app, " FILTER ", theme.status_filter, theme.status_filter_bg),
             0,
         )
+    } else if app.preview_focused() {
+        (
+            file_line(app, " PREVIEW ", theme.status_a, theme.status_a_bg),
+            0,
+        )
     } else if app.explorer.selecting {
         (
             file_line(app, " FILE ", theme.status_select, theme.status_select_bg),
@@ -198,7 +203,12 @@ fn file_line(app: &App, label: &'static str, badge: Style, badge_bg: Color) -> V
                 theme.status_c_bold,
             ));
         }
-        None => spans.push(Span::styled("[No Name]", theme.status_c_bold)),
+        None => match app.preview_source(app.active_id()) {
+            Some((_, title)) => {
+                spans.push(Span::styled(title.trim().to_string(), theme.status_c_bold))
+            }
+            None => spans.push(Span::styled("[No Name]", theme.status_c_bold)),
+        },
     }
     if app.show_diff() {
         spans.push(Span::styled("  diff", theme.status_c_dim));
