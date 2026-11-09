@@ -16,13 +16,24 @@ use crate::lsp::{ServerStatus, Severity};
 
 /// `[NORMAL|FILE|COMMAND|FIND|OPEN|SETTINGS|ABOUT][branch][icon file | ❯ input]  ...  [selection][progress line:col][indent ending]`.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
-    let right = Line::from(right_spans(app));
+    let mut right = Line::from(right_spans(app));
+    if let Some(bar) = app.command_bar.as_ref()
+        && app.pane_select.is_none()
+    {
+        // The input comes first: the position and encoding labels step aside
+        // rather than squeeze it, so the cursor is never clamped onto the text.
+        let ghost = app.argument_ghost().map_or(0, |ghost| ghost.width());
+        let needed = COMMAND_HEAD + bar.input.width() + ghost + 1;
+        if needed + right.width() > area.width as usize {
+            right = Line::default();
+        }
+    }
     let right_width = (right.width() as u16).min(area.width);
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
 
     let theme = *app.styles();
-    let (left, cursor) = left_line(app);
+    let (left, cursor) = left_line(app, left_area.width as usize);
     frame.render_widget(
         Paragraph::new(Line::from(left)).style(theme.status_c),
         left_area,
@@ -46,12 +57,12 @@ fn separator(glyph: &'static str, fg: Color, bg: Color) -> Span<'static> {
 }
 
 /// `(spans, cursor column relative to the left edge)`. The cursor is only used while the command bar is open.
-fn left_line(app: &App) -> (Vec<Span<'static>>, usize) {
+fn left_line(app: &App, width: usize) -> (Vec<Span<'static>>, usize) {
     let theme = *app.styles();
     if app.pane_select.is_some() {
         (pane_line(app), 0)
     } else if app.command_bar.is_some() {
-        command_line(app)
+        command_line(app, width)
     } else if app.replace_mode.is_some() {
         replace_line(app)
     } else if app.find_mode.is_some() {
@@ -120,20 +131,41 @@ fn pane_line(app: &App) -> Vec<Span<'static>> {
     ]
 }
 
-fn command_line(app: &App) -> (Vec<Span<'static>>, usize) {
-    let Some(input) = app.command_bar.as_ref().map(|bar| bar.input.clone()) else {
+/// Width of ` COMMAND ` + separator + ` ❯ `, before the typed input.
+const COMMAND_HEAD: usize = 9 + 1 + 3;
+
+/// The input is drawn from its scroll window, the same one the file picker uses, so
+/// the cursor cell is always on screen and sits where the next character goes.
+fn command_line(app: &App, width: usize) -> (Vec<Span<'static>>, usize) {
+    let Some(bar) = app.command_bar.as_ref() else {
         return (Vec::new(), 0);
     };
     let theme = *app.styles();
     let prompt = " ❯ ";
-    let cursor = " COMMAND ".width() + SEPARATOR_LEFT.width() + prompt.width() + input.width();
+    let head = COMMAND_HEAD;
+    debug_assert_eq!(
+        head,
+        " COMMAND ".width() + SEPARATOR_LEFT.width() + prompt.width()
+    );
+    let at = bar.cursor();
+    let (start, end) =
+        crate::picker::query_window(&bar.input, at, width.saturating_sub(head).max(1));
+    let shown = bar.input.get(start..end).unwrap_or("").to_string();
+    let cursor = head
+        + bar
+            .input
+            .get(start..at.clamp(start, end))
+            .unwrap_or("")
+            .width();
     let mut spans = vec![
         Span::styled(" COMMAND ", theme.status_command),
         separator(SEPARATOR_LEFT, theme.status_command_bg, theme.status_c_bg),
         Span::styled(prompt, theme.command_prompt.bg(theme.status_c_bg)),
-        Span::styled(input, theme.status_c_bold),
+        Span::styled(shown, theme.status_c_bold),
     ];
-    if let Some(ghost) = app.argument_ghost() {
+    if end == bar.input.len()
+        && let Some(ghost) = app.argument_ghost()
+    {
         spans.push(Span::styled(ghost, theme.status_c_dim));
     }
     if let Some(message) = &app.message {

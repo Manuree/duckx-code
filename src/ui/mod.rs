@@ -882,6 +882,56 @@ mod tests {
         assert_eq!(cursor_at(&app, 80, 24), on_o);
     }
 
+    #[test]
+    fn command_bar_cursor_is_drawn_where_it_edits_and_the_input_scrolls() {
+        use crate::command::LineMove;
+        let mut app = App::new(Buffer::from_text(""), None);
+        app.handle(SemanticAction::OpenCommandBar);
+        app.handle(SemanticAction::CommandBar(CommandBarAction::Insert(
+            "rename index.html".into(),
+        )));
+        let at_end = cursor_at(&app, 80, 20);
+        for _ in 0..5 {
+            app.handle(SemanticAction::CommandBar(CommandBarAction::Cursor(
+                LineMove::Left,
+            )));
+        }
+        let before_dot = cursor_at(&app, 80, 20);
+        assert_eq!(before_dot, (at_end.0 - 5, at_end.1));
+        assert_eq!(cell_at(&app, 80, 20, before_dot.0, before_dot.1), ".");
+
+        // Wide (Thai and CJK) text is measured by display width.
+        app.command_bar.as_mut().unwrap().set_input("new-file 日本");
+        let wide_end = cursor_at(&app, 80, 20);
+        app.handle(SemanticAction::CommandBar(CommandBarAction::Cursor(
+            LineMove::Left,
+        )));
+        assert_eq!(cursor_at(&app, 80, 20).0 + 2, wide_end.0);
+
+        // Longer than the bar: the input scrolls so the cursor stays on screen.
+        let long = format!("new-file {}end.rs", "folder/".repeat(20));
+        app.command_bar.as_mut().unwrap().set_input(long);
+        let width = 40;
+        let (x, _) = cursor_at(&app, width, 20);
+        assert!(x < width, "cursor on screen: {x}");
+        let status = draw(&app, width, 20);
+        let status = status.lines().last().unwrap().to_string();
+        assert!(status.contains("end.rs"), "{status}");
+        app.handle(SemanticAction::CommandBar(CommandBarAction::Cursor(
+            LineMove::Home,
+        )));
+        let status = draw(&app, width, 20);
+        let status = status.lines().last().unwrap().to_string();
+        assert!(status.contains("new-file"), "{status}");
+        assert!(!status.contains("end.rs"), "{status}");
+        let (home_x, _) = cursor_at(&app, width, 20);
+        assert_eq!(
+            cell_at(&app, width, 20, home_x, 19),
+            "n",
+            "the cursor sits on the first character"
+        );
+    }
+
     fn cursor_at(app: &App, width: u16, height: u16) -> (u16, u16) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
