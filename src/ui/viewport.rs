@@ -28,7 +28,7 @@ pub fn render(
     show_diff: bool,
     diff: Option<&FileDiff>,
 ) {
-    let selection = buffer.selection();
+    let selection = buffer.highlight();
     let (cursor_line, cursor_col) = buffer.cursor_line_col();
     let number_width = (gutter.width as usize).saturating_sub(2 + usize::from(show_diff));
 

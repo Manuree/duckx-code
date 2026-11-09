@@ -635,7 +635,7 @@ impl App {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "[No Name]".to_string());
-        let selection = clip(&tab.buffer.selected_text(), 500);
+        let selection = clip(&tab.buffer.highlighted_text(), 500);
         let selection = if selection.is_empty() {
             "(none)".to_string()
         } else {

@@ -97,6 +97,8 @@ pub enum SemanticAction {
     /// Leave an active snippet, or close a hover that is still open.
     Dismiss,
     SelectAll,
+    /// Clear the selection, including one the cursor moved away from.
+    Deselect,
     Undo,
     Redo,
     Save,

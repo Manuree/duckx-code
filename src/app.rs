@@ -2174,6 +2174,7 @@ impl App {
                 self.page(true, extend);
             }
             SemanticAction::InsertChar(c) => {
+                self.buffer_mut().resolve_sticky();
                 let selection = self.buffer().selection();
                 let before = self.buffer().rope().len_chars();
                 self.edit(|buffer| buffer.insert_char(c));
@@ -2200,6 +2201,7 @@ impl App {
                 self.edit(|buffer| buffer.insert_text(&text));
             }
             SemanticAction::DeleteBackward => {
+                self.buffer_mut().resolve_sticky();
                 let selection = self.buffer().selection();
                 let before = self.buffer().rope().len_chars();
                 self.edit(|buffer| buffer.delete_backward());
@@ -2214,6 +2216,7 @@ impl App {
                 self.note_typed(None);
             }
             SemanticAction::DeleteForward => {
+                self.buffer_mut().resolve_sticky();
                 let selection = self.buffer().selection();
                 let before = self.buffer().rope().len_chars();
                 self.edit(|buffer| buffer.delete_forward());
@@ -2250,6 +2253,7 @@ impl App {
                 self.dismiss_lsp_popups();
                 self.buffer_mut().select_all();
             }
+            SemanticAction::Deselect => self.deselect(),
             SemanticAction::Undo => {
                 self.dismiss_lsp_popups();
                 self.edit(|buffer| {
@@ -3823,6 +3827,7 @@ impl App {
                 buffer.redo();
             }),
             CommandId::SelectAll => self.buffer_mut().select_all(),
+            CommandId::Deselect => self.deselect(),
             CommandId::Indent => self.edit(|buffer| buffer.indent()),
             CommandId::Outdent => self.edit(|buffer| buffer.outdent()),
             CommandId::GotoLine => {
@@ -4050,6 +4055,13 @@ impl App {
 
     fn editor_mut(&mut self, id: EditorId) -> Option<&mut Editor> {
         self.editors.iter_mut().find(|editor| editor.id == id)
+    }
+
+    /// `deselect` / `Ctrl+D`: clears the selection, sticky or live.
+    fn deselect(&mut self) {
+        if !self.buffer_mut().deselect() {
+            self.message = Some("Nothing selected".to_string());
+        }
     }
 
     fn copy(&mut self) -> Result<(), String> {
@@ -9356,5 +9368,115 @@ mod tests {
         assert!(shown.ends_with("/ARCHITECTURE.md"));
         assert_eq!(shown.width(), COPY_SHOWN);
         assert_eq!(truncate_start("short.md", COPY_SHOWN), "short.md");
+    }
+
+    fn select_hello(app: &mut App) {
+        for _ in 0..5 {
+            app.handle(SemanticAction::Move {
+                movement: Movement::Right,
+                extend: true,
+            });
+        }
+    }
+
+    fn arrow(app: &mut App, movement: Movement) {
+        app.handle(SemanticAction::Move {
+            movement,
+            extend: false,
+        });
+    }
+
+    #[test]
+    fn selection_stays_while_the_cursor_moves_and_deselect_clears_it() {
+        let mut app = App::new(numbered_lines(60), None);
+        app.view_mut().resize(80, 10);
+        app.buffer_mut().select_span(0, 4);
+        app.handle(SemanticAction::PageDown { extend: false });
+        arrow(&mut app, Movement::Down);
+        run(&mut app, "goto 40");
+        assert_eq!(app.buffer().cursor_line_col().0, 39);
+        assert_eq!(app.buffer().highlighted_text(), "0\n1\n");
+
+        app.handle(SemanticAction::Copy);
+        assert_eq!(clip(&mut app), "0\n1\n");
+
+        app.handle(SemanticAction::Deselect);
+        assert!(app.buffer().highlight().is_empty());
+        assert_eq!(app.buffer().cursor_line_col().0, 39);
+        app.handle(SemanticAction::Deselect);
+        assert_eq!(app.message.as_deref(), Some("Nothing selected"));
+
+        app.buffer_mut().select_span(0, 1);
+        arrow(&mut app, Movement::DocumentEnd);
+        run(&mut app, "deselect");
+        assert!(app.buffer().highlight().is_empty());
+        assert_eq!(app.recent_command, Some(CommandId::Deselect));
+    }
+
+    #[test]
+    fn ctrl_d_deselects_in_the_editor() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(Buffer::from_text("hello world"), None);
+        select_hello(&mut app);
+        arrow(&mut app, Movement::LineEnd);
+        let ctrl_d = Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        let action = crate::input::route(&ctrl_d, app.focus(), false).unwrap();
+        assert_eq!(action, SemanticAction::Deselect);
+        app.handle(action);
+        assert!(app.buffer().highlight().is_empty());
+        assert_eq!(app.buffer().rope().to_string(), "hello world");
+    }
+
+    #[test]
+    fn typing_away_from_a_sticky_selection_edits_at_the_cursor() {
+        let mut app = App::new(Buffer::from_text("hello world"), None);
+        select_hello(&mut app);
+        arrow(&mut app, Movement::LineEnd);
+        app.handle(SemanticAction::InsertChar('!'));
+        app.handle(SemanticAction::DeleteBackward);
+        app.handle(SemanticAction::InsertText("?".to_string()));
+        assert_eq!(app.buffer().rope().to_string(), "hello world?");
+        assert!(app.buffer().highlight().is_empty());
+
+        select_hello_at_start(&mut app);
+        arrow(&mut app, Movement::Left);
+        app.handle(SemanticAction::InsertChar('X'));
+        assert_eq!(app.buffer().rope().to_string(), "X world?");
+
+        select_hello_at_start(&mut app);
+        arrow(&mut app, Movement::LineEnd);
+        app.clipboard.set_text("pasted".to_string()).unwrap();
+        app.handle(SemanticAction::Paste);
+        assert_eq!(app.buffer().rope().to_string(), "X world?pasted");
+    }
+
+    fn select_hello_at_start(app: &mut App) {
+        app.buffer_mut().move_to(0, false);
+        app.buffer_mut().deselect();
+        app.handle(SemanticAction::Move {
+            movement: Movement::WordRight,
+            extend: true,
+        });
+    }
+
+    #[test]
+    fn cut_and_undo_with_a_sticky_selection() {
+        let mut app = App::new(Buffer::from_text("hello world"), None);
+        select_hello(&mut app);
+        arrow(&mut app, Movement::LineEnd);
+        app.handle(SemanticAction::Cut);
+        assert_eq!(clip(&mut app), "hello");
+        assert_eq!(app.buffer().rope().to_string(), " world");
+
+        app.handle(SemanticAction::Undo);
+        assert_eq!(app.buffer().rope().to_string(), "hello world");
+        arrow(&mut app, Movement::LineEnd);
+        app.handle(SemanticAction::Undo);
+        app.handle(SemanticAction::Redo);
+        app.handle(SemanticAction::Redo);
+        arrow(&mut app, Movement::Left);
+        app.handle(SemanticAction::InsertChar('x'));
+        let len = app.buffer().rope().len_chars();
+        assert!(app.buffer().highlight().to() <= len);
     }
 }

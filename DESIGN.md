@@ -40,8 +40,15 @@ Holding `Shift` with any navigation key anchors the selection at the starting cu
 | `Shift + PgUp` / `Shift + PgDn` | Select an entire viewport page up or down |
 | `Ctrl + Shift + Home / End` | Select from cursor to the beginning or end of the document |
 | `Ctrl + A` | Select the entire document buffer |
+| `Ctrl + D` | Deselect: clear the selection (also the `deselect` command) |
 
 *Typing any printable character, `Backspace`, or `Delete` while a selection is active replaces the entire selected region atomically.*
+
+**Sticky selection.** Moving without `Shift` does not clear the selection or change its range. This covers the arrows, `Home`/`End`, `PgUp`/`PgDn`, word jumps, `goto`, and jumps such as go to definition. The range stays highlighted and keeps counting in the status bar while the cursor moves around to read. Only `Ctrl + D` / `deselect`, a new selection (`Shift` + move, `select-all`, a find match), an edit, or undo/redo clears it. `Esc` does not clear it.
+* `Shift` + move continues the selection when the cursor is back on its active end (the `head` where the cursor was when selecting). Anywhere else it starts a new selection anchored at the cursor.
+* `copy` and `cut` act on the sticky selection wherever the cursor is.
+* Typing, `Enter`, `Backspace`, `Delete`, paste, `Tab`, and the line commands: when the cursor is inside or at an edge of the selection, it is taken back and replaced or deleted as before. When the cursor has moved away, the selection is cleared first and the edit happens at the cursor. Text out of view is never deleted by a keystroke.
+* Other edits (find & replace, formatting, save trimming) keep the sticky range on the same text and clamp it to the buffer. Undo and redo restore their own selection and drop the sticky one.
 
 ### 2.3 Editing & Clipboard Shortcuts
 Avoids terminal control-code traps while remaining intuitive:
@@ -104,6 +111,7 @@ While an editor is focused:
 | `new-file` | `<path>` (nested, e.g. `images/images.rs`) | — |
 | `undo` / `redo` | — | `Ctrl + Z` / `Ctrl + Y` |
 | `select-all` | — | `Ctrl + A` |
+| `deselect` | — | `Ctrl + D`. Clear the selection, including a sticky one the cursor moved away from |
 | `indent` | — | `Tab` |
 | `outdent` | — | `Shift + Tab` |
 | `agent` | — | `F6` |

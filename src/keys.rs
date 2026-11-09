@@ -130,6 +130,13 @@ pub fn bindings() -> &'static [Binding] {
             action: || SemanticAction::SelectAll,
         },
         Binding {
+            id: "deselect",
+            label: "Deselect",
+            detail: "Clear the selection, even after the cursor moved away from it.",
+            defaults: &[ch('d', true, false, false)],
+            action: || SemanticAction::Deselect,
+        },
+        Binding {
             id: "find",
             label: "Find",
             detail: "Search in the focused file.",

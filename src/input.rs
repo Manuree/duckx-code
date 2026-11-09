@@ -1366,4 +1366,28 @@ mod tests {
             Some(SemanticAction::Quit)
         );
     }
+
+    #[test]
+    fn ctrl_d_only_deselects_where_a_buffer_takes_keys() {
+        let ctrl_d = key(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(editor(ctrl_d.clone()), Some(SemanticAction::Deselect));
+        assert_eq!(
+            route(&ctrl_d, Focus::CompletionPopup, false),
+            Some(SemanticAction::Deselect)
+        );
+        for focus in [
+            Focus::Sidebar,
+            Focus::Find,
+            Focus::Replace,
+            Focus::FilePicker,
+            Focus::PreviewSide,
+            Focus::About,
+            Focus::Settings,
+            Focus::Prompt,
+        ] {
+            assert_eq!(route(&ctrl_d, focus, false), None, "{focus:?}");
+        }
+        assert_eq!(route(&ctrl_d, Focus::Sidebar, true), None);
+        assert_eq!(route(&ctrl_d, Focus::CommandBar, false), None);
+    }
 }
