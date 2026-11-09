@@ -228,10 +228,18 @@ impl App {
                 self.slide_prompt(right, extend);
                 self.refresh_agent_popup();
             }
+            AgentAction::Word { right, extend } if !self.agent.reading => {
+                let len = self.agent.prompt.chars().count();
+                let cursor = self.agent.cursor.min(len);
+                let at = word_stop(&self.agent.prompt, cursor, right);
+                self.place_prompt(at, extend);
+                self.refresh_agent_popup();
+            }
             AgentAction::Insert(_)
             | AgentAction::Backspace
             | AgentAction::Delete
-            | AgentAction::Move { .. } => {}
+            | AgentAction::Move { .. }
+            | AgentAction::Word { .. } => {}
             AgentAction::Jump { end, extend } => {
                 if self.agent.reading {
                     self.agent.scroll = if end { 0 } else { usize::MAX };
@@ -1729,6 +1737,62 @@ struct EditArgs {
     find: Option<String>,
     #[serde(default)]
     replace: Option<String>,
+}
+
+/// Where `Ctrl+Left` / `Ctrl+Right` land in the prompt, the same way as the editor:
+/// skip whitespace (line breaks included), then one run of word characters or one
+/// run of punctuation. Positions are char indices.
+fn word_stop(text: &str, cursor: usize, right: bool) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    #[derive(PartialEq, Clone, Copy)]
+    enum Class {
+        Space,
+        Word,
+        Mark,
+    }
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for grapheme in text.graphemes(true) {
+        let c = grapheme.chars().next().unwrap_or(' ');
+        let class = if c.is_whitespace() {
+            Class::Space
+        } else if c.is_alphanumeric() || c == '_' {
+            Class::Word
+        } else {
+            Class::Mark
+        };
+        let len = grapheme.chars().count();
+        spans.push((at, at + len, class));
+        at += len;
+    }
+    if right {
+        let mut i = spans.iter().take_while(|s| s.0 < cursor).count();
+        while i < spans.len() && spans[i].2 == Class::Space {
+            i += 1;
+        }
+        if let Some(&(_, _, class)) = spans.get(i) {
+            while i < spans.len() && spans[i].2 == class {
+                i += 1;
+            }
+        }
+        if i == 0 {
+            cursor
+        } else {
+            spans[i - 1].1.max(cursor)
+        }
+    } else {
+        let mut i = spans.iter().take_while(|s| s.1 <= cursor).count();
+        while i > 0 && spans[i - 1].2 == Class::Space {
+            i -= 1;
+        }
+        if i > 0 {
+            let class = spans[i - 1].2;
+            while i > 0 && spans[i - 1].2 == class {
+                i -= 1;
+            }
+        }
+        spans.get(i).map_or(0, |span| span.0).min(cursor)
+    }
 }
 
 fn prompt_row_for(rows: &[(usize, usize)], cursor: usize, len: usize) -> usize {

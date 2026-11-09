@@ -513,6 +513,8 @@ pub struct App {
     /// Background work queued by actions; drained and run by the main loop.
     jobs: Vec<Job>,
     pub should_quit: bool,
+    /// `Ctrl+W` was pressed; the next key is read by `input::route_focus_prefix`.
+    pub focus_prefix: bool,
     pub prompt: Option<Prompt>,
     /// Settings page. `None` while it is closed.
     pub settings: Option<crate::settings::Page>,
@@ -633,6 +635,7 @@ impl App {
             screen_height: 40,
             jobs: Vec::new(),
             should_quit: false,
+            focus_prefix: false,
             prompt: None,
             settings: None,
             about: false,
@@ -2145,6 +2148,7 @@ impl App {
     }
 
     pub fn handle(&mut self, action: SemanticAction) {
+        self.focus_prefix = false;
         if self.preview_focused() {
             self.message = None;
             if self.handle_preview_action(&action) {
@@ -2325,6 +2329,18 @@ impl App {
             SemanticAction::ResizeSidebar { wider } => self.resize_sidebar(wider),
             SemanticAction::Sidebar(action) => self.handle_sidebar(action),
             SemanticAction::FocusAdjacent(direction) => self.focus_adjacent(direction),
+            SemanticAction::FocusPrefix => {
+                self.focus_prefix = true;
+                self.message = Some(format!(
+                    "{} → ← ↑ ↓ focus pane   any other key cancels",
+                    self.keys.display_of("focus-prefix")
+                ));
+            }
+            SemanticAction::CancelFocusPrefix => {}
+            SemanticAction::ScrollLine { down } => {
+                self.dismiss_lsp_popups();
+                self.scroll_line(down);
+            }
             SemanticAction::CycleTab { next } => self.cycle_tab(next),
             SemanticAction::GotoDiagnostic { next } => {
                 self.dismiss_lsp_popups();
@@ -5599,6 +5615,45 @@ impl App {
         let tab = self.active_editor_mut().tab_mut();
         let (line, col) = tab.buffer.cursor_line_col();
         tab.view.scroll_to(line, col);
+    }
+
+    /// `Ctrl+Up` / `Ctrl+Down`: scrolls one line. The cursor stays put unless it would
+    /// leave the view (with its scroll margin); then it moves just enough to stay on screen.
+    fn scroll_line(&mut self, down: bool) {
+        let height = self.view().height;
+        if height == 0 {
+            return;
+        }
+        let off = SCROLLOFF.min((height - 1) / 2);
+        let last = self.buffer().len_lines() - 1;
+        let scroll_y = self.view().scroll_y;
+        let scroll_y = if down {
+            if scroll_y >= last.saturating_sub(off) {
+                return;
+            }
+            scroll_y + 1
+        } else {
+            if scroll_y == 0 {
+                return;
+            }
+            scroll_y - 1
+        };
+        self.view_mut().scroll_y = scroll_y;
+        let (lowest, highest) = (scroll_y + off, scroll_y + height - 1 - off);
+        loop {
+            let line = self.buffer().cursor_line_col().0;
+            let movement = if line < lowest && line < last {
+                Movement::Down
+            } else if line > highest && line > 0 {
+                Movement::Up
+            } else {
+                break;
+            };
+            self.buffer_mut().move_cursor(movement, false);
+            if self.buffer().cursor_line_col().0 == line {
+                break;
+            }
+        }
     }
 
     /// Moves the cursor and the viewport together so the cursor keeps its screen row.
@@ -9478,5 +9533,128 @@ mod tests {
         app.handle(SemanticAction::InsertChar('x'));
         let len = app.buffer().rope().len_chars();
         assert!(app.buffer().highlight().to() <= len);
+    }
+
+    #[test]
+    fn ctrl_w_then_an_arrow_moves_focus_and_other_keys_cancel() {
+        let mut app = App::new(Buffer::from_text("alpha"), None);
+        run(&mut app, "split-right");
+        app.handle(SemanticAction::InsertChar('R'));
+
+        app.handle(SemanticAction::FocusPrefix);
+        assert!(app.focus_prefix);
+        let hint = app.message.clone().unwrap();
+        assert!(hint.starts_with("Ctrl+W → ← ↑ ↓ focus pane"), "{hint}");
+        app.handle(SemanticAction::FocusAdjacent(PaneDirection::Left));
+        assert!(!app.focus_prefix);
+        assert_eq!(app.buffer().rope().to_string(), "alpha");
+
+        app.handle(SemanticAction::FocusPrefix);
+        app.handle(SemanticAction::CancelFocusPrefix);
+        assert!(!app.focus_prefix);
+        assert!(app.message.is_none());
+        assert_eq!(app.buffer().rope().to_string(), "alpha");
+
+        run(&mut app, "explorer");
+        assert_eq!(app.focus(), Focus::Sidebar);
+        app.handle(SemanticAction::FocusPrefix);
+        assert!(app.focus_prefix);
+        app.handle(SemanticAction::FocusAdjacent(PaneDirection::Right));
+        assert_eq!(app.focus(), Focus::Editor);
+    }
+
+    #[test]
+    fn ctrl_w_prefix_works_from_a_focused_preview() {
+        let mut app = markdown_app("# Title\n");
+        run(&mut app, "preview split-right");
+        app.handle(SemanticAction::FocusAdjacent(PaneDirection::Right));
+        assert!(app.preview_focused());
+        app.handle(SemanticAction::FocusPrefix);
+        assert!(app.focus_prefix);
+        assert_ne!(app.message.as_deref(), Some("The preview is read-only"));
+        app.handle(SemanticAction::FocusAdjacent(PaneDirection::Left));
+        assert!(!app.preview_focused());
+        assert_eq!(app.buffer().rope().to_string(), "# Title\n");
+    }
+
+    #[test]
+    fn ctrl_up_down_scroll_the_view_and_keep_the_cursor_on_screen() {
+        let mut app = App::new(numbered_lines(100), None);
+        app.view_mut().resize(80, 10);
+        app.buffer_mut().goto_line(5);
+        app.handle(SemanticAction::ScrollLine { down: true });
+        assert_eq!(app.view().scroll_y, 1);
+        assert_eq!(app.buffer().cursor_line_col().0, 5);
+
+        for _ in 0..4 {
+            app.handle(SemanticAction::ScrollLine { down: true });
+        }
+        assert_eq!(app.view().scroll_y, 5);
+        assert_eq!(app.buffer().cursor_line_col().0, 5 + SCROLLOFF);
+        app.scroll_to_cursor();
+        assert_eq!(app.view().scroll_y, 5);
+
+        app.handle(SemanticAction::ScrollLine { down: false });
+        assert_eq!(app.view().scroll_y, 4);
+        assert_eq!(app.buffer().cursor_line_col().0, 5 + SCROLLOFF);
+
+        app.view_mut().scroll_y = 0;
+        app.handle(SemanticAction::ScrollLine { down: false });
+        assert_eq!(app.view().scroll_y, 0);
+
+        app.buffer_mut().goto_line(99);
+        app.scroll_to_cursor();
+        let bottom = app.view().scroll_y;
+        app.handle(SemanticAction::ScrollLine { down: false });
+        assert_eq!(app.view().scroll_y, bottom - 1);
+        assert_eq!(
+            app.buffer().cursor_line_col().0,
+            bottom - 1 + 10 - 1 - SCROLLOFF
+        );
+        for _ in 0..200 {
+            app.handle(SemanticAction::ScrollLine { down: true });
+        }
+        assert_eq!(app.view().scroll_y, 99 - SCROLLOFF);
+        assert_eq!(app.buffer().cursor_line_col().0, 99);
+    }
+
+    #[test]
+    fn ctrl_up_down_scroll_a_focused_preview() {
+        let text: String = (0..60).map(|i| format!("line {i}\n\n")).collect();
+        let mut app = markdown_app(&text);
+        run(&mut app, "preview split-right");
+        let preview = app.previews()[0].pane;
+        app.resize_panes(&[(preview, 30, 12)]);
+        app.handle(SemanticAction::FocusAdjacent(PaneDirection::Right));
+        assert!(app.preview_focused());
+        app.handle(SemanticAction::ScrollLine { down: true });
+        assert_eq!(app.previews()[0].scroll, 1);
+        assert_ne!(app.message.as_deref(), Some("The preview is read-only"));
+        app.handle(SemanticAction::ScrollLine { down: false });
+        assert_eq!(app.previews()[0].scroll, 0);
+    }
+
+    #[test]
+    fn agent_prompt_moves_by_word_like_the_editor() {
+        let mut app = App::new(Buffer::from_text(""), None);
+        app.handle(SemanticAction::ToggleAgent);
+        assert_eq!(app.focus(), Focus::Agent);
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "fix  foo.bar(x)".into(),
+        )));
+        let word = |app: &mut App, right, extend| {
+            app.handle(SemanticAction::Agent(crate::action::AgentAction::Word {
+                right,
+                extend,
+            }));
+            app.agent.cursor
+        };
+        let lefts: Vec<_> = (0..6).map(|_| word(&mut app, false, false)).collect();
+        assert_eq!(lefts, [14, 13, 12, 9, 8, 5]);
+        assert_eq!(word(&mut app, false, false), 0);
+        let rights: Vec<_> = (0..4).map(|_| word(&mut app, true, false)).collect();
+        assert_eq!(rights, [3, 8, 9, 12]);
+        assert_eq!(word(&mut app, true, true), 13);
+        assert_eq!(app.agent.anchor, 12);
     }
 }

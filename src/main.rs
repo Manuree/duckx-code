@@ -264,9 +264,12 @@ async fn drive(
                 let Some(event) = event else {
                     break;
                 };
-                if let Some(action) =
+                let event = event?;
+                let action = if app.focus_prefix {
+                    input::route_focus_prefix(&event)
+                } else {
                     input::route_flags(
-                        &event?,
+                        &event,
                         app.focus(),
                         app.explorer.selecting,
                         app.filtering(),
@@ -275,7 +278,8 @@ async fn drive(
                         app.drafting(),
                         &mut paste_burst,
                     )
-                {
+                };
+                if let Some(action) = action {
                     app.handle(action);
                     needs_draw = true;
                 }

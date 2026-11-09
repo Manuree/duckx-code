@@ -325,6 +325,13 @@ pub fn bindings() -> &'static [Binding] {
             defaults: &[arrow(Kind::Right, true, true)],
             action: || SemanticAction::CycleTab { next: true },
         },
+        Binding {
+            id: "focus-prefix",
+            label: "Focus pane",
+            detail: "Press, then an arrow, to move focus to the window on that side.",
+            defaults: &[ch('w', true, false, false)],
+            action: || SemanticAction::FocusPrefix,
+        },
     ];
     BINDINGS
 }
@@ -691,6 +698,7 @@ pub fn sidebar_accepts(action: &SemanticAction) -> bool {
             | SemanticAction::FindPrevious
             | SemanticAction::Quit
             | SemanticAction::CycleTab { .. }
+            | SemanticAction::FocusPrefix
     )
 }
 

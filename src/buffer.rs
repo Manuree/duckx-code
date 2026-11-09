@@ -1997,6 +1997,23 @@ mod tests {
     }
 
     #[test]
+    fn word_movement_skips_spaces_then_one_word_or_punctuation_run() {
+        let mut buf = Buffer::from_text("let  total = foo(bar);");
+        let mut stops = Vec::new();
+        for _ in 0..7 {
+            buf.move_cursor(Movement::WordRight, false);
+            stops.push(head(&buf));
+        }
+        assert_eq!(stops, [3, 10, 12, 16, 17, 20, 22]);
+        stops.clear();
+        for _ in 0..7 {
+            buf.move_cursor(Movement::WordLeft, false);
+            stops.push(head(&buf));
+        }
+        assert_eq!(stops, [20, 17, 16, 13, 11, 5, 0]);
+    }
+
+    #[test]
     fn word_movement_stops_at_class_boundaries() {
         let mut buf = Buffer::from_text("foo.bar  baz");
         let mut stops = Vec::new();
