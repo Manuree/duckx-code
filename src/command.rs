@@ -221,9 +221,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::Preview,
         name: "preview",
-        description: "Preview this Markdown file (read-only) beside it",
+        description: "Preview this Markdown file (read-only): pick ↑ ↓ ← → for the side",
         shortcut: "",
-        arg: Some("<split-right|split-down>"),
+        arg: Some("[up|down|left|right]"),
         editor: true,
         explorer: false,
     },
@@ -801,6 +801,12 @@ pub fn is_line_number(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_ascii_digit())
 }
 
+/// Commands whose argument may be left out. `preview` alone opens the side picker
+/// instead of waiting for a typed side.
+pub fn optional_arg(id: CommandId) -> bool {
+    matches!(id, CommandId::Preview)
+}
+
 /// Which names a command argument can complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameSource {
@@ -812,7 +818,7 @@ pub enum NameSource {
     Path,
     /// Saved folder paths (`workspace`).
     Workspace,
-    /// `split-right` and `split-down` (`preview`).
+    /// `split-up`, `split-down`, `split-left`, and `split-right` (`preview`).
     PreviewSide,
     /// Folders a new entry can go into (`new-file`, `new-folder`). A leading `/`
     /// lists workspace-relative folders; otherwise folders under the focused folder.

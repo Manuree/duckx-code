@@ -39,6 +39,7 @@ pub fn route_flags(
         Focus::Settings => route_settings(event, capturing, drafting),
         Focus::Agent => route_agent(event, keys, burst),
         Focus::About => route_about(event),
+        Focus::PreviewSide => route_preview_side(event),
         Focus::Find => route_find(event),
         Focus::Replace => route_replace(event),
         Focus::FilePicker => route_picker(event),
@@ -267,6 +268,36 @@ fn route_picker(event: &Event) -> Option<SemanticAction> {
         _ => return None,
     };
     Some(SemanticAction::Picker(action))
+}
+
+/// Arrows pick a side at once. `Enter` takes the highlighted side, `Tab` moves it,
+/// and `Esc` cancels. `u` / `d` / `l` / `r` mirror the arrows.
+fn route_preview_side(event: &Event) -> Option<SemanticAction> {
+    use crate::action::{PreviewSideAction, Side};
+    let key = match event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => key,
+        _ => return None,
+    };
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    if ctrl && !alt && matches!(key.code, KeyCode::Char('q' | 'Q')) {
+        return Some(SemanticAction::Quit);
+    }
+    if ctrl || alt {
+        return None;
+    }
+    let action = match key.code {
+        KeyCode::Up | KeyCode::Char('u' | 'U') => PreviewSideAction::Choose(Side::Up),
+        KeyCode::Down | KeyCode::Char('d' | 'D') => PreviewSideAction::Choose(Side::Down),
+        KeyCode::Left | KeyCode::Char('l' | 'L') => PreviewSideAction::Choose(Side::Left),
+        KeyCode::Right | KeyCode::Char('r' | 'R') => PreviewSideAction::Choose(Side::Right),
+        KeyCode::Enter => PreviewSideAction::Confirm,
+        KeyCode::Tab => PreviewSideAction::Next,
+        KeyCode::BackTab => PreviewSideAction::Prev,
+        KeyCode::Esc => PreviewSideAction::Cancel,
+        _ => return None,
+    };
+    Some(SemanticAction::PreviewSide(action))
 }
 
 fn route_about(event: &Event) -> Option<SemanticAction> {

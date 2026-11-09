@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use super::App;
-use crate::action::{Focus, SemanticAction};
+use crate::action::{Focus, PreviewSideAction, SemanticAction, Side};
 use crate::buffer::{Buffer, Movement};
 use crate::command::CommandId;
 use crate::layout::{Axis, EditorId, Layout, TabId};
@@ -21,8 +21,8 @@ pub struct Preview {
     pub pane: EditorId,
     /// The Markdown tab it renders.
     pub source: TabId,
-    /// `Horizontal` for `split-right`, `Vertical` for `split-down`.
-    pub axis: Axis,
+    /// Which side of the source window the preview sits on.
+    pub side: Side,
     /// First rendered row on screen.
     pub scroll: usize,
     /// Text area inside the border, from the last layout.
@@ -30,15 +30,32 @@ pub struct Preview {
     pub(super) height: u16,
 }
 
+/// The side picker that bare `preview` opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewPicker {
+    /// The Markdown tab the preview will render.
+    pub source: TabId,
+    /// The side `Enter` picks. Starts on the last side used.
+    pub selected: Side,
+}
+
 /// The direction typed after `preview`.
-pub fn preview_axis(arg: &str) -> Result<Axis, String> {
+pub fn preview_side(arg: &str) -> Result<Side, String> {
     match arg.trim().to_ascii_lowercase().as_str() {
-        "split-right" | "right" => Ok(Axis::Horizontal),
-        "split-down" | "down" => Ok(Axis::Vertical),
-        "" => Err("preview needs split-right or split-down".to_string()),
+        "split-right" | "right" => Ok(Side::Right),
+        "split-down" | "down" => Ok(Side::Down),
+        "split-left" | "left" => Ok(Side::Left),
+        "split-up" | "up" => Ok(Side::Up),
         other => Err(format!(
-            "Unknown preview side: {other} (use split-right or split-down)"
+            "Unknown preview side: {other} (use split-up, split-down, split-left, or split-right)"
         )),
+    }
+}
+
+fn side_axis(side: Side) -> Axis {
+    match side {
+        Side::Left | Side::Right => Axis::Horizontal,
+        Side::Up | Side::Down => Axis::Vertical,
     }
 }
 
@@ -105,9 +122,9 @@ impl App {
         self.is_preview(self.active) && self.focus() == Focus::Editor
     }
 
-    /// `preview split-right` / `preview split-down`. Focus stays on the source.
-    pub(super) fn open_preview(&mut self, arg: &str) -> Result<(), String> {
-        let axis = preview_axis(arg)?;
+    /// The Markdown tab `preview` works on: the focused tab, or the source of a
+    /// focused preview. Anything that is not Markdown is refused here, before any popup.
+    fn preview_target(&self) -> Result<TabId, String> {
         let source = match self.preview(self.active) {
             Some(preview) => preview.source,
             None => self.active_tab_id(),
@@ -118,11 +135,75 @@ impl App {
         if !is_markdown(tab.path.as_deref()) {
             return Err("preview works on Markdown (.md) files".to_string());
         }
+        Ok(source)
+    }
+
+    /// `preview` opens the side picker. `preview split-left` and the other sides
+    /// open at once. Focus stays on the source.
+    pub(super) fn open_preview(&mut self, arg: &str) -> Result<(), String> {
+        let source = self.preview_target()?;
+        if arg.trim().is_empty() {
+            self.preview_picker = Some(PreviewPicker {
+                source,
+                selected: self.preview_side,
+            });
+            return Ok(());
+        }
+        let side = preview_side(arg)?;
+        self.open_preview_on(source, side)
+    }
+
+    /// File name of `tab`, for titles.
+    pub fn tab_label(&self, tab: TabId) -> Option<String> {
+        let path = self.find_tab(tab)?.path.as_deref()?;
+        Some(path.file_name()?.to_string_lossy().into_owned())
+    }
+
+    pub fn preview_picker(&self) -> Option<&PreviewPicker> {
+        self.preview_picker.as_ref()
+    }
+
+    /// Keys while the side picker is open. An arrow opens the preview on that side.
+    pub(super) fn handle_preview_side(&mut self, action: PreviewSideAction) {
+        let Some(picker) = self.preview_picker else {
+            return;
+        };
+        let side = match action {
+            PreviewSideAction::Choose(side) => side,
+            PreviewSideAction::Confirm => picker.selected,
+            PreviewSideAction::Next | PreviewSideAction::Prev => {
+                let at = Side::ALL
+                    .iter()
+                    .position(|side| *side == picker.selected)
+                    .unwrap_or(0);
+                let step = if action == PreviewSideAction::Next {
+                    1
+                } else {
+                    3
+                };
+                if let Some(picker) = self.preview_picker.as_mut() {
+                    picker.selected = Side::ALL[(at + step) % 4];
+                }
+                return;
+            }
+            PreviewSideAction::Cancel => {
+                self.preview_picker = None;
+                return;
+            }
+        };
+        self.preview_picker = None;
+        if let Err(message) = self.open_preview_on(picker.source, side) {
+            self.message = Some(message);
+        }
+    }
+
+    fn open_preview_on(&mut self, source: TabId, side: Side) -> Result<(), String> {
         let source_pane = self
             .pane_of(source)
             .ok_or_else(|| "Nothing to preview".to_string())?;
+        self.preview_side = side;
         if let Some(existing) = self.previews.iter().find(|p| p.source == source) {
-            if existing.axis == axis {
+            if existing.side == side {
                 self.active = source_pane;
                 self.explorer.blur();
                 self.end_file_mode();
@@ -137,12 +218,16 @@ impl App {
         let buffer = self.style_buffer(Buffer::new());
         let tab = self.alloc_tab(buffer, None);
         self.editors.push(super::fresh_editor(id, tab));
-        self.layout =
-            std::mem::replace(&mut self.layout, Layout::Leaf(id)).split(source_pane, axis, id);
+        let axis = side_axis(side);
+        let layout = std::mem::replace(&mut self.layout, Layout::Leaf(id));
+        self.layout = match side {
+            Side::Right | Side::Down => layout.split(source_pane, axis, id),
+            Side::Left | Side::Up => layout.split_before(source_pane, axis, id),
+        };
         self.previews.push(Preview {
             pane: id,
             source,
-            axis,
+            side,
             scroll: 0,
             width: 0,
             height: 0,

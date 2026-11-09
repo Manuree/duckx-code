@@ -5,6 +5,7 @@ mod cursor;
 mod icons;
 mod picker;
 mod popup;
+mod preview_side;
 mod prompt;
 mod settings;
 mod sidebar;
@@ -445,6 +446,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     settings::render(frame, app, above_status);
     about::render(frame, app, above_status);
     picker::render(frame, app, above_status);
+    preview_side::render(frame, app, above_status);
     prompt::render(frame, app, above_status);
 }
 
@@ -1420,6 +1422,46 @@ mod tests {
             .expect("preview title");
         assert!(top > 2, "split-down puts the preview below\n{screen}");
         assert_eq!(screen.matches("· preview").count(), 1, "{screen}");
+    }
+
+    #[test]
+    fn bare_preview_shows_a_rounded_arrow_picker() {
+        let mut app = App::new(Buffer::from_text("# Header"), Some("README.md".into()));
+        submit(&mut app, "preview");
+        let screen = draw(&app, 80, 20);
+        for label in ["↑ Up", "↓ Down", "← Left", "Right →", "Preview README.md"] {
+            assert!(screen.contains(label), "{label}\n{screen}");
+        }
+        for corner in ["╭", "╮", "╰", "╯"] {
+            assert!(screen.contains(corner), "{corner}\n{screen}");
+        }
+        for square in ["┌", "┐", "└", "┘"] {
+            assert!(!screen.contains(square), "{square}\n{screen}");
+        }
+        let rows = rows(&screen);
+        let up = rows.iter().position(|row| row.contains("↑ Up")).unwrap();
+        let middle = rows.iter().position(|row| row.contains("← Left")).unwrap();
+        let down = rows.iter().position(|row| row.contains("↓ Down")).unwrap();
+        assert!(up < middle && middle < down, "{screen}");
+        assert!(rows[middle].contains("Right →"), "{screen}");
+
+        app.handle(SemanticAction::PreviewSide(
+            crate::action::PreviewSideAction::Choose(crate::action::Side::Left),
+        ));
+        let screen = draw(&app, 80, 20);
+        assert!(!screen.contains("↑ Up"), "{screen}");
+        let row = rows_owned(&screen)
+            .into_iter()
+            .find(|row| row.contains("README.md · preview"))
+            .unwrap();
+        assert!(
+            row.starts_with('╭'),
+            "the preview sits on the left\n{screen}"
+        );
+    }
+
+    fn rows_owned(screen: &str) -> Vec<String> {
+        screen.split('\n').map(str::to_string).collect()
     }
 
     fn app_with_sidebar() -> App {

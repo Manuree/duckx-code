@@ -23,6 +23,45 @@ pub enum Focus {
     ActionMenu,
     /// Assistant prompt. Printable keys edit the prompt.
     Agent,
+    /// The `preview` side picker. An arrow key opens the preview on that side.
+    PreviewSide,
+}
+
+/// A side of the source window for `preview`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl Side {
+    pub const ALL: [Side; 4] = [Side::Up, Side::Down, Side::Left, Side::Right];
+
+    /// The `preview` argument for this side.
+    pub fn token(self) -> &'static str {
+        match self {
+            Side::Up => "split-up",
+            Side::Down => "split-down",
+            Side::Left => "split-left",
+            Side::Right => "split-right",
+        }
+    }
+}
+
+/// Keys for the `preview` side picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewSideAction {
+    /// An arrow key or its letter: open the preview on that side now.
+    Choose(Side),
+    /// `Enter`: open on the highlighted side.
+    Confirm,
+    /// `Tab` / `Shift + Tab`: move the highlight.
+    Next,
+    Prev,
+    /// `Esc`: close the picker without a preview.
+    Cancel,
 }
 
 /// Which way `Ctrl` + an arrow moves focus. Editor panes come from the split
@@ -131,6 +170,7 @@ pub enum SemanticAction {
     Settings(SettingsAction),
     /// Close the About page.
     CloseAbout,
+    PreviewSide(PreviewSideAction),
     /// Open the file picker over the editor.
     OpenFilePicker,
     Picker(PickerAction),
