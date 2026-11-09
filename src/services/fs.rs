@@ -85,14 +85,28 @@ impl Drop for DeleteOnDrop {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     Delete(Vec<PathBuf>),
-    Rename { from: PathBuf, to: PathBuf },
-    Move { paths: Vec<PathBuf>, dest: PathBuf },
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Move {
+        paths: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    /// Create an empty file (`dir: false`) or a folder (`dir: true`). Missing parent
+    /// folders are created too. An existing path of either kind is refused.
+    Create {
+        path: PathBuf,
+        dir: bool,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChangeOutcome {
     pub deleted: Vec<PathBuf>,
     pub relocated: Vec<(PathBuf, PathBuf)>,
+    /// The path made by [`Change::Create`], and whether it is a folder.
+    pub created: Option<(PathBuf, bool)>,
     pub error: Option<String>,
     pub summary: String,
 }
@@ -103,6 +117,7 @@ pub fn apply(root: &Path, change: &Change) -> ChangeOutcome {
         Ok(root) => root,
         Err(err) => {
             return ChangeOutcome {
+                created: None,
                 deleted: Vec::new(),
                 relocated: Vec::new(),
                 error: Some(format!("Cannot resolve the workspace: {err}")),
@@ -114,6 +129,42 @@ pub fn apply(root: &Path, change: &Change) -> ChangeOutcome {
         Change::Delete(paths) => delete_all(&root, paths),
         Change::Rename { from, to } => rename_one(&root, from, to),
         Change::Move { paths, dest } => move_all(&root, paths, dest),
+        Change::Create { path, dir } => create_one(&root, path, *dir),
+    }
+}
+
+fn create_one(root: &Path, path: &Path, dir: bool) -> ChangeOutcome {
+    let outcome = (|| {
+        let path = guard(root, path, false)?;
+        let shown = path
+            .strip_prefix(root)
+            .map(|rel| rel.display().to_string().replace('\\', "/"))
+            .unwrap_or_else(|_| leaf(&path));
+        if fs::symlink_metadata(&path).is_ok() {
+            return Err(format!("{shown} already exists"));
+        }
+        if dir {
+            fs::create_dir_all(&path).map_err(|err| format!("Cannot create {shown}: {err}"))?;
+        } else {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("Cannot create {shown}: {err}"))?;
+            }
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|err| format!("Cannot create {shown}: {err}"))?;
+        }
+        Ok((path, shown))
+    })();
+    match outcome {
+        Ok((path, shown)) => ChangeOutcome {
+            summary: format!("Created {shown}"),
+            created: Some((path, dir)),
+            ..ChangeOutcome::default()
+        },
+        Err(message) => failed(message),
     }
 }
 
@@ -124,6 +175,7 @@ fn delete_all(root: &Path, paths: &[PathBuf]) -> ChangeOutcome {
             Ok(path) => deleted.push(path),
             Err(message) => {
                 return ChangeOutcome {
+                    created: None,
                     summary: String::new(),
                     error: Some(message),
                     deleted,
@@ -138,6 +190,7 @@ fn delete_all(root: &Path, paths: &[PathBuf]) -> ChangeOutcome {
         format!("Deleted {} items", deleted.len())
     };
     ChangeOutcome {
+        created: None,
         deleted,
         relocated: Vec::new(),
         error: None,
@@ -157,12 +210,14 @@ fn rename_one(root: &Path, from: &Path, to: &Path) -> ChangeOutcome {
     })();
     match outcome {
         Ok((from, to)) => ChangeOutcome {
+            created: None,
             summary: format!("Renamed {} to {}", leaf(&from), leaf(&to)),
             relocated: vec![(from, to)],
             deleted: Vec::new(),
             error: None,
         },
         Err(message) => ChangeOutcome {
+            created: None,
             deleted: Vec::new(),
             relocated: Vec::new(),
             error: Some(message),
@@ -187,6 +242,7 @@ fn move_all(root: &Path, paths: &[PathBuf], dest: &Path) -> ChangeOutcome {
             Ok(pair) => relocated.push(pair),
             Err(message) => {
                 return ChangeOutcome {
+                    created: None,
                     summary: String::new(),
                     error: Some(message),
                     deleted: Vec::new(),
@@ -202,6 +258,7 @@ fn move_all(root: &Path, paths: &[PathBuf], dest: &Path) -> ChangeOutcome {
         format!("Moved {} items to {folder}", relocated.len())
     };
     ChangeOutcome {
+        created: None,
         deleted: Vec::new(),
         relocated,
         error: None,
@@ -273,6 +330,7 @@ fn leaf(path: &Path) -> String {
 
 fn failed(message: String) -> ChangeOutcome {
     ChangeOutcome {
+        created: None,
         deleted: Vec::new(),
         relocated: Vec::new(),
         error: Some(message),
@@ -438,5 +496,63 @@ mod tests {
                 .is_some_and(|e| e.contains("already exists")),
             "{clash:?}"
         );
+    }
+
+    #[test]
+    fn create_makes_nested_files_and_folders_and_refuses_existing_paths() {
+        let dir = TempDir::new();
+        let file = dir.path().join("images").join("images.rs");
+        let made = apply(
+            dir.path(),
+            &Change::Create {
+                path: file.clone(),
+                dir: false,
+            },
+        );
+        assert_eq!(made.error, None, "{made:?}");
+        assert_eq!(made.summary, "Created images/images.rs");
+        assert!(file.is_file());
+        assert_eq!(made.created.as_ref().map(|(_, dir)| *dir), Some(false));
+
+        let folder = dir.path().join("images").join("dogs").join("small");
+        let made = apply(
+            dir.path(),
+            &Change::Create {
+                path: folder.clone(),
+                dir: true,
+            },
+        );
+        assert_eq!(made.error, None, "{made:?}");
+        assert!(folder.is_dir());
+
+        for (path, dir_flag) in [(file.clone(), true), (folder.clone(), false)] {
+            let clash = apply(
+                dir.path(),
+                &Change::Create {
+                    path,
+                    dir: dir_flag,
+                },
+            );
+            assert!(
+                clash
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("already exists")),
+                "{clash:?}"
+            );
+            assert!(clash.created.is_none());
+        }
+
+        let outside =
+            std::env::temp_dir().join(format!("duckx-outside-new-{}", std::process::id()));
+        let refused = apply(
+            dir.path(),
+            &Change::Create {
+                path: outside.clone(),
+                dir: true,
+            },
+        );
+        assert!(refused.error.is_some(), "{refused:?}");
+        assert!(!outside.exists());
     }
 }

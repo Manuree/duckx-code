@@ -1614,6 +1614,8 @@ mod tests {
         assert!(screen.contains("select"), "{screen}");
         assert!(!screen.contains("delete"), "{screen}");
         assert!(screen.contains("Enter FILE mode"), "{screen}");
+        assert!(screen.contains("new-file <path>"), "{screen}");
+        assert!(screen.contains("new-folder <path>"), "{screen}");
         assert!(!screen.contains("goto"), "{screen}");
         assert!(!screen.contains("split-right"), "{screen}");
 
