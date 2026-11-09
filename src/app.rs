@@ -3068,7 +3068,11 @@ impl App {
                     .collect()
             }
             NameSource::Sibling => {
-                let Some(selected) = self.explorer.selected() else {
+                let Some(selected) = self
+                    .rename_source()
+                    .ok()
+                    .and_then(|path| relative_to(&self.explorer.root, &path))
+                else {
                     return Vec::new();
                 };
                 let parent = selected.parent().unwrap_or(Path::new(""));
@@ -3859,6 +3863,10 @@ impl App {
     }
 
     fn dispatch_spec(&mut self, spec: &CommandSpec, arg: Option<String>, context: CommandContext) {
+        if spec.id == CommandId::Rename && arg.as_ref().is_none_or(|text| text.is_empty()) {
+            self.prefill_rename();
+            return;
+        }
         if spec.arg.is_some()
             && !crate::command::optional_arg(spec.id)
             && arg.as_ref().is_none_or(|text| text.is_empty())
@@ -3872,6 +3880,29 @@ impl App {
         }
         self.command_bar = None;
         self.finish_command(spec, arg.as_deref(), context);
+    }
+
+    /// Bare `rename` + `Enter`: the bar reads `rename <current name>` to edit in place.
+    fn prefill_rename(&mut self) {
+        let source = if self.explorer.root.is_dir() {
+            self.check_preview_command(CommandId::Rename)
+                .and_then(|()| self.rename_source())
+        } else {
+            Err("No workspace folder is open".to_string())
+        };
+        let name = match source {
+            Ok(path) => file_label(Some(&path)),
+            Err(message) => {
+                self.command_bar = None;
+                self.message = Some(message);
+                return;
+            }
+        };
+        if let Some(bar) = self.command_bar.as_mut() {
+            bar.input = format!("rename {name}");
+            bar.selected = 0;
+            bar.prompted = Some(CommandId::Rename);
+        }
     }
 
     fn finish_command(&mut self, spec: &CommandSpec, arg: Option<&str>, context: CommandContext) {
@@ -4242,25 +4273,80 @@ impl App {
         Ok(())
     }
 
-    fn begin_rename(&mut self, name: &str) -> Result<(), String> {
-        let name = single_name(name)?;
-        let rel = self
-            .explorer
-            .selected()
-            .ok_or("Nothing to rename")?
-            .to_path_buf();
-        let from = abs_in(&self.explorer.root, &rel)?;
-        let to = from
-            .parent()
-            .map(|parent| parent.join(name))
-            .unwrap_or_else(|| self.explorer.root.join(name));
+    /// The entry `rename` acts on: the focused explorer row, the source of a focused
+    /// preview, or the file being edited. Refuses an untitled or unsaved buffer, a file
+    /// outside the workspace, and no open folder.
+    fn rename_source(&self) -> Result<PathBuf, String> {
+        let root = &self.explorer.root;
+        if root.as_os_str().is_empty() {
+            return Err("No workspace folder is open".to_string());
+        }
+        if self.explorer.open && self.explorer.focused {
+            let rel = self.explorer.selected().ok_or("Nothing to rename")?;
+            return abs_in(root, rel);
+        }
+        let tab = match self.preview(self.active) {
+            Some(preview) => self
+                .find_tab(preview.source)
+                .ok_or_else(|| "Nothing to rename".to_string())?,
+            None => self.active_editor().tab(),
+        };
+        let path = tab
+            .path
+            .as_deref()
+            .ok_or_else(|| "This buffer has no file yet; save it first".to_string())?;
+        if tab.dirty {
+            return Err(format!(
+                "{} has unsaved changes; save it first",
+                file_label(Some(path))
+            ));
+        }
+        let path = std::path::absolute(path)
+            .map_err(|err| format!("Cannot resolve {}: {err}", path.display()))?;
+        if relative_to(root, &path).is_none() {
+            return Err(format!(
+                "{} is outside the workspace",
+                file_label(Some(&path))
+            ));
+        }
+        Ok(path)
+    }
+
+    /// `rename <name>`: a plain name stays in the same folder. A path with `/` (or `\`)
+    /// moves the entry, relative to its folder, or to the workspace root with a
+    /// leading `/`, the same way `new-file` reads paths. Missing folders are made.
+    /// The disk work runs as a background job; `finish_files` updates open tabs.
+    fn begin_rename(&mut self, arg: &str) -> Result<(), String> {
+        if !self.explorer.root.is_dir() {
+            return Err("No workspace folder is open".to_string());
+        }
+        let from = self.rename_source()?;
+        let root = self.explorer.root.clone();
+        let arg = arg.trim();
+        if arg.is_empty() {
+            return Err("Enter a new name".to_string());
+        }
+        let from_rel = relative_to(&root, &from).ok_or("That path is outside the workspace")?;
+        let base = from_rel.parent().map(Path::to_path_buf).unwrap_or_default();
+        let rel = if arg.contains(['/', '\\']) {
+            new_entry_rel(&base, arg, from.is_dir())?
+        } else {
+            base.join(single_name(arg)?)
+        };
+        let to = ensure_inside(&root, &root.join(&rel), false)?;
         if same_path(&from, &to) {
             return Err("That is already the name".to_string());
         }
-        let to = ensure_inside(&self.explorer.root, &to, false)?;
-        self.message = Some(format!("Renaming to {name}…"));
+        if to.starts_with(&from) {
+            return Err("A folder cannot move into itself".to_string());
+        }
+        let shown = display_rel(&rel);
+        if std::fs::symlink_metadata(&to).is_ok() && !case_only_rename(&from, &to) {
+            return Err(format!("{shown} already exists"));
+        }
+        self.message = Some(format!("Renaming {} → {shown}…", display_rel(&from_rel)));
         self.jobs.push(Job::Files {
-            root: self.explorer.root.clone(),
+            root,
             change: Change::Rename { from, to },
         });
         Ok(())
@@ -4397,6 +4483,12 @@ impl App {
                 self.explorer.relocate(&from_rel, &to_rel);
             }
             self.retarget_editors(from, to);
+            if self.explorer.open
+                && let Some(to_rel) = relative_to(&self.explorer.root, to)
+                && self.explorer.selected() == Some(to_rel.as_path())
+            {
+                self.reveal_created = Some(to_rel);
+            }
         }
         if !outcome.deleted.is_empty() {
             let rels: Vec<PathBuf> = outcome
@@ -5939,6 +6031,18 @@ fn inside_workspace(root: &Path, path: &Path) -> bool {
     };
     crate::session::same_directory(&root, &path)
         || crate::services::tree::relative_from(&root, &path).is_some()
+}
+
+/// `a.md` → `A.md` in the same folder. On a case-insensitive disk the target
+/// "exists" because it is the same file, so this is not a clash.
+fn case_only_rename(from: &Path, to: &Path) -> bool {
+    from.parent() == to.parent()
+        && match (from.file_name(), to.file_name()) {
+            (Some(a), Some(b)) => {
+                a != b && a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+            }
+            _ => false,
+        }
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -8080,6 +8184,7 @@ mod tests {
                 "find",
                 "replace",
                 "select",
+                "rename",
                 "new-file",
                 "new-folder",
                 "copy-name",
@@ -9439,6 +9544,238 @@ mod tests {
         assert_eq!(clip(&mut app), "README.md");
         run(&mut app, "copy-path");
         assert_eq!(clip(&mut app), native(&file));
+    }
+
+    /// `dir/src/a.rs` open in the editor; the explorer root is `dir` but not focused.
+    fn rename_app(dir: &Path, name: &str) -> (App, PathBuf) {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let file = dir.join("src").join(name);
+        std::fs::write(&file, "hi\n").unwrap();
+        let mut app = App::new(Buffer::from_text("hi\n"), Some(file.clone()));
+        app.explorer = Explorer::new(dir.to_path_buf());
+        (app, file)
+    }
+
+    #[test]
+    fn rename_from_the_editor_renames_the_current_file() {
+        let (dir, _guard) = temp_dir();
+        let (mut app, file) = rename_app(&dir, "a.rs");
+        run(&mut app, "rename b.rs");
+        finish_jobs(&mut app);
+        assert!(!file.exists());
+        assert!(dir.join("src").join("b.rs").is_file());
+        assert_eq!(app.path(), Some(dir.join("src").join("b.rs").as_path()));
+        assert_eq!(app.message.as_deref(), Some("Renamed a.rs → b.rs"));
+        assert_eq!(app.recent_command, Some(CommandId::Rename));
+        assert!(!app.is_dirty());
+    }
+
+    #[test]
+    fn bare_rename_prefills_the_current_name() {
+        let (dir, _guard) = temp_dir();
+        let (mut app, _file) = rename_app(&dir, "a.rs");
+        run(&mut app, "rename");
+        let bar = app.command_bar.as_ref().expect("bar stays open");
+        assert_eq!(bar.input, "rename a.rs");
+        assert_eq!(bar.prompted, Some(CommandId::Rename));
+        self::bar(&mut app, CommandBarAction::Submit);
+        assert_eq!(app.message.as_deref(), Some("That is already the name"));
+
+        app.command_bar = None;
+        app.handle(SemanticAction::OpenCommandBar);
+        type_in_bar(&mut app, "rename");
+        self::bar(&mut app, CommandBarAction::Submit);
+        assert_eq!(app.command_bar.as_ref().unwrap().input, "rename a.rs");
+        self::bar(&mut app, CommandBarAction::Insert("x".into()));
+        self::bar(&mut app, CommandBarAction::Submit);
+        finish_jobs(&mut app);
+        assert!(dir.join("src").join("a.rsx").is_file());
+        assert_eq!(app.message.as_deref(), Some("Renamed a.rs → a.rsx"));
+
+        let mut untitled = App::new(Buffer::from_text(""), None);
+        untitled.explorer = Explorer::new(dir.clone());
+        run(&mut untitled, "rename");
+        assert!(untitled.command_bar.is_none());
+        assert_eq!(
+            untitled.message.as_deref(),
+            Some("This buffer has no file yet; save it first")
+        );
+    }
+
+    #[test]
+    fn rename_in_the_explorer_needs_no_file_mode_and_keeps_the_selection() {
+        let (dir, _guard) = temp_dir();
+        let hello = dir.join("hello.rs");
+        std::fs::write(&hello, "hi\n").unwrap();
+        let mut app = App::new(Buffer::from_text("hi\n"), Some(hello.clone()));
+        focus_tree(&mut app, dir.clone(), vec![file_entry("hello.rs")]);
+        assert!(!app.explorer.selecting);
+        run(&mut app, "rename");
+        assert_eq!(app.command_bar.as_ref().unwrap().input, "rename hello.rs");
+        app.command_bar = None;
+        run(&mut app, "rename notes.rs");
+        finish_jobs(&mut app);
+        assert!(dir.join("notes.rs").is_file());
+        assert!(!hello.exists());
+        assert_eq!(app.explorer.selected(), Some(Path::new("notes.rs")));
+        assert_eq!(app.path(), Some(dir.join("notes.rs").as_path()));
+        assert_eq!(app.message.as_deref(), Some("Renamed hello.rs → notes.rs"));
+        assert_eq!(app.recent_explorer, Some(CommandId::Rename));
+        assert!(app.explorer.focused, "focus stays in the explorer");
+    }
+
+    #[test]
+    fn rename_with_a_path_moves_the_entry() {
+        let (dir, _guard) = temp_dir();
+        let (mut app, file) = rename_app(&dir, "a.md");
+        run(&mut app, "rename docs/b.md");
+        finish_jobs(&mut app);
+        let moved = dir.join("src").join("docs").join("b.md");
+        assert!(moved.is_file(), "missing folders are made");
+        assert!(!file.exists());
+        assert_eq!(app.path(), Some(moved.as_path()));
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Renamed src/a.md → src/docs/b.md")
+        );
+
+        run(&mut app, "rename /top.md");
+        finish_jobs(&mut app);
+        assert!(dir.join("top.md").is_file());
+        assert_eq!(app.path(), Some(dir.join("top.md").as_path()));
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Renamed src/docs/b.md → top.md")
+        );
+
+        run(&mut app, "rename ../../out.md");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("That path is outside the workspace")
+        );
+        assert!(dir.join("top.md").is_file());
+    }
+
+    #[test]
+    fn rename_refuses_clashes_empty_names_unsaved_and_no_folder() {
+        let (dir, _guard) = temp_dir();
+        let (mut app, file) = rename_app(&dir, "a.rs");
+        std::fs::write(dir.join("src").join("b.rs"), "b\n").unwrap();
+        assert_eq!(
+            app.run_command(CommandId::Rename, Some("b.rs")),
+            Err("src/b.rs already exists".to_string())
+        );
+        assert_eq!(
+            app.run_command(CommandId::Rename, Some("  ")),
+            Err("Enter a new name".to_string())
+        );
+        assert_eq!(
+            app.run_command(CommandId::Rename, Some("..")),
+            Err("Enter a file name with no folders".to_string())
+        );
+        app.handle(SemanticAction::InsertChar('!'));
+        assert_eq!(
+            app.run_command(CommandId::Rename, Some("c.rs")),
+            Err("a.rs has unsaved changes; save it first".to_string())
+        );
+        assert!(
+            app.take_jobs()
+                .iter()
+                .all(|job| !matches!(job, Job::Files { .. }))
+        );
+        assert!(file.is_file());
+
+        let mut untitled = App::new(Buffer::from_text("x"), None);
+        untitled.explorer = Explorer::new(dir.clone());
+        assert_eq!(
+            untitled.run_command(CommandId::Rename, Some("c.rs")),
+            Err("This buffer has no file yet; save it first".to_string())
+        );
+
+        let (mut app, _file) = rename_app(&dir, "z.rs");
+        app.explorer = Explorer::new(dir.join("missing"));
+        assert_eq!(
+            app.run_command(CommandId::Rename, Some("c.rs")),
+            Err("No workspace folder is open".to_string())
+        );
+
+        let mut src = file_entry("src");
+        src.is_dir = true;
+        focus_tree(&mut app, dir.clone(), vec![src]);
+        assert_eq!(
+            app.run_command(CommandId::Rename, Some("src/inner")),
+            Err("A folder cannot move into itself".to_string())
+        );
+    }
+
+    #[test]
+    fn renaming_a_folder_retargets_open_tabs_and_keeps_them_dirty() {
+        let (dir, _guard) = temp_dir();
+        let (mut app, _file) = rename_app(&dir, "lib.rs");
+        app.handle(SemanticAction::InsertChar('!'));
+        assert!(app.is_dirty());
+        let mut src = file_entry("src");
+        src.is_dir = true;
+        focus_tree(&mut app, dir.clone(), vec![src]);
+        run(&mut app, "rename core");
+        finish_jobs(&mut app);
+        assert!(dir.join("core").join("lib.rs").is_file());
+        assert_eq!(app.path(), Some(dir.join("core").join("lib.rs").as_path()));
+        assert!(app.is_dirty(), "unsaved edits survive the rename");
+        assert_eq!(app.buffer().rope().to_string(), "!hi\n");
+        assert_eq!(app.explorer.selected(), Some(Path::new("core")));
+        assert_eq!(app.message.as_deref(), Some("Renamed src → core"));
+    }
+
+    #[test]
+    fn rename_in_a_focused_preview_renames_its_source() {
+        let (dir, _guard) = temp_dir();
+        let file = dir.join("README.md");
+        std::fs::write(&file, "# Readme\n").unwrap();
+        let mut app = App::new(Buffer::from_text("# Readme\n"), Some(file.clone()));
+        app.explorer = Explorer::new(dir.clone());
+        run(&mut app, "preview split-right");
+        app.handle(SemanticAction::FocusAdjacent(
+            crate::action::PaneDirection::Right,
+        ));
+        assert!(app.preview_focused());
+        run(&mut app, "rename");
+        assert_eq!(app.command_bar.as_ref().unwrap().input, "rename README.md");
+        app.command_bar = None;
+        run(&mut app, "rename GUIDE.md");
+        finish_jobs(&mut app);
+        assert!(dir.join("GUIDE.md").is_file());
+        assert!(!file.exists());
+        assert_eq!(app.previews().len(), 1, "the preview stays open");
+        let source = app.previews()[0].source;
+        let tab = app.find_tab(source).expect("preview still has its source");
+        assert_eq!(tab.path.as_deref(), Some(dir.join("GUIDE.md").as_path()));
+        assert_eq!(app.message.as_deref(), Some("Renamed README.md → GUIDE.md"));
+    }
+
+    #[test]
+    fn case_only_renames_are_not_clashes() {
+        assert!(case_only_rename(Path::new("/w/a.md"), Path::new("/w/A.md")));
+        assert!(!case_only_rename(
+            Path::new("/w/a.md"),
+            Path::new("/w/a.md")
+        ));
+        assert!(!case_only_rename(
+            Path::new("/w/a.md"),
+            Path::new("/x/A.md")
+        ));
+        assert!(!case_only_rename(
+            Path::new("/w/a.md"),
+            Path::new("/w/b.md")
+        ));
+
+        let (dir, _guard) = temp_dir();
+        let (mut app, _file) = rename_app(&dir, "a.md");
+        run(&mut app, "rename A.md");
+        finish_jobs(&mut app);
+        assert!(dir.join("src").join("A.md").is_file());
+        assert_eq!(app.path(), Some(dir.join("src").join("A.md").as_path()));
+        assert_eq!(app.message.as_deref(), Some("Renamed a.md → A.md"));
     }
 
     #[test]

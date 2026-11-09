@@ -100,7 +100,7 @@ pub enum CommandId {
     Move,
     /// Delete explorer entries.
     Delete,
-    /// Rename the focused explorer entry.
+    /// Rename (or, with a path, move) the focused explorer entry or the file being edited.
     Rename,
     /// Open the settings page.
     Settings,
@@ -678,10 +678,10 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::Rename,
         name: "rename",
-        description: "Rename the focused file or folder",
+        description: "Rename the file or folder; a path with / moves it",
         shortcut: "",
         arg: Some("<name>"),
-        editor: false,
+        editor: true,
         explorer: true,
     },
     CommandSpec {
@@ -822,10 +822,10 @@ pub fn spec(id: CommandId) -> &'static CommandSpec {
         .expect("every CommandId has a CommandSpec")
 }
 
-/// `move`, `delete`, and `rename` run only while FILE mode is on.
-/// `new-file` and `new-folder` are explorer file commands too, but they never need it.
+/// `move` and `delete` run only while FILE mode is on. `rename`, `new-file`, and
+/// `new-folder` are explorer file commands too, but they never need it.
 pub fn manages_files(id: CommandId) -> bool {
-    matches!(id, CommandId::Move | CommandId::Delete | CommandId::Rename)
+    matches!(id, CommandId::Move | CommandId::Delete)
 }
 
 fn allows(spec: &CommandSpec, context: CommandContext, files: bool) -> bool {
@@ -1111,6 +1111,7 @@ mod tests {
                 "rename-symbol",
                 "jump-back",
                 "jump-forward",
+                "rename",
                 "new-file",
                 "diff",
                 "preview",
@@ -1148,6 +1149,7 @@ mod tests {
                 "find",
                 "replace",
                 "select",
+                "rename",
                 "new-file",
                 "new-folder",
                 "copy-name",

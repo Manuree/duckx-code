@@ -205,13 +205,28 @@ fn rename_one(root: &Path, from: &Path, to: &Path) -> ChangeOutcome {
         if to.exists() && !same_file(&from, &to) {
             return Err(format!("{} already exists", leaf(&to)));
         }
+        if let Some(parent) = to.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("Cannot create {}: {err}", parent.display()))?;
+        }
         fs::rename(&from, &to).map_err(|err| format!("Cannot rename {}: {err}", leaf(&from)))?;
         Ok((from, to))
     })();
     match outcome {
         Ok((from, to)) => ChangeOutcome {
             created: None,
-            summary: format!("Renamed {} to {}", leaf(&from), leaf(&to)),
+            summary: if from.parent() == to.parent() {
+                format!("Renamed {} → {}", leaf(&from), leaf(&to))
+            } else {
+                let shown = |path: &Path| {
+                    path.strip_prefix(root)
+                        .map(|rel| rel.display().to_string().replace('\\', "/"))
+                        .unwrap_or_else(|_| leaf(path))
+                };
+                format!("Renamed {} → {}", shown(&from), shown(&to))
+            },
             relocated: vec![(from, to)],
             deleted: Vec::new(),
             error: None,

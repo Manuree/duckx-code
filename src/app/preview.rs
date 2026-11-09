@@ -90,6 +90,7 @@ fn allowed_in_preview(id: CommandId) -> bool {
             | CommandId::CopyName
             | CommandId::CopyPath
             | CommandId::CopyRelativePath
+            | CommandId::Rename
     )
 }
 
