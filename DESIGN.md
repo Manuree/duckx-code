@@ -113,6 +113,7 @@ While an editor is focused:
 | `file-picker` | — | `Ctrl + P` |
 | `workspace` | `<folder>` | — |
 | `split-right` / `split-down` | — | — |
+| `preview` | `split-right` or `split-down` (`right` / `down` also work) | — |
 | `close` | — | — |
 | `close-all` | — | — |
 | `close-view` (`clean-view` is the same command) | — | — |
@@ -191,6 +192,9 @@ Modeled on the snacks.nvim explorer (LazyVim):
 
 ### Editor Windows
 * **`split-right` / `split-down`:** split only the focused editor in half. The new pane is an empty `[No Name]` buffer with its own cursor and undo history, and it receives focus. There is no shortcut yet.
+* **`preview split-right` / `preview split-down`:** a read-only Markdown preview of the focused `.md` (or `.markdown`) file, opened as a real window to the right of or below the source window. Other file types are refused (`preview works on Markdown (.md) files`). With no argument, `Enter` completes `preview ` and `Right` accepts the hinted side. Focus stays on the source. The preview is a rounded panel (R1) titled `<file> · preview` with a light blue border; the source canvas stays borderless. It renders headings, paragraphs, bold, italic, strikethrough, inline and fenced code, lists (nested and numbered), task boxes, block quotes, links (`text (url)`), and horizontal rules with theme colors. Images show as `[image: alt] (path)`; nothing is loaded. The source buffer is rendered on every frame, so unsaved edits appear at once. One preview per file: the same side again only says it is already open, and the other side moves it there instead of adding a second one.
+  * In the focused preview, `Up` / `Down` scroll one row, `Page Up` / `Page Down` a page, and `Ctrl + Home` / `Ctrl + End` jump to the ends. Typing, paste, undo, save, find, and editor commands are refused with `The preview is read-only`. There is no cursor and nothing to save: the window holds no document of its own, and it is left out of the saved session. The status badge reads `PREVIEW` and the path shows `<file> · preview`.
+  * `close` in the preview closes only the preview. Closing the source tab (or its window) also closes its preview. A file opened while the preview is focused opens beside the source, never inside the preview.
 * **`close`:** closes the focused tab. If that tab has unsaved changes, duckx-code asks before discarding them. When other tabs remain, the window stays and the next tab takes focus. The last tab of a split window closes that window. Closing the last tab of the last window leaves a blank untitled page.
 * **`close-all`:** closes every tab in every window. Each unsaved tab is asked with the same `Yes` / `No` / `Cancel` dialog. `Yes` saves, `No` discards that tab and continues, and `Cancel` leaves the rest open. The screen ends on one blank untitled page.
 * **`close-view`:** closes every tab in the focused window. `clean-view` is the same command. Unsaved tabs in that window are asked the same way. Other windows stay open. The last window becomes a blank untitled page; a split window closes.

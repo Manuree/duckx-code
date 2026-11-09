@@ -9,6 +9,7 @@ pub mod jobs;
 pub mod keys;
 pub mod layout;
 pub mod lsp;
+pub mod markdown;
 pub mod picker;
 pub mod services;
 pub mod session;

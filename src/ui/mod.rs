@@ -61,7 +61,7 @@ pub struct EditorLayout {
 pub fn frame_layout(app: &App, area: Rect) -> EditorLayout {
     let focus = app.focus_mode();
     let sole = Layout::Leaf(app.active_id());
-    layout(
+    let mut placed = layout(
         area,
         app.explorer.open && !focus,
         app.sidebar_width(),
@@ -73,7 +73,59 @@ pub fn frame_layout(app: &App, area: Rect) -> EditorLayout {
         !focus,
         !focus || app.composer_open(),
         app.agent_rows(),
-    )
+    );
+    for pane in &mut placed.panes {
+        if app.preview(pane.id).is_some() {
+            let whole = Rect::new(
+                pane.title.x,
+                pane.title.y,
+                pane.title.width,
+                pane.title.height + pane.text.height,
+            );
+            pane.title = Rect::new(whole.x, whole.y, whole.width, 0);
+            pane.gutter = Rect::new(whole.x, whole.y, 0, whole.height);
+            pane.text = whole;
+        }
+    }
+    placed
+}
+
+/// A read-only Markdown window: a rounded panel titled with the file name, and the
+/// rendered source text inside it. No cursor is drawn.
+fn render_preview(
+    frame: &mut Frame,
+    app: &App,
+    pane: &EditorPane,
+    focused: bool,
+    theme: &UiStyles,
+) {
+    let Some((buffer, title)) = app.preview_source(pane.id) else {
+        return;
+    };
+    let scroll = app.preview(pane.id).map_or(0, |preview| preview.scroll);
+    let border = Style::new().fg(theme.status_a_bg);
+    let block = panel(&title)
+        .border_style(border)
+        .title_style(if focused {
+            theme.title_active
+        } else {
+            theme.title
+        })
+        .style(Style::new().fg(theme.editor_fg).bg(theme.editor_bg))
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    let inner = block.inner(pane.text);
+    frame.render_widget(block, pane.text);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let styles = app.markdown_styles();
+    let lines = crate::markdown::render(&buffer.rope().to_string(), inner.width, &styles);
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .skip(scroll)
+        .take(inner.height as usize)
+        .collect();
+    frame.render_widget(Paragraph::new(visible), inner);
 }
 
 pub fn layout(
@@ -332,6 +384,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     for pane in &layout.panes {
         let editor = app.editor(pane.id);
         let focused = editor_focused && editor.id == app.active_id();
+        if app.preview(pane.id).is_some() {
+            render_preview(frame, app, pane, focused, &theme);
+            continue;
+        }
         render_title(frame, editor, pane.title, focused, &theme);
         let start = editor.tab().view.scroll_y;
         let end = start + pane.text.height as usize;
@@ -1297,6 +1353,73 @@ mod tests {
         for square in ["┌", "┐", "└", "┘"] {
             assert!(!screen.contains(square), "found square corner {square}");
         }
+    }
+
+    fn submit(app: &mut App, input: &str) {
+        app.handle(SemanticAction::OpenCommandBar);
+        app.handle(SemanticAction::CommandBar(CommandBarAction::Insert(
+            input.into(),
+        )));
+        app.handle(SemanticAction::CommandBar(CommandBarAction::Submit));
+    }
+
+    fn rows(screen: &str) -> Vec<&str> {
+        screen.split('\n').collect()
+    }
+
+    #[test]
+    fn markdown_preview_draws_a_rounded_live_panel_beside_the_source() {
+        let mut app = App::new(
+            Buffer::from_text("# Header"),
+            Some("ARCHITECTURE.md".into()),
+        );
+        submit(&mut app, "preview split-right");
+        let screen = draw(&app, 80, 16);
+        let lines = rows(&screen);
+        assert!(screen.contains("ARCHITECTURE.md · preview"), "{screen}");
+        assert!(
+            screen.contains("# Header"),
+            "the source keeps its text\n{screen}"
+        );
+        let preview_row = lines
+            .iter()
+            .find(|row| row.contains("│ Header"))
+            .unwrap_or_else(|| panic!("rendered heading without #\n{screen}"));
+        assert!(!preview_row.contains("│ # Header"), "{screen}");
+        for corner in ["╭", "╮", "╰", "╯"] {
+            assert!(screen.contains(corner), "{corner}\n{screen}");
+        }
+        assert!(!screen.contains("preview here"));
+        let left = lines[1].split('│').next().unwrap_or("");
+        assert!(
+            !left.contains('╭'),
+            "the source canvas stays borderless\n{screen}"
+        );
+        assert!(screen.contains("NORMAL"), "{screen}");
+
+        app.handle(SemanticAction::Move {
+            movement: crate::buffer::Movement::DocumentEnd,
+            extend: false,
+        });
+        app.handle(SemanticAction::InsertText(
+            "\n\nSome **bold** text\n\n- item".into(),
+        ));
+        let screen = draw(&app, 80, 16);
+        assert!(
+            screen.contains("Some bold text"),
+            "unsaved edits render\n{screen}"
+        );
+        assert!(screen.contains("• item"), "{screen}");
+        assert!(screen.contains("[+]"), "{screen}");
+
+        submit(&mut app, "preview split-down");
+        let screen = draw(&app, 80, 20);
+        let top = rows(&screen)
+            .iter()
+            .position(|row| row.contains("ARCHITECTURE.md · preview"))
+            .expect("preview title");
+        assert!(top > 2, "split-down puts the preview below\n{screen}");
+        assert_eq!(screen.matches("· preview").count(), 1, "{screen}");
     }
 
     fn app_with_sidebar() -> App {
