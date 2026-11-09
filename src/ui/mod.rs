@@ -105,7 +105,7 @@ fn render_preview(
     focused: bool,
     theme: &UiStyles,
 ) {
-    let Some((buffer, title)) = app.preview_source(pane.id) else {
+    let Some((_, title)) = app.preview_source(pane.id) else {
         return;
     };
     let scroll = app.preview(pane.id).map_or(0, |preview| preview.scroll);
@@ -124,14 +124,36 @@ fn render_preview(
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let styles = app.markdown_styles();
-    let lines = crate::markdown::render(&buffer.rope().to_string(), inner.width, &styles);
+    let Some(lines) = app.preview_lines(pane.id, inner.width) else {
+        return;
+    };
     let visible: Vec<Line> = lines
-        .into_iter()
+        .iter()
         .skip(scroll)
         .take(inner.height as usize)
+        .cloned()
         .collect();
     frame.render_widget(Paragraph::new(visible), inner);
+    // A thin scrollbar in the right padding column, inside the rounded border, when
+    // the document is taller than the window.
+    let rows = inner.height as usize;
+    if lines.len() > rows && inner.right() < pane.text.right().saturating_sub(1) {
+        use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+        let track = Rect::new(inner.right(), inner.y, 1, inner.height);
+        let mut state = ScrollbarState::new(lines.len().saturating_sub(rows) + 1)
+            .position(scroll)
+            .viewport_content_length(rows);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(None)
+                .thumb_symbol("▐")
+                .thumb_style(border),
+            track,
+            &mut state,
+        );
+    }
 }
 
 pub fn layout(
@@ -1458,6 +1480,31 @@ mod tests {
 
     fn rows(screen: &str) -> Vec<&str> {
         screen.split('\n').collect()
+    }
+
+    #[test]
+    fn preview_draws_tables_and_a_scrollbar_inside_the_panel() {
+        let mut text = String::from("| key | action |\n| --- | --- |\n| a | open |\n\n");
+        for n in 0..40 {
+            text.push_str(&format!("line {n}\n\n"));
+        }
+        let mut app = App::new(Buffer::from_text(&text), Some("notes.md".into()));
+        submit(&mut app, "preview split-right");
+        let screen = draw(&app, 80, 16);
+        assert!(screen.contains("╭─────┬────────╮"), "{screen}");
+        assert!(screen.contains("│ key │ action │"), "{screen}");
+        assert!(screen.contains("├─────┼────────┤"), "{screen}");
+        let lines = rows(&screen);
+        let thumb = lines.iter().filter(|row| row.contains('▐')).count();
+        assert!(thumb >= 1, "scrollbar thumb\n{screen}");
+        for row in &lines[1..lines.len() - 2] {
+            if row.contains('▐') {
+                assert!(
+                    row.trim_end().ends_with("▐│"),
+                    "thumb sits inside the border: {row}"
+                );
+            }
+        }
     }
 
     #[test]

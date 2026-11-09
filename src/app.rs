@@ -589,6 +589,10 @@ pub struct App {
     tree_scan: Option<TreeScan>,
     /// Read-only Markdown windows opened by `preview`.
     previews: Vec<Preview>,
+    /// Rendered preview lines, reused until the source text, width, or theme changes.
+    preview_cache: RefCell<Vec<preview::RenderedPreview>>,
+    /// How many times a preview was laid out from scratch (cache misses).
+    preview_renders: std::cell::Cell<usize>,
     /// The side picker opened by bare `preview`.
     preview_picker: Option<preview::PreviewPicker>,
     /// The side the picker highlights first: the last side used.
@@ -679,6 +683,8 @@ impl App {
             lsp_resetting: false,
             tree_scan: None,
             previews: Vec::new(),
+            preview_cache: RefCell::new(Vec::new()),
+            preview_renders: std::cell::Cell::new(0),
             preview_picker: None,
             preview_side: crate::action::Side::Right,
         };
@@ -9411,6 +9417,76 @@ mod tests {
         assert!(app.previews().is_empty());
         assert_eq!(leaf_ids(app.layout()).len(), 1);
         assert_eq!(app.path(), None);
+    }
+
+    #[test]
+    fn preview_lines_are_cached_until_the_text_width_or_theme_changes() {
+        let mut app = markdown_app("# Header\n\n| a | b |\n| - | - |\n| 1 | 2 |\n");
+        run(&mut app, "preview split-right");
+        let pane = app.previews()[0].pane;
+        let first = app.preview_lines(pane, 30).unwrap();
+        assert_eq!(app.preview_render_count(), 1);
+        for _ in 0..5 {
+            let again = app.preview_lines(pane, 30).unwrap();
+            assert!(
+                std::rc::Rc::ptr_eq(&first, &again),
+                "frames reuse the render"
+            );
+        }
+        assert_eq!(app.preview_render_count(), 1);
+
+        app.preview_lines(pane, 20).unwrap();
+        assert_eq!(app.preview_render_count(), 2, "a new width renders again");
+        app.preview_lines(pane, 30).unwrap();
+        assert_eq!(app.preview_render_count(), 2, "both widths stay cached");
+
+        app.handle(SemanticAction::Move {
+            movement: Movement::DocumentEnd,
+            extend: false,
+        });
+        app.handle(SemanticAction::InsertChar('x'));
+        let edited = app.preview_lines(pane, 30).unwrap();
+        assert_eq!(app.preview_render_count(), 3, "an edit renders again");
+        assert!(
+            edited.iter().any(|line| line.to_string().contains('x')),
+            "live edit shows"
+        );
+    }
+
+    #[test]
+    fn preview_follows_its_window_to_another_markdown_tab() {
+        let (dir, _guard) = temp_dir();
+        let readme = dir.join("README.md");
+        let notes = dir.join("notes.md");
+        let code = dir.join("main.rs");
+        std::fs::write(&readme, "# Readme\n").unwrap();
+        std::fs::write(&notes, "# Notes\n").unwrap();
+        std::fs::write(&code, "fn main() {}\n").unwrap();
+        let mut app = App::new(Buffer::from_text("# Readme\n"), Some(readme.clone()));
+        app.explorer = Explorer::new(dir.clone());
+        run(&mut app, "preview split-right");
+        let pane = app.previews()[0].pane;
+        let title = |app: &App| app.preview_source(pane).unwrap().1;
+        assert!(title(&app).contains("README.md"));
+
+        app.open_path(notes.clone());
+        finish_jobs(&mut app);
+        assert_eq!(app.previews().len(), 1);
+        assert!(title(&app).contains("notes.md"), "{}", title(&app));
+        let lines = app.preview_lines(pane, 30).unwrap();
+        assert_eq!(lines[0].to_string(), "Notes");
+
+        app.open_path(code.clone());
+        finish_jobs(&mut app);
+        assert!(
+            title(&app).contains("notes.md"),
+            "a non-Markdown tab leaves the preview on the last Markdown file"
+        );
+
+        app.handle(SemanticAction::CycleTab { next: false });
+        app.handle(SemanticAction::CycleTab { next: false });
+        assert_eq!(app.path(), Some(readme.as_path()));
+        assert!(title(&app).contains("README.md"), "{}", title(&app));
     }
 
     #[test]
