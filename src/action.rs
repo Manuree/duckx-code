@@ -366,14 +366,22 @@ pub enum FindAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandBarAction {
+    /// Typed or pasted text, inserted at the cursor.
     Insert(String),
     Backspace,
+    /// `Delete`: the grapheme after the cursor.
+    DeleteForward,
+    /// `Ctrl+Backspace` / `Alt+Backspace`: back to the previous word stop.
+    DeleteWordBack,
+    /// Cursor moves. `Right` is `AcceptHint`, which moves when the cursor is not at the end.
+    Cursor(crate::command::LineMove),
     SelectNext,
     SelectPrev,
     Complete,
     /// Leave the command bar and focus the assistant.
     ToChat,
-    /// Accept the dimmed file or folder name drawn after the input.
+    /// `Right`: at the end of the input, accept the dimmed file or folder name drawn
+    /// after it; anywhere else, move the cursor one character right.
     AcceptHint,
     Submit,
     Close,

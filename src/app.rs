@@ -2953,15 +2953,25 @@ impl App {
             .unwrap_or_else(|| suggestions(&bar.input, recent, context, files).len());
         match action {
             CommandBarAction::Insert(text) => {
-                bar.input.push_str(&text);
-                bar.selected = 0;
-                bar.prompted = None;
+                if bar.insert(&text) {
+                    bar.selected = 0;
+                    bar.prompted = None;
+                }
             }
-            CommandBarAction::Backspace => {
-                bar.input.pop();
-                bar.selected = 0;
-                bar.prompted = None;
+            CommandBarAction::Backspace
+            | CommandBarAction::DeleteForward
+            | CommandBarAction::DeleteWordBack => {
+                let changed = match action {
+                    CommandBarAction::Backspace => bar.backspace(),
+                    CommandBarAction::DeleteForward => bar.delete_forward(),
+                    _ => bar.delete_word_back(),
+                };
+                if changed {
+                    bar.selected = 0;
+                    bar.prompted = None;
+                }
             }
+            CommandBarAction::Cursor(movement) => bar.move_cursor(movement),
             CommandBarAction::SelectNext if count > 0 => bar.selected = (bar.selected + 1) % count,
             CommandBarAction::SelectPrev if count > 0 => {
                 bar.selected = (bar.selected + count - 1) % count;
@@ -2972,14 +2982,18 @@ impl App {
                     || (context == CommandContext::Editor && is_line_number(bar.query())) => {}
             CommandBarAction::Complete => {
                 if let Some(spec) = bar.selected(recent) {
-                    bar.input = completed_input(spec);
+                    bar.set_input(completed_input(spec));
                     bar.selected = 0;
                     bar.prompted = None;
                 }
             }
+            CommandBarAction::AcceptHint if !bar.at_end() => {
+                bar.move_cursor(crate::command::LineMove::Right);
+            }
             CommandBarAction::AcceptHint => {
                 if let Some(ghost) = ghost {
                     bar.input.push_str(&ghost);
+                    bar.cursor = None;
                     bar.selected = 0;
                     bar.prompted = None;
                 }
@@ -2997,6 +3011,9 @@ impl App {
     /// Names come from the explorer's scanned tree, so nothing is read from disk here.
     pub fn argument_ghost(&self) -> Option<String> {
         let bar = self.command_bar.as_ref()?;
+        if !bar.at_end() {
+            return None;
+        }
         let spec = find_command(&bar.query().to_lowercase(), bar.context, bar.files)?;
         let source = name_source(spec.id)?;
         let typed = bar.argument()?;
@@ -3835,7 +3852,7 @@ impl App {
     fn submit_workspace(&mut self, arg: Option<String>, context: CommandContext) {
         let Some(arg) = arg else {
             if let Some(bar) = self.command_bar.as_mut() {
-                bar.input = "workspace ".to_string();
+                bar.set_input("workspace ");
                 bar.selected = 0;
                 bar.prompted = Some(CommandId::Workspace);
             }
@@ -3872,7 +3889,7 @@ impl App {
             && arg.as_ref().is_none_or(|text| text.is_empty())
         {
             if let Some(bar) = self.command_bar.as_mut() {
-                bar.input = completed_input(spec);
+                bar.set_input(completed_input(spec));
                 bar.selected = 0;
                 bar.prompted = Some(spec.id);
             }
@@ -3890,8 +3907,16 @@ impl App {
         } else {
             Err("No workspace folder is open".to_string())
         };
-        let name = match source {
-            Ok(path) => file_label(Some(&path)),
+        let (name, stem) = match source {
+            Ok(path) => {
+                let name = file_label(Some(&path));
+                let stem = if path.is_dir() {
+                    None
+                } else {
+                    crate::line_edit::stem_end(&name)
+                };
+                (name, stem)
+            }
             Err(message) => {
                 self.command_bar = None;
                 self.message = Some(message);
@@ -3899,7 +3924,9 @@ impl App {
             }
         };
         if let Some(bar) = self.command_bar.as_mut() {
-            bar.input = format!("rename {name}");
+            bar.set_input(format!("rename {name}"));
+            // Like VS Code selecting the stem: the cursor sits before the extension.
+            bar.cursor = stem.map(|stem| "rename ".len() + stem);
             bar.selected = 0;
             bar.prompted = Some(CommandId::Rename);
         }
@@ -4690,7 +4717,7 @@ impl App {
         self.dismiss_lsp_popups();
         self.open_command_bar();
         if let Some(bar) = self.command_bar.as_mut() {
-            bar.input = "rename-symbol ".to_string();
+            bar.set_input("rename-symbol ");
         }
     }
 
@@ -9589,8 +9616,11 @@ mod tests {
         self::bar(&mut app, CommandBarAction::Insert("x".into()));
         self::bar(&mut app, CommandBarAction::Submit);
         finish_jobs(&mut app);
-        assert!(dir.join("src").join("a.rsx").is_file());
-        assert_eq!(app.message.as_deref(), Some("Renamed a.rs → a.rsx"));
+        assert!(
+            dir.join("src").join("ax.rs").is_file(),
+            "typing lands before the extension"
+        );
+        assert_eq!(app.message.as_deref(), Some("Renamed a.rs → ax.rs"));
 
         let mut untitled = App::new(Buffer::from_text(""), None);
         untitled.explorer = Explorer::new(dir.clone());
@@ -9776,6 +9806,127 @@ mod tests {
         assert!(dir.join("src").join("A.md").is_file());
         assert_eq!(app.path(), Some(dir.join("src").join("A.md").as_path()));
         assert_eq!(app.message.as_deref(), Some("Renamed a.md → A.md"));
+    }
+
+    fn bar_input(app: &App) -> (String, usize) {
+        let bar = app.command_bar.as_ref().expect("bar open");
+        (bar.input.clone(), bar.cursor())
+    }
+
+    #[test]
+    fn command_bar_edits_at_the_cursor() {
+        use crate::command::LineMove;
+        let mut app = App::new(numbered_lines(400), None);
+        app.handle(SemanticAction::OpenCommandBar);
+        type_in_bar(&mut app, "goto 12");
+        bar(&mut app, CommandBarAction::Cursor(LineMove::Left));
+        bar(&mut app, CommandBarAction::Cursor(LineMove::Left));
+        type_in_bar(&mut app, "3");
+        assert_eq!(bar_input(&app), ("goto 312".into(), 6));
+        bar(&mut app, CommandBarAction::Backspace);
+        assert_eq!(bar_input(&app), ("goto 12".into(), 5));
+        bar(&mut app, CommandBarAction::DeleteForward);
+        assert_eq!(bar_input(&app), ("goto 2".into(), 5));
+        bar(&mut app, CommandBarAction::AcceptHint);
+        assert_eq!(
+            bar_input(&app),
+            ("goto 2".into(), 6),
+            "Right moves when not at the end"
+        );
+        bar(&mut app, CommandBarAction::Cursor(LineMove::Home));
+        assert_eq!(bar_input(&app).1, 0);
+        bar(&mut app, CommandBarAction::Cursor(LineMove::WordRight));
+        assert_eq!(bar_input(&app).1, 4);
+        bar(&mut app, CommandBarAction::Cursor(LineMove::End));
+        type_in_bar(&mut app, "5");
+        bar(&mut app, CommandBarAction::Cursor(LineMove::WordLeft));
+        assert_eq!(bar_input(&app), ("goto 25".into(), 5));
+        bar(&mut app, CommandBarAction::Cursor(LineMove::End));
+        bar(&mut app, CommandBarAction::DeleteWordBack);
+        assert_eq!(bar_input(&app), ("goto ".into(), 5));
+        type_in_bar(&mut app, "30");
+        bar(&mut app, CommandBarAction::Submit);
+        assert_eq!(app.buffer().cursor_line_col().0, 29);
+    }
+
+    #[test]
+    fn command_bar_cursor_steps_over_thai_marks_whole() {
+        use crate::command::LineMove;
+        let mut app = App::new(Buffer::from_text(""), None);
+        app.handle(SemanticAction::OpenCommandBar);
+        type_in_bar(&mut app, "new-file ไฟล์");
+        let end = bar_input(&app).1;
+        bar(&mut app, CommandBarAction::Cursor(LineMove::Left));
+        assert_eq!(
+            bar_input(&app).1,
+            end - "ล์".len(),
+            "ล and its mark move as one"
+        );
+        bar(&mut app, CommandBarAction::Backspace);
+        assert_eq!(bar_input(&app).0, "new-file ไล์");
+        bar(&mut app, CommandBarAction::DeleteForward);
+        assert_eq!(bar_input(&app).0, "new-file ไ");
+    }
+
+    #[test]
+    fn right_accepts_the_hint_only_at_the_end_and_the_ghost_hides_mid_text() {
+        use crate::command::LineMove;
+        let mut app = App::new(Buffer::from_text(""), None);
+        let mut src = file_entry("src");
+        src.is_dir = true;
+        focus_tree(&mut app, PathBuf::from("/work"), vec![src]);
+        app.explorer.enter_select();
+        app.handle(SemanticAction::OpenCommandBar);
+        type_in_bar(&mut app, "move s");
+        assert_eq!(app.argument_ghost().as_deref(), Some("rc"));
+        bar(&mut app, CommandBarAction::Cursor(LineMove::Left));
+        assert_eq!(
+            app.argument_ghost(),
+            None,
+            "no ghost while editing mid-text"
+        );
+        bar(&mut app, CommandBarAction::AcceptHint);
+        assert_eq!(bar_input(&app), ("move s".into(), 6), "Right only moved");
+        bar(&mut app, CommandBarAction::AcceptHint);
+        assert_eq!(
+            bar_input(&app),
+            ("move src".into(), 8),
+            "at the end Right accepts"
+        );
+    }
+
+    #[test]
+    fn rename_prefill_puts_the_cursor_before_the_extension() {
+        let (dir, _guard) = temp_dir();
+        let (mut app, _file) = rename_app(&dir, "index.html");
+        run(&mut app, "rename");
+        assert_eq!(
+            bar_input(&app),
+            ("rename index.html".into(), "rename index".len())
+        );
+
+        let (mut app, _file) = rename_app(&dir, "Makefile");
+        run(&mut app, "rename");
+        assert_eq!(
+            bar_input(&app),
+            ("rename Makefile".into(), "rename Makefile".len())
+        );
+
+        let (mut app, _file) = rename_app(&dir, ".gitignore");
+        run(&mut app, "rename");
+        assert_eq!(bar_input(&app).1, "rename .gitignore".len());
+
+        std::fs::create_dir(dir.join("v1.2")).unwrap();
+        let mut folder = file_entry("v1.2");
+        folder.is_dir = true;
+        focus_tree(&mut app, dir.clone(), vec![folder]);
+        app.command_bar = None;
+        run(&mut app, "rename");
+        assert_eq!(
+            bar_input(&app),
+            ("rename v1.2".into(), "rename v1.2".len()),
+            "folders keep the cursor at the end"
+        );
     }
 
     #[test]

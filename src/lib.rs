@@ -8,6 +8,7 @@ pub mod input;
 pub mod jobs;
 pub mod keys;
 pub mod layout;
+pub mod line_edit;
 pub mod lsp;
 pub mod markdown;
 pub mod picker;

@@ -255,14 +255,14 @@ impl History {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CharClass {
+pub(crate) enum CharClass {
     Whitespace,
     Word,
     Punctuation,
 }
 
 impl CharClass {
-    fn of(grapheme: &str) -> Self {
+    pub(crate) fn of(grapheme: &str) -> Self {
         let c = grapheme.chars().next().unwrap_or(' ');
         if c.is_whitespace() {
             CharClass::Whitespace

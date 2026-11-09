@@ -973,9 +973,94 @@ pub struct CommandBar {
     /// The command whose argument prompt is already showing.
     /// A second submit with an empty argument confirms that empty text.
     pub prompted: Option<CommandId>,
+    /// Byte offset of the cursor in `input`. `None` keeps it at the end, so code that
+    /// replaces the input with `set_input` (or builds a new bar) types at the end.
+    pub cursor: Option<usize>,
+}
+
+/// Cursor moves and edits inside the command bar's input line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineMove {
+    Left,
+    Right,
+    WordLeft,
+    WordRight,
+    Home,
+    End,
 }
 
 impl CommandBar {
+    /// The cursor's byte offset, always on a grapheme boundary inside `input`.
+    pub fn cursor(&self) -> usize {
+        match self.cursor {
+            Some(at) => crate::line_edit::snap(&self.input, at),
+            None => self.input.len(),
+        }
+    }
+
+    pub fn at_end(&self) -> bool {
+        self.cursor() == self.input.len()
+    }
+
+    /// Replace the whole input; the cursor goes to the end.
+    pub fn set_input(&mut self, text: impl Into<String>) {
+        self.input = text.into();
+        self.cursor = None;
+    }
+
+    fn put_cursor(&mut self, at: usize) {
+        self.cursor = (at < self.input.len()).then_some(at);
+    }
+
+    pub fn move_cursor(&mut self, movement: LineMove) {
+        use crate::line_edit;
+        let at = self.cursor();
+        let to = match movement {
+            LineMove::Left => line_edit::prev(&self.input, at),
+            LineMove::Right => line_edit::next(&self.input, at),
+            LineMove::WordLeft => line_edit::word_left(&self.input, at),
+            LineMove::WordRight => line_edit::word_right(&self.input, at),
+            LineMove::Home => 0,
+            LineMove::End => self.input.len(),
+        };
+        self.put_cursor(to);
+    }
+
+    /// Insert at the cursor. Returns true when the text changed.
+    pub fn insert(&mut self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let at = self.cursor();
+        self.input.insert_str(at, text);
+        self.put_cursor(at + text.len());
+        true
+    }
+
+    /// Delete from the cursor back to `to` (`to` before the cursor) or forward to `to`.
+    fn delete_to(&mut self, to: usize) -> bool {
+        let at = self.cursor();
+        let (start, end) = if to < at { (to, at) } else { (at, to) };
+        if start == end {
+            return false;
+        }
+        self.input.replace_range(start..end, "");
+        self.put_cursor(start);
+        true
+    }
+
+    pub fn backspace(&mut self) -> bool {
+        self.delete_to(crate::line_edit::prev(&self.input, self.cursor()))
+    }
+
+    pub fn delete_forward(&mut self) -> bool {
+        self.delete_to(crate::line_edit::next(&self.input, self.cursor()))
+    }
+
+    pub fn delete_word_back(&mut self) -> bool {
+        self.delete_to(crate::line_edit::word_left(&self.input, self.cursor()))
+    }
+
     /// The command-name part of the input (first word).
     pub fn query(&self) -> &str {
         self.input.split_whitespace().next().unwrap_or("")

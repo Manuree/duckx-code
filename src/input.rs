@@ -183,6 +183,7 @@ fn route_replace(event: &Event) -> Option<SemanticAction> {
 }
 
 fn route_command_bar(event: &Event) -> Option<CommandBarAction> {
+    use crate::command::LineMove;
     let key = match event {
         Event::Paste(text) => {
             return Some(CommandBarAction::Insert(
@@ -203,7 +204,20 @@ fn route_command_bar(event: &Event) -> Option<CommandBarAction> {
         KeyCode::Down => Some(CommandBarAction::SelectNext),
         KeyCode::Tab if !ctrl && !alt && !shift => Some(CommandBarAction::ToChat),
         KeyCode::Right if !ctrl && !alt && !shift => Some(CommandBarAction::AcceptHint),
+        KeyCode::Right if ctrl && !alt && !shift => {
+            Some(CommandBarAction::Cursor(LineMove::WordRight))
+        }
+        KeyCode::Left if !ctrl && !alt && !shift => Some(CommandBarAction::Cursor(LineMove::Left)),
+        KeyCode::Left if ctrl && !alt && !shift => {
+            Some(CommandBarAction::Cursor(LineMove::WordLeft))
+        }
+        KeyCode::Home if !shift => Some(CommandBarAction::Cursor(LineMove::Home)),
+        KeyCode::End if !shift => Some(CommandBarAction::Cursor(LineMove::End)),
+        KeyCode::Char('a') if ctrl && !alt => Some(CommandBarAction::Cursor(LineMove::Home)),
+        KeyCode::Char('e') if ctrl && !alt => Some(CommandBarAction::Cursor(LineMove::End)),
+        KeyCode::Backspace if ctrl || alt => Some(CommandBarAction::DeleteWordBack),
         KeyCode::Backspace => Some(CommandBarAction::Backspace),
+        KeyCode::Delete if !ctrl && !alt => Some(CommandBarAction::DeleteForward),
         KeyCode::Char(c) if !ctrl && !alt || ctrl && alt => {
             Some(CommandBarAction::Insert(c.to_string()))
         }
@@ -615,6 +629,7 @@ fn route_editor_key(key: &KeyEvent, keys: &crate::keys::KeyMap) -> Option<Semant
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::LineMove;
     use crossterm::event::KeyEventState;
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -972,7 +987,71 @@ mod tests {
                 " ".into()
             )))
         );
-        assert_eq!(bar(key(KeyCode::Left, KeyModifiers::NONE)), None);
+        assert_eq!(
+            bar(key(KeyCode::Left, KeyModifiers::NONE)),
+            Some(SemanticAction::CommandBar(CommandBarAction::Cursor(
+                LineMove::Left
+            )))
+        );
+        for (code, mods, expected) in [
+            (
+                KeyCode::Left,
+                KeyModifiers::CONTROL,
+                CommandBarAction::Cursor(LineMove::WordLeft),
+            ),
+            (
+                KeyCode::Right,
+                KeyModifiers::CONTROL,
+                CommandBarAction::Cursor(LineMove::WordRight),
+            ),
+            (
+                KeyCode::Home,
+                KeyModifiers::NONE,
+                CommandBarAction::Cursor(LineMove::Home),
+            ),
+            (
+                KeyCode::End,
+                KeyModifiers::NONE,
+                CommandBarAction::Cursor(LineMove::End),
+            ),
+            (
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                CommandBarAction::Cursor(LineMove::Home),
+            ),
+            (
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                CommandBarAction::Cursor(LineMove::End),
+            ),
+            (
+                KeyCode::Delete,
+                KeyModifiers::NONE,
+                CommandBarAction::DeleteForward,
+            ),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+                CommandBarAction::Backspace,
+            ),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::CONTROL,
+                CommandBarAction::DeleteWordBack,
+            ),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::ALT,
+                CommandBarAction::DeleteWordBack,
+            ),
+        ] {
+            assert_eq!(
+                bar(key(code, mods)),
+                Some(SemanticAction::CommandBar(expected.clone())),
+                "{code:?} {mods:?}"
+            );
+        }
+        assert_eq!(bar(key(KeyCode::Left, KeyModifiers::SHIFT)), None);
         assert_eq!(
             bar(key(KeyCode::Right, KeyModifiers::NONE)),
             Some(SemanticAction::CommandBar(CommandBarAction::AcceptHint))
@@ -1023,7 +1102,7 @@ mod tests {
             ),
             Some(SemanticAction::Agent(AgentAction::Below))
         );
-        assert_eq!(bar(key(KeyCode::Right, KeyModifiers::CONTROL)), None);
+        assert_eq!(bar(key(KeyCode::Right, KeyModifiers::SHIFT)), None);
         assert_eq!(bar(Event::Paste("\n".into())), None);
     }
 

@@ -159,18 +159,18 @@ impl FilePicker {
         if self.cursor == 0 {
             return false;
         }
-        let previous = self.query[..self.cursor].chars().next_back().unwrap();
-        self.cursor -= previous.len_utf8();
-        self.query.remove(self.cursor);
+        let start = crate::line_edit::prev(&self.query, self.cursor);
+        self.query.replace_range(start..self.cursor, "");
+        self.cursor = start;
         true
     }
 
     fn delete_forward(&mut self) -> bool {
-        let Some(next) = self.query[self.cursor..].chars().next() else {
+        let end = crate::line_edit::next(&self.query, self.cursor);
+        if end == self.cursor {
             return false;
-        };
-        self.query
-            .replace_range(self.cursor..self.cursor + next.len_utf8(), "");
+        }
+        self.query.replace_range(self.cursor..end, "");
         true
     }
 
@@ -185,13 +185,12 @@ impl FilePicker {
     }
 
     fn move_cursor(&mut self, delta: isize) {
-        if delta < 0 {
-            if let Some(previous) = self.query[..self.cursor].chars().next_back() {
-                self.cursor -= previous.len_utf8();
-            }
-        } else if let Some(next) = self.query[self.cursor..].chars().next() {
-            self.cursor += next.len_utf8();
-        }
+        // Whole graphemes, so a Thai letter and its marks move together.
+        self.cursor = if delta < 0 {
+            crate::line_edit::prev(&self.query, self.cursor)
+        } else {
+            crate::line_edit::next(&self.query, self.cursor)
+        };
     }
 
     fn move_word(&mut self, right: bool) {
