@@ -2,10 +2,11 @@
 //!
 //! The preview is a real window in the split layout. Its editor holds one empty
 //! placeholder tab that is never shown, saved, or edited; the screen draws the
-//! rendered source tab instead. The source buffer is read on every frame, so unsaved
-//! edits show up at once.
+//! rendered source tab instead. Unsaved edits show up at once: the rendered lines
+//! are cached per source text revision, width, and theme, and rebuilt when any changes.
 
 use std::path::Path;
+use std::rc::Rc;
 
 use super::App;
 use crate::action::{Focus, PreviewSideAction, SemanticAction, Side};
@@ -23,11 +24,28 @@ pub struct Preview {
     pub source: TabId,
     /// Which side of the source window the preview sits on.
     pub side: Side,
+    /// The window the source tab is shown in, kept so the preview can follow that
+    /// window to another Markdown tab even after its own tab closes.
+    pub(super) home: EditorId,
     /// First rendered row on screen.
     pub scroll: usize,
     /// Text area inside the border, from the last layout.
     pub(super) width: u16,
     pub(super) height: u16,
+}
+
+/// Most cached renders kept (one per open preview and width is the common case).
+const CACHE_SLOTS: usize = 8;
+
+/// One cached render of a source tab.
+pub(super) struct RenderedPreview {
+    tab: TabId,
+    /// The tab's load epoch and buffer revision: any edit or reload changes one.
+    epoch: u64,
+    revision: u64,
+    width: u16,
+    styles: crate::markdown::MarkdownStyles,
+    lines: Rc<Vec<ratatui::text::Line<'static>>>,
 }
 
 /// The side picker that bare `preview` opens.
@@ -232,6 +250,7 @@ impl App {
             pane: id,
             source,
             side,
+            home: source_pane,
             scroll: 0,
             width: 0,
             height: 0,
@@ -267,8 +286,36 @@ impl App {
         }
     }
 
+    /// A preview follows its window: when the source window switches to another
+    /// Markdown tab that has no preview of its own, the preview shows that tab.
+    fn follow_preview_sources(&mut self) {
+        for index in 0..self.previews.len() {
+            let source = self.previews[index].source;
+            let pane = self.pane_of(source).unwrap_or(self.previews[index].home);
+            self.previews[index].home = pane;
+            let Some(editor) = self.editors.iter().find(|editor| editor.id == pane) else {
+                continue;
+            };
+            let shown = editor.tab();
+            if shown.id == source
+                || !is_markdown(shown.path.as_deref())
+                || self
+                    .previews
+                    .iter()
+                    .any(|preview| preview.source == shown.id)
+            {
+                continue;
+            }
+            let shown = shown.id;
+            let preview = &mut self.previews[index];
+            preview.source = shown;
+            preview.scroll = 0;
+        }
+    }
+
     /// Drops previews whose window or source tab is gone. Closing the source closes its preview.
     pub(super) fn prune_previews(&mut self) {
+        self.follow_preview_sources();
         let stale: Vec<EditorId> = self
             .previews
             .iter()
@@ -298,11 +345,57 @@ impl App {
         let Some(preview) = self.preview(pane) else {
             return 0;
         };
-        let Some((buffer, _)) = self.preview_source(pane) else {
-            return 0;
-        };
+        self.preview_lines(pane, preview.width.max(1))
+            .map_or(0, |lines| lines.len())
+    }
+
+    /// The rendered lines of the preview in `pane` at `width` columns. Rendering
+    /// happens only when the source text, the width, or the theme changed since
+    /// the last call; drawing a frame otherwise reuses the cached lines.
+    pub fn preview_lines(
+        &self,
+        pane: EditorId,
+        width: u16,
+    ) -> Option<Rc<Vec<ratatui::text::Line<'static>>>> {
+        let preview = self.preview(pane)?;
+        let tab = self.find_tab(preview.source)?;
         let styles = self.markdown_styles();
-        crate::markdown::render(&buffer.rope().to_string(), preview.width.max(1), &styles).len()
+        let (epoch, revision) = (tab.epoch, tab.buffer.revision());
+        let mut cache = self.preview_cache.borrow_mut();
+        if let Some(hit) = cache.iter().find(|entry| {
+            entry.tab == tab.id
+                && entry.epoch == epoch
+                && entry.revision == revision
+                && entry.width == width
+                && entry.styles == styles
+        }) {
+            return Some(Rc::clone(&hit.lines));
+        }
+        self.preview_renders.set(self.preview_renders.get() + 1);
+        let lines = Rc::new(crate::markdown::render(
+            &tab.buffer.rope().to_string(),
+            width,
+            &styles,
+        ));
+        // A newer render of the same tab and width replaces the stale one.
+        cache.retain(|entry| !(entry.tab == tab.id && entry.width == width));
+        if cache.len() >= CACHE_SLOTS {
+            cache.remove(0);
+        }
+        cache.push(RenderedPreview {
+            tab: tab.id,
+            epoch,
+            revision,
+            width,
+            styles,
+            lines: Rc::clone(&lines),
+        });
+        Some(lines)
+    }
+
+    /// Full renders so far; drawing from the cache does not count.
+    pub fn preview_render_count(&self) -> usize {
+        self.preview_renders.get()
     }
 
     pub fn markdown_styles(&self) -> crate::markdown::MarkdownStyles {
