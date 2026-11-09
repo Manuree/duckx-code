@@ -4,11 +4,12 @@
 //! terminal lines, so the preview can scroll by row and cache the result. Nothing
 //! here touches the disk; images show as their alt text.
 //!
-//! The look (heading hierarchy, framed code blocks with a language label, ☐/☑ task
-//! boxes, `│` quote bars, box-drawn tables with fair-share column widths) is adapted
-//! from markdown-reader by leboiko (<https://github.com/leboiko/markdown-reader>,
-//! MIT License, Copyright (c) 2026 leboiko). The code here is a reimplementation
-//! for duckx-code's theme, wrapping, and tree-sitter highlighter.
+//! The visual design of the preview (heading hierarchy, framed code blocks with a
+//! language label, ☐/☑ task boxes, and the box-drawn table look) was inspired by
+//! markdown-reader by leboiko (<https://github.com/leboiko/markdown-reader>, MIT
+//! License). No code from markdown-reader is included; everything here, including the
+//! table column-width allocator, was written for duckx-code's theme, wrapping, and
+//! tree-sitter highlighter.
 //!
 //! Layout rules:
 //! * Every width is display width (`unicode-width`) and text only breaks on grapheme
@@ -697,7 +698,7 @@ impl Renderer {
         let border = self.styles.table_border;
         // Each column has a space of padding on both sides and a bar after it.
         let target = room.saturating_sub(columns * 3 + 1);
-        if target < columns * 2 {
+        if target < columns * MIN_COLUMN {
             // Too narrow for a grid: one wrapped line per row, cells split by `│`.
             for row in &table.rows {
                 let mut pieces: Vec<Piece> = Vec::new();
@@ -729,7 +730,7 @@ impl Renderer {
                     .max(1)
             })
             .collect();
-        let widths = fair_share(&natural, target);
+        let widths = fit_column_widths(&natural, target);
         let edge = |left: &str, mid: &str, right: &str| -> Span<'static> {
             let parts: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
             Span::styled(format!("{left}{}{right}", parts.join(mid)), border)
@@ -824,38 +825,55 @@ fn heading_index(level: HeadingLevel) -> usize {
     }
 }
 
-/// Column widths for a table. Columns keep their natural width when everything fits.
-/// Otherwise each keeps up to 6 columns and the rest is shared in proportion to how
-/// much wider it wants to be (the fair-share rule from markdown-reader).
-fn fair_share(natural: &[usize], target: usize) -> Vec<usize> {
-    let total: usize = natural.iter().sum();
-    if total <= target {
-        return natural.to_vec();
+/// Narrowest width any table column is squeezed to: room for one double-width
+/// grapheme (a Thai cluster with its marks, an emoji). `table_block` already falls
+/// back to plain `│`-separated rows when it cannot give every column this much.
+const MIN_COLUMN: usize = 2;
+
+/// Fits a table's columns into `budget` display columns.
+///
+/// `wanted` holds each column's natural width (its widest cell). When they all fit
+/// they are returned unchanged. Otherwise the widest columns give way first: one
+/// shared ceiling is lowered until every column, cut down to it, fits, and columns
+/// already narrower than the ceiling keep their natural width. The few columns left
+/// below the next ceiling step go, one each, to the columns cut the most (leftmost
+/// first on a tie), so the whole budget is used.
+///
+/// Every column therefore keeps at least `min(wanted, budget / columns)`, the most an
+/// even split could promise it, and a wider budget never makes a column narrower.
+fn fit_column_widths(wanted: &[usize], budget: usize) -> Vec<usize> {
+    let total: usize = wanted.iter().sum();
+    if total <= budget {
+        return wanted.to_vec();
     }
-    let mins: Vec<usize> = natural.iter().map(|n| (*n).clamp(1, 6)).collect();
-    let total_min: usize = mins.iter().sum();
-    if total_min >= target {
-        let each = (target / natural.len().max(1)).max(1);
-        return mins.iter().map(|m| (*m).min(each).max(1)).collect();
-    }
-    let spare = target - total_min;
-    let excess: usize = natural.iter().zip(&mins).map(|(n, m)| n - m).sum();
-    let mut widths: Vec<usize> = natural
-        .iter()
-        .zip(&mins)
-        .map(|(n, m)| m + (n - m) * spare / excess.max(1))
-        .collect();
-    // Hand out what integer division left over, widest want first.
-    let mut left = target.saturating_sub(widths.iter().sum());
-    while left > 0 {
-        let Some(column) = (0..widths.len())
-            .filter(|c| widths[*c] < natural[*c])
-            .max_by_key(|c| natural[*c] - widths[*c])
-        else {
+    // Settle columns narrowest first. Once the narrowest unsettled column cannot have
+    // its full width out of an equal slice of what is left, every unsettled column is
+    // capped at that slice.
+    let mut ascending = wanted.to_vec();
+    ascending.sort_unstable();
+    let mut remaining = budget;
+    let mut ceiling = 0;
+    for (settled, &width) in ascending.iter().enumerate() {
+        let unsettled = ascending.len() - settled;
+        if width.saturating_mul(unsettled) > remaining {
+            ceiling = remaining / unsettled;
             break;
-        };
+        }
+        remaining -= width;
+    }
+    let mut widths: Vec<usize> = wanted.iter().map(|&width| width.min(ceiling)).collect();
+    let mut spare = budget.saturating_sub(widths.iter().sum());
+    // Hand out the leftover columns to the biggest shortfalls.
+    let mut cut: Vec<usize> = (0..wanted.len())
+        .filter(|&column| wanted[column] > widths[column])
+        .collect();
+    cut.sort_by_key(|&column| std::cmp::Reverse(wanted[column] - widths[column]));
+    for column in cut {
+        if spare == 0 {
+            break;
+        }
         widths[column] += 1;
-        left -= 1;
+        spare -= 1;
     }
     widths
 }
@@ -1300,10 +1318,572 @@ mod tests {
     }
 
     #[test]
-    fn fair_share_fits_the_target() {
-        assert_eq!(fair_share(&[3, 4], 20), [3, 4]);
-        let widths = fair_share(&[40, 10, 4], 30);
+    fn fit_column_widths_fits_the_target() {
+        assert_eq!(fit_column_widths(&[3, 4], 20), [3, 4]);
+        let widths = fit_column_widths(&[40, 10, 4], 30);
         assert_eq!(widths.iter().sum::<usize>(), 30);
         assert!(widths[0] > widths[1] && widths[2] == 4, "{widths:?}");
+    }
+
+    #[test]
+    fn fit_column_widths_shrinks_the_widest_first() {
+        assert_eq!(fit_column_widths(&[8, 35, 6], 48), [8, 34, 6]);
+        assert_eq!(fit_column_widths(&[11, 17, 5], 24), [9, 10, 5]);
+        // The leftover column goes to the biggest shortfall, leftmost on a tie.
+        assert_eq!(fit_column_widths(&[10, 10, 10], 20), [7, 7, 6]);
+    }
+
+    #[test]
+    fn fit_column_widths_handles_degenerate_input() {
+        assert_eq!(fit_column_widths(&[], 0), Vec::<usize>::new());
+        assert_eq!(fit_column_widths(&[], 10), Vec::<usize>::new());
+        assert_eq!(fit_column_widths(&[5, 5], 0), [0, 0]);
+        assert_eq!(fit_column_widths(&[5, 5], 1), [1, 0]);
+        assert_eq!(fit_column_widths(&[1], 1), [1]);
+        assert_eq!(fit_column_widths(&[usize::MAX / 2, 3], 9), [6, 3]);
+    }
+
+    /// Every natural-width list over `len` columns with widths in `1..=max`.
+    fn width_lists(len: usize, max: usize) -> Vec<Vec<usize>> {
+        let mut lists = vec![Vec::new()];
+        for _ in 0..len {
+            lists = lists
+                .into_iter()
+                .flat_map(|list: Vec<usize>| {
+                    (1..=max).map(move |width| {
+                        let mut next = list.clone();
+                        next.push(width);
+                        next
+                    })
+                })
+                .collect();
+        }
+        lists
+    }
+
+    #[test]
+    fn fit_column_widths_properties() {
+        for len in 1..=4 {
+            for wanted in width_lists(len, 9) {
+                let total: usize = wanted.iter().sum();
+                let mut previous = vec![0; len];
+                for budget in 0..=total + 3 {
+                    let widths = fit_column_widths(&wanted, budget);
+                    let case = format!("{wanted:?} in {budget}: {widths:?}");
+                    assert_eq!(widths.len(), len, "{case}");
+                    let sum: usize = widths.iter().sum();
+                    assert!(sum <= budget, "over budget: {case}");
+                    assert_eq!(sum, budget.min(total), "budget left unused: {case}");
+                    for (column, &width) in widths.iter().enumerate() {
+                        assert!(width <= wanted[column], "wider than needed: {case}");
+                        // Never below the even split (capped at the natural width) ...
+                        assert!(width >= wanted[column].min(budget / len), "starved: {case}");
+                        // ... so the table minimum holds whenever it is feasible.
+                        if budget >= len * MIN_COLUMN {
+                            assert!(width >= wanted[column].min(MIN_COLUMN), "under min: {case}");
+                        }
+                        assert!(width >= previous[column], "not monotonic: {case}");
+                    }
+                    previous = widths;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tables_never_overflow_the_pane() {
+        let sources = [
+            TABLE_WIDE_FITS,
+            TABLE_SLIGHTLY_NARROW,
+            TABLE_VERY_NARROW_FALLBACK,
+            TABLE_THAI_ENGLISH_EMOJI,
+            TABLE_ALIGNMENT,
+            TABLE_SINGLE_COLUMN,
+            TABLE_MANY_COLUMNS,
+            TABLE_EMPTY_CELLS,
+            TABLE_LONG_CELL_BESIDE_SHORT,
+        ];
+        for source in sources {
+            // Widths 0 and 1 only have to not panic: a two-column emoji cannot fit.
+            render(source, 0, &styles());
+            render(source, 1, &styles());
+            for width in 2..=130u16 {
+                for line in plain(&render(source, width, &styles())) {
+                    assert!(line.width() <= usize::from(width), "{line:?} at {width}");
+                }
+            }
+        }
+    }
+
+    /// Renders `source` at `width` and checks every line exactly, and that no line is
+    /// wider than the pane.
+    fn assert_table(source: &str, width: u16, expected: &[&str]) {
+        let lines = plain(&render(source, width, &styles()));
+        assert_eq!(lines, expected, "table at width {width}");
+        for line in &lines {
+            assert!(
+                line.width() <= usize::from(width),
+                "{line:?} overflows {width}"
+            );
+        }
+    }
+
+    const TABLE_WIDE_FITS: &str = "| Key | Action | N |\n| :-- | :--: | --: |\n| a | open file | 1 |\n| `Ctrl+W` | pane | 10 |\n";
+
+    const TABLE_SLIGHTLY_NARROW: &str = "| Command | What it does | Keys |\n| --- | --- | --- |\n| new-file | Create a file in the focused folder | Ctrl+N |\n| rename | Rename the open file | F2 |\n";
+
+    const TABLE_VERY_NARROW_FALLBACK: &str =
+        "| a | b | c | d |\n| - | - | - | - |\n| one | two | three | four |\n";
+
+    const TABLE_THAI_ENGLISH_EMOJI: &str = "| ชื่อ | Status | หมายเหตุ |\n| --- | :-: | --- |\n| แมว 🐱 | ok ✅ | น่ารักมาก very cute |\n| Dog 🐶 | ไม่ ❌ | ชอบวิ่งเล่น in the park |\n";
+
+    const TABLE_ALIGNMENT: &str = "| Left | Centre | Right |\n| :--- | :----: | ----: |\n| a | b | c |\n| longer left | mid | 12345 |\n| x | wider centre text | 7 |\n";
+
+    const TABLE_SINGLE_COLUMN: &str =
+        "| Notes |\n| --- |\n| short |\n| a much longer note that has to wrap somewhere |\n";
+
+    const TABLE_MANY_COLUMNS: &str = "| A | B | C | D | E | F | G | H |\n| - | - | - | - | - | - | - | - |\n| alpha | beta | gamma | delta | epsilon | zeta | eta | theta |\n";
+
+    const TABLE_EMPTY_CELLS: &str = "| Name | Value | Comment |\n| --- | --- | --- |\n| a |  |  |\n|  | 2 |  |\n|  |  | only a comment here |\n";
+
+    const TABLE_LONG_CELL_BESIDE_SHORT: &str = "| # | Description | OK |\n| - | --- | - |\n| 1 | This description is very long and will certainly not fit on a single line of the preview | y |\n| 2 | short | n |\n";
+
+    #[test]
+    fn table_snapshot_wide_fits() {
+        assert_table(
+            TABLE_WIDE_FITS,
+            60,
+            &[
+                "╭────────┬───────────┬────╮",
+                "│ Key    │  Action   │  N │",
+                "├────────┼───────────┼────┤",
+                "│ a      │ open file │  1 │",
+                "│ Ctrl+W │   pane    │ 10 │",
+                "╰────────┴───────────┴────╯",
+            ],
+        );
+        assert_table(
+            TABLE_WIDE_FITS,
+            27,
+            &[
+                "╭────────┬───────────┬────╮",
+                "│ Key    │  Action   │  N │",
+                "├────────┼───────────┼────┤",
+                "│ a      │ open file │  1 │",
+                "│ Ctrl+W │   pane    │ 10 │",
+                "╰────────┴───────────┴────╯",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_slightly_narrow() {
+        assert_table(
+            TABLE_SLIGHTLY_NARROW,
+            64,
+            &[
+                "╭──────────┬─────────────────────────────────────┬────────╮",
+                "│ Command  │ What it does                        │ Keys   │",
+                "├──────────┼─────────────────────────────────────┼────────┤",
+                "│ new-file │ Create a file in the focused folder │ Ctrl+N │",
+                "│ rename   │ Rename the open file                │ F2     │",
+                "╰──────────┴─────────────────────────────────────┴────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_SLIGHTLY_NARROW,
+            58,
+            &[
+                "╭──────────┬────────────────────────────────────┬────────╮",
+                "│ Command  │ What it does                       │ Keys   │",
+                "├──────────┼────────────────────────────────────┼────────┤",
+                "│ new-file │ Create a file in the focused       │ Ctrl+N │",
+                "│          │ folder                             │        │",
+                "│ rename   │ Rename the open file               │ F2     │",
+                "╰──────────┴────────────────────────────────────┴────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_SLIGHTLY_NARROW,
+            50,
+            &[
+                "╭──────────┬────────────────────────────┬────────╮",
+                "│ Command  │ What it does               │ Keys   │",
+                "├──────────┼────────────────────────────┼────────┤",
+                "│ new-file │ Create a file in the       │ Ctrl+N │",
+                "│          │ focused folder             │        │",
+                "│ rename   │ Rename the open file       │ F2     │",
+                "╰──────────┴────────────────────────────┴────────╯",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_very_narrow_fallback() {
+        assert_table(
+            TABLE_VERY_NARROW_FALLBACK,
+            20,
+            &["a │ b │ c │ d", "one │ two │ three │", "four"],
+        );
+        assert_table(
+            TABLE_VERY_NARROW_FALLBACK,
+            16,
+            &["a │ b │ c │ d", "one │ two │", "three │ four"],
+        );
+        assert_table(
+            TABLE_VERY_NARROW_FALLBACK,
+            12,
+            &["a │ b │ c │", "d", "one │ two │", "three │ four"],
+        );
+        assert_table(
+            TABLE_VERY_NARROW_FALLBACK,
+            6,
+            &["a │ b", "│ c │", "d", "one │", "two │", "three", "│ four"],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_thai_english_emoji() {
+        assert_table(
+            TABLE_THAI_ENGLISH_EMOJI,
+            60,
+            &[
+                "╭────────┬────────┬──────────────────────╮",
+                "│ ชื่อ     │ Status │ หมายเหตุ              │",
+                "├────────┼────────┼──────────────────────┤",
+                "│ แมว 🐱 │ ok ✅  │ น่ารักมาก very cute    │",
+                "│ Dog 🐶 │ ไม่ ❌  │ ชอบวิ่งเล่น in the park │",
+                "╰────────┴────────┴──────────────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_THAI_ENGLISH_EMOJI,
+            36,
+            &[
+                "╭────────┬────────┬────────────────╮",
+                "│ ชื่อ     │ Status │ หมายเหตุ        │",
+                "├────────┼────────┼────────────────┤",
+                "│ แมว 🐱 │ ok ✅  │ น่ารักมาก very   │",
+                "│        │        │ cute           │",
+                "│ Dog 🐶 │ ไม่ ❌  │ ชอบวิ่งเล่น in    │",
+                "│        │        │ the park       │",
+                "╰────────┴────────┴────────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_THAI_ENGLISH_EMOJI,
+            28,
+            &[
+                "╭────────┬────────┬────────╮",
+                "│ ชื่อ     │ Status │ หมายเห │",
+                "│        │        │ ตุ      │",
+                "├────────┼────────┼────────┤",
+                "│ แมว 🐱 │ ok ✅  │ น่ารักมา │",
+                "│        │        │ ก very │",
+                "│        │        │ cute   │",
+                "│ Dog 🐶 │ ไม่ ❌  │ ชอบวิ่งเ │",
+                "│        │        │ ล่น in  │",
+                "│        │        │ the    │",
+                "│        │        │ park   │",
+                "╰────────┴────────┴────────╯",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_alignment() {
+        assert_table(
+            TABLE_ALIGNMENT,
+            60,
+            &[
+                "╭─────────────┬───────────────────┬───────╮",
+                "│ Left        │      Centre       │ Right │",
+                "├─────────────┼───────────────────┼───────┤",
+                "│ a           │         b         │     c │",
+                "│ longer left │        mid        │ 12345 │",
+                "│ x           │ wider centre text │     7 │",
+                "╰─────────────┴───────────────────┴───────╯",
+            ],
+        );
+        assert_table(
+            TABLE_ALIGNMENT,
+            34,
+            &[
+                "╭───────────┬────────────┬───────╮",
+                "│ Left      │   Centre   │ Right │",
+                "├───────────┼────────────┼───────┤",
+                "│ a         │     b      │     c │",
+                "│ longer    │    mid     │ 12345 │",
+                "│ left      │            │       │",
+                "│ x         │   wider    │     7 │",
+                "│           │   centre   │       │",
+                "│           │    text    │       │",
+                "╰───────────┴────────────┴───────╯",
+            ],
+        );
+        assert_table(
+            TABLE_ALIGNMENT,
+            26,
+            &[
+                "╭───────┬────────┬───────╮",
+                "│ Left  │ Centre │ Right │",
+                "├───────┼────────┼───────┤",
+                "│ a     │   b    │     c │",
+                "│ longe │  mid   │ 12345 │",
+                "│ r     │        │       │",
+                "│ left  │        │       │",
+                "│ x     │ wider  │     7 │",
+                "│       │ centre │       │",
+                "│       │  text  │       │",
+                "╰───────┴────────┴───────╯",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_single_column() {
+        assert_table(
+            TABLE_SINGLE_COLUMN,
+            60,
+            &[
+                "╭───────────────────────────────────────────────╮",
+                "│ Notes                                         │",
+                "├───────────────────────────────────────────────┤",
+                "│ short                                         │",
+                "│ a much longer note that has to wrap somewhere │",
+                "╰───────────────────────────────────────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_SINGLE_COLUMN,
+            20,
+            &[
+                "╭──────────────────╮",
+                "│ Notes            │",
+                "├──────────────────┤",
+                "│ short            │",
+                "│ a much longer    │",
+                "│ note that has to │",
+                "│ wrap somewhere   │",
+                "╰──────────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_SINGLE_COLUMN,
+            6,
+            &[
+                "╭────╮",
+                "│ No │",
+                "│ te │",
+                "│ s  │",
+                "├────┤",
+                "│ sh │",
+                "│ or │",
+                "│ t  │",
+                "│ a  │",
+                "│ mu │",
+                "│ ch │",
+                "│ lo │",
+                "│ ng │",
+                "│ er │",
+                "│ no │",
+                "│ te │",
+                "│ th │",
+                "│ at │",
+                "│ ha │",
+                "│ s  │",
+                "│ to │",
+                "│ wr │",
+                "│ ap │",
+                "│ so │",
+                "│ me │",
+                "│ wh │",
+                "│ er │",
+                "│ e  │",
+                "╰────╯",
+            ],
+        );
+        assert_table(
+            TABLE_SINGLE_COLUMN,
+            4,
+            &[
+                "Note", "s", "shor", "t", "a", "much", "long", "er", "note", "that", "has", "to",
+                "wrap", "some", "wher", "e",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_many_columns() {
+        assert_table(
+            TABLE_MANY_COLUMNS,
+            80,
+            &[
+                "╭───────┬──────┬───────┬───────┬─────────┬──────┬─────┬───────╮",
+                "│ A     │ B    │ C     │ D     │ E       │ F    │ G   │ H     │",
+                "├───────┼──────┼───────┼───────┼─────────┼──────┼─────┼───────┤",
+                "│ alpha │ beta │ gamma │ delta │ epsilon │ zeta │ eta │ theta │",
+                "╰───────┴──────┴───────┴───────┴─────────┴──────┴─────┴───────╯",
+            ],
+        );
+        assert_table(
+            TABLE_MANY_COLUMNS,
+            50,
+            &[
+                "╭─────┬─────┬─────┬─────┬──────┬─────┬─────┬─────╮",
+                "│ A   │ B   │ C   │ D   │ E    │ F   │ G   │ H   │",
+                "├─────┼─────┼─────┼─────┼──────┼─────┼─────┼─────┤",
+                "│ alp │ bet │ gam │ del │ epsi │ zet │ eta │ the │",
+                "│ ha  │ a   │ ma  │ ta  │ lon  │ a   │     │ ta  │",
+                "╰─────┴─────┴─────┴─────┴──────┴─────┴─────┴─────╯",
+            ],
+        );
+        assert_table(
+            TABLE_MANY_COLUMNS,
+            40,
+            &[
+                "A │ B │ C │ D │ E │ F │ G │ H",
+                "alpha │ beta │ gamma │ delta │ epsilon │",
+                "zeta │ eta │ theta",
+            ],
+        );
+        assert_table(
+            TABLE_MANY_COLUMNS,
+            30,
+            &[
+                "A │ B │ C │ D │ E │ F │ G │ H",
+                "alpha │ beta │ gamma │ delta │",
+                "epsilon │ zeta │ eta │ theta",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_empty_cells() {
+        assert_table(
+            TABLE_EMPTY_CELLS,
+            50,
+            &[
+                "╭──────┬───────┬─────────────────────╮",
+                "│ Name │ Value │ Comment             │",
+                "├──────┼───────┼─────────────────────┤",
+                "│ a    │       │                     │",
+                "│      │ 2     │                     │",
+                "│      │       │ only a comment here │",
+                "╰──────┴───────┴─────────────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_EMPTY_CELLS,
+            30,
+            &[
+                "╭──────┬───────┬─────────────╮",
+                "│ Name │ Value │ Comment     │",
+                "├──────┼───────┼─────────────┤",
+                "│ a    │       │             │",
+                "│      │ 2     │             │",
+                "│      │       │ only a      │",
+                "│      │       │ comment     │",
+                "│      │       │ here        │",
+                "╰──────┴───────┴─────────────╯",
+            ],
+        );
+        assert_table(
+            TABLE_EMPTY_CELLS,
+            24,
+            &[
+                "╭──────┬───────┬───────╮",
+                "│ Name │ Value │ Comme │",
+                "│      │       │ nt    │",
+                "├──────┼───────┼───────┤",
+                "│ a    │       │       │",
+                "│      │ 2     │       │",
+                "│      │       │ only  │",
+                "│      │       │ a com │",
+                "│      │       │ ment  │",
+                "│      │       │ here  │",
+                "╰──────┴───────┴───────╯",
+            ],
+        );
+    }
+
+    #[test]
+    fn table_snapshot_long_cell_beside_short() {
+        assert_table(
+            TABLE_LONG_CELL_BESIDE_SHORT,
+            120,
+            &[
+                "╭───┬──────────────────────────────────────────────────────────────────────────────────────────┬────╮",
+                "│ # │ Description                                                                              │ OK │",
+                "├───┼──────────────────────────────────────────────────────────────────────────────────────────┼────┤",
+                "│ 1 │ This description is very long and will certainly not fit on a single line of the preview │ y  │",
+                "│ 2 │ short                                                                                    │ n  │",
+                "╰───┴──────────────────────────────────────────────────────────────────────────────────────────┴────╯",
+            ],
+        );
+        assert_table(
+            TABLE_LONG_CELL_BESIDE_SHORT,
+            60,
+            &[
+                "╭───┬─────────────────────────────────────────────────┬────╮",
+                "│ # │ Description                                     │ OK │",
+                "├───┼─────────────────────────────────────────────────┼────┤",
+                "│ 1 │ This description is very long and will          │ y  │",
+                "│   │ certainly not fit on a single line of the       │    │",
+                "│   │ preview                                         │    │",
+                "│ 2 │ short                                           │ n  │",
+                "╰───┴─────────────────────────────────────────────────┴────╯",
+            ],
+        );
+        assert_table(
+            TABLE_LONG_CELL_BESIDE_SHORT,
+            30,
+            &[
+                "╭───┬───────────────────┬────╮",
+                "│ # │ Description       │ OK │",
+                "├───┼───────────────────┼────┤",
+                "│ 1 │ This description  │ y  │",
+                "│   │ is very long and  │    │",
+                "│   │ will certainly    │    │",
+                "│   │ not fit on a      │    │",
+                "│   │ single line of    │    │",
+                "│   │ the preview       │    │",
+                "│ 2 │ short             │ n  │",
+                "╰───┴───────────────────┴────╯",
+            ],
+        );
+        assert_table(
+            TABLE_LONG_CELL_BESIDE_SHORT,
+            18,
+            &[
+                "╭───┬───────┬────╮",
+                "│ # │ Descr │ OK │",
+                "│   │ iptio │    │",
+                "│   │ n     │    │",
+                "├───┼───────┼────┤",
+                "│ 1 │ This  │ y  │",
+                "│   │ descr │    │",
+                "│   │ iptio │    │",
+                "│   │ n is  │    │",
+                "│   │ very  │    │",
+                "│   │ long  │    │",
+                "│   │ and   │    │",
+                "│   │ will  │    │",
+                "│   │ certa │    │",
+                "│   │ inly  │    │",
+                "│   │ not   │    │",
+                "│   │ fit   │    │",
+                "│   │ on a  │    │",
+                "│   │ singl │    │",
+                "│   │ e     │    │",
+                "│   │ line  │    │",
+                "│   │ of    │    │",
+                "│   │ the p │    │",
+                "│   │ revie │    │",
+                "│   │ w     │    │",
+                "│ 2 │ short │ n  │",
+                "╰───┴───────┴────╯",
+            ],
+        );
     }
 }
