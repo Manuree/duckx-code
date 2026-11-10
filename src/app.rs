@@ -529,6 +529,8 @@ pub struct App {
     pub listed_models: Option<(String, Vec<String>)>,
     /// The `/models` URL Settings asked for and is still waiting on.
     settings_models_pending: Option<String>,
+    /// Why the last model listing for the Settings Model row failed, with its URL.
+    listed_models_error: Option<(String, String)>,
     /// Provider, server, and model of the turn in flight. A reply adds them to the recent lists.
     agent_target: Option<(crate::settings::AiProvider, String, String)>,
     /// Sends prompts and tool results to the assistant worker. `None` in tests.
@@ -655,6 +657,7 @@ impl App {
             ai: crate::settings::AiPrefs::default(),
             listed_models: None,
             settings_models_pending: None,
+            listed_models_error: None,
             agent_target: None,
             agent_tx: None,
             agent: crate::agent::Panel::default(),
@@ -1341,8 +1344,14 @@ impl App {
             AppEvent::ModelsListed { url, result } => {
                 if self.settings_models_pending.as_deref() == Some(url.as_str()) {
                     self.settings_models_pending = None;
-                    if let Ok(names) = &result {
-                        self.listed_models = Some((url.clone(), names.clone()));
+                    match &result {
+                        Ok(names) => {
+                            self.listed_models = Some((url.clone(), names.clone()));
+                            self.listed_models_error = None;
+                        }
+                        Err(err) => {
+                            self.listed_models_error = Some((url.clone(), err.clone()));
+                        }
                     }
                 }
                 self.models_listed(&url, result);
@@ -2667,7 +2676,7 @@ impl App {
     }
 
     /// The row being typed, when it keeps a list of recent values.
-    fn draft_row(&self) -> Option<crate::settings::SettingId> {
+    pub(crate) fn draft_row(&self) -> Option<crate::settings::SettingId> {
         let page = self.settings.as_ref()?;
         page.text.as_ref()?;
         let id = page.section().items.get(page.row)?.id;
@@ -2702,7 +2711,31 @@ impl App {
             }
             _ => &[],
         };
-        crate::settings::pick_list(self.ai.recent_for(id), listed, &filter)
+        crate::settings::pick_list(
+            self.ai.recent_for(id),
+            &self.ai.seeds_for(id),
+            listed,
+            &filter,
+        )
+    }
+
+    /// A line under the Model list about the server's models: still loading, or
+    /// why they could not be listed. Empty otherwise.
+    pub fn draft_note(&self) -> String {
+        if self.draft_row() != Some(crate::settings::SettingId::AiModel) {
+            return String::new();
+        }
+        let url = crate::agent::models_url(
+            &self.ai.endpoint(),
+            self.ai.provider == crate::settings::AiProvider::Ollama,
+        );
+        if self.settings_models_pending.as_deref() == Some(url.as_str()) {
+            return format!("loading models from {}…", self.ai.endpoint());
+        }
+        match &self.listed_models_error {
+            Some((failed, err)) if *failed == url => format!("server list unavailable: {err}"),
+            _ => String::new(),
+        }
     }
 
     /// `Up` / `Down` while typing Server or Model: walk the list and put the entry in the row.
@@ -2749,8 +2782,9 @@ impl App {
         let Some((value, source)) = picks.get(at).cloned() else {
             return false;
         };
-        if source == crate::settings::PickSource::Server {
-            // The server lists it; there is nothing saved to forget.
+        if source != crate::settings::PickSource::Recent {
+            // The server lists it, or it is the saved value or the default:
+            // there is nothing remembered to forget.
             self.message = Some("Only recent values can be forgotten".to_string());
             return true;
         }
@@ -2845,6 +2879,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|(have, _)| have == url);
                 if !fresh && self.settings_models_pending.as_ref() != Some(url) {
+                    self.listed_models_error = None;
                     self.settings_models_pending = Some(url.clone());
                     self.jobs.push(job);
                 }
@@ -10883,6 +10918,81 @@ mod tests {
     }
 
     #[test]
+    fn an_upgraded_user_sees_the_saved_values_before_anything_is_remembered() {
+        use crate::jobs::{AppEvent, Job};
+        use crate::settings::{AiProvider, PickSource, SettingId};
+        let mut app = App::new(Buffer::new(), None);
+        app.ai.switch_provider(AiProvider::LmStudio);
+        app.ai.model = "prism-ml/bonsai-27b".into();
+        assert!(app.ai.recent.is_empty());
+
+        ai_row(&mut app, SettingId::AiServer);
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(
+            app.draft_picks(),
+            [("http://127.0.0.1:1234/v1".to_string(), PickSource::Default)]
+        );
+        // Delete on the default explains instead of editing the text.
+        settings(&mut app, SettingsAction::Down);
+        settings(&mut app, SettingsAction::DeleteForward);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Only recent values can be forgotten")
+        );
+        assert_eq!(draft_value(&app), "http://127.0.0.1:1234/v1");
+        settings(&mut app, SettingsAction::Back);
+
+        let _ = app.take_jobs();
+        ai_row(&mut app, SettingId::AiModel);
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(
+            app.draft_picks(),
+            [("prism-ml/bonsai-27b".to_string(), PickSource::Current)]
+        );
+        let job = app
+            .take_jobs()
+            .into_iter()
+            .find(|job| matches!(job, Job::ListModels { .. }))
+            .expect("LM Studio models are listed for the Model row");
+        let Job::ListModels { url, .. } = job else {
+            unreachable!()
+        };
+        assert_eq!(url, "http://127.0.0.1:1234/v1/models");
+        assert!(
+            app.draft_note().contains("loading models"),
+            "{}",
+            app.draft_note()
+        );
+        app.handle_event(AppEvent::ModelsListed {
+            url: url.clone(),
+            result: Err("connection refused".into()),
+        });
+        assert_eq!(
+            app.draft_note(),
+            "server list unavailable: connection refused"
+        );
+        // Opening the row again tries the server again.
+        settings(&mut app, SettingsAction::Back);
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.draft_note().contains("loading models"));
+        app.handle_event(AppEvent::ModelsListed {
+            url,
+            result: Ok(vec!["prism-ml/bonsai-27b".into(), "qwen/qwen3-8b".into()]),
+        });
+        assert_eq!(app.draft_note(), "");
+        assert_eq!(
+            app.draft_picks(),
+            [
+                ("prism-ml/bonsai-27b".to_string(), PickSource::Current),
+                ("qwen/qwen3-8b".to_string(), PickSource::Server),
+            ]
+        );
+        // Saving puts the value in the real history.
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(app.ai.recent_models(), ["prism-ml/bonsai-27b"]);
+    }
+
+    #[test]
     fn a_typed_server_comes_back_from_the_recent_list() {
         use crate::settings::SettingId;
         let mut app = App::new(Buffer::new(), None);
@@ -10905,9 +11015,16 @@ mod tests {
         settings(&mut app, SettingsAction::Down);
         assert_eq!(
             draft_value(&app),
+            "http://127.0.0.1:11434/v1",
+            "the provider default is always offered after the recent ones"
+        );
+        settings(&mut app, SettingsAction::Down);
+        assert_eq!(
+            draft_value(&app),
             "",
             "past the end goes back to what was typed"
         );
+        settings(&mut app, SettingsAction::Up);
         settings(&mut app, SettingsAction::Up);
         assert_eq!(draft_value(&app), "http://10.0.0.2:11434/v1");
         settings(&mut app, SettingsAction::Enter);
