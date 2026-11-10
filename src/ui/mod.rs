@@ -832,6 +832,26 @@ mod tests {
     }
 
     #[test]
+    fn a_named_provider_shows_in_the_rows_and_the_provider_list() {
+        use crate::settings::SettingId;
+        let mut app = ai_settings_app(SettingId::AiProvider);
+        let screen = draw(&app, 110, 44);
+        assert!(screen.contains("(built-in) · named only"), "{screen}");
+        app.ai.add_named("Lab").unwrap();
+        app.ai.named[0].models = vec!["qwen3:32b".into()];
+        let screen = draw(&app, 110, 44);
+        assert!(screen.contains("Lab · Ollama ▾"), "{screen}");
+        assert!(screen.contains("enter twice removes Lab"), "{screen}");
+        assert!(screen.contains("qwen3:32b"), "{screen}");
+        app.handle(crate::action::SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
+        let screen = draw(&app, 110, 44);
+        assert!(screen.contains("OpenRouter"), "{screen}");
+        assert!(screen.contains("› Lab · Ollama"), "{screen}");
+    }
+
+    #[test]
     fn model_tools_and_detected_limits_read_for_the_current_model() {
         use crate::settings::SettingId;
         let mut app = ai_settings_app(SettingId::AiModelTools);

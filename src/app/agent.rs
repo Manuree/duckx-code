@@ -1302,22 +1302,32 @@ impl App {
     }
 
     fn slash_provider(&mut self, args: &str) {
-        let token = args.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-        if !token.is_empty() {
-            let Some(provider) = crate::settings::AiProvider::parse(&token) else {
-                self.push_line(
-                    false,
-                    "Usage: /provider [ollama|lmstudio|openai-compatible|openrouter]".into(),
-                );
+        let name = args.trim();
+        if !name.is_empty() {
+            if self.ai.find_named(name).is_some() {
+                self.ai.switch_named(name);
+            } else if let Some(provider) = crate::settings::AiProvider::parse(name) {
+                self.ai.switch_provider(provider);
+            } else {
+                let mut names: Vec<String> =
+                    ["ollama", "lmstudio", "openai-compatible", "openrouter"]
+                        .iter()
+                        .map(|name| name.to_string())
+                        .collect();
+                names.extend(self.ai.named.iter().map(|entry| entry.name.clone()));
+                self.push_line(false, format!("Usage: /provider [{}]", names.join("|")));
                 return;
-            };
-            self.ai.switch_provider(provider);
+            }
             self.persist_ai_prefs();
         }
+        let named = match self.ai.active_named() {
+            Some(index) => format!("{} · ", self.ai.named[index].name),
+            None => String::new(),
+        };
         self.push_line(
             false,
             format!(
-                "provider {} · server {}",
+                "provider {named}{} · server {}",
                 self.ai.provider.as_str(),
                 self.ai.endpoint()
             ),

@@ -23,3 +23,8 @@
 # Leave them blank to use Context size and Max tokens.
 # Set Model context to 131072 for a long-context cloud model,
 # or 8192 for a small local one, and other models keep the global value.
+# Add provider, under Provider: type a name such as Lab and press Enter.
+# It starts with the selected kind and server; set Server, Model, API key.
+# Provider kind, API key variable, and Saved models belong to it alone.
+# It joins the Provider list as "Lab · Ollama". /provider lab picks it too.
+# Delete provider needs Enter twice.

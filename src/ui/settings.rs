@@ -285,6 +285,11 @@ fn render_items(
 fn only_for(id: SettingId) -> &'static str {
     match id {
         SettingId::AiAppName | SettingId::AiReferer => "OpenRouter only",
+        SettingId::AiProviderName
+        | SettingId::AiProviderKind
+        | SettingId::AiProviderKeyEnv
+        | SettingId::AiProviderModels
+        | SettingId::AiProviderDelete => "named only",
         _ => "Ollama only",
     }
 }
@@ -351,7 +356,8 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         | SettingId::AiProvider
         | SettingId::AiThink
         | SettingId::AiAutoCompact
-        | SettingId::AiModelTools) => {
+        | SettingId::AiModelTools
+        | SettingId::AiProviderKind) => {
             format!("{} {mark}", app.ai.choice_label(id))
         }
         SettingId::AiServer => {
@@ -371,10 +377,28 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         SettingId::AiApiKey => match app.ai.resolved_api_key().1 {
             crate::settings::KeySource::Env(name) => format!("•••••••• (from {name})"),
             crate::settings::KeySource::Saved => "••••••••".to_string(),
-            crate::settings::KeySource::None => match app.ai.provider.key_env() {
+            crate::settings::KeySource::None => match app.ai.key_env_name() {
                 Some(name) => format!("(not set · or set {name})"),
                 None => "(not set)".to_string(),
             },
+        },
+        SettingId::AiProviderAdd => "enter, then type a name".to_string(),
+        SettingId::AiProviderName => match app.ai.active_named() {
+            Some(index) => app.ai.named[index].name.clone(),
+            None => "(built-in)".to_string(),
+        },
+        SettingId::AiProviderKeyEnv => match app.ai.active_named() {
+            Some(index) => text_or_none(&app.ai.named[index].api_key_env),
+            None => "(built-in)".to_string(),
+        },
+        SettingId::AiProviderModels => match app.ai.active_named() {
+            Some(index) if app.ai.named[index].models.is_empty() => "(none)".to_string(),
+            Some(index) => app.ai.named[index].models.join(", "),
+            None => "(built-in)".to_string(),
+        },
+        SettingId::AiProviderDelete => match app.ai.active_named() {
+            Some(index) => format!("enter twice removes {}", app.ai.named[index].name),
+            None => "(built-in)".to_string(),
         },
         SettingId::AiContextSize => {
             let raw = app.ai.context_size.trim();
@@ -559,7 +583,8 @@ fn paint_menu(
         | SettingId::AiProvider
         | SettingId::AiThink
         | SettingId::AiAutoCompact
-        | SettingId::AiModelTools) => crate::settings::AiPrefs::choice_names(id),
+        | SettingId::AiModelTools
+        | SettingId::AiProviderKind) => app.ai.choice_names_with(id),
         SettingId::AiServer
         | SettingId::AiModel
         | SettingId::AiApiKey
@@ -571,6 +596,11 @@ fn paint_menu(
         | SettingId::AiRetries
         | SettingId::AiAppName
         | SettingId::AiReferer
+        | SettingId::AiProviderAdd
+        | SettingId::AiProviderName
+        | SettingId::AiProviderKeyEnv
+        | SettingId::AiProviderModels
+        | SettingId::AiProviderDelete
         | SettingId::AiClearRecent
         | SettingId::AiCompactKeep
         | SettingId::AiCompactBuffer
