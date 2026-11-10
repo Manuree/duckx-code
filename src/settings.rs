@@ -63,6 +63,18 @@ pub enum SettingId {
     AiReferer,
     /// Forget every remembered server and model.
     AiClearRecent,
+    /// Type a name to add a named provider, copied from the selected one.
+    AiProviderAdd,
+    /// The selected named provider's name.
+    AiProviderName,
+    /// The selected named provider's kind (how it is talked to).
+    AiProviderKind,
+    /// Environment variable whose value wins over the named provider's saved key.
+    AiProviderKeyEnv,
+    /// Models offered in the Model list for the named provider, comma separated.
+    AiProviderModels,
+    /// Removes the selected named provider (`Enter` twice).
+    AiProviderDelete,
 }
 
 /// How a new line is ended. `Auto` keeps the ending detected in the file.
@@ -430,7 +442,7 @@ pub enum KeySource {
     None,
     Saved,
     /// The provider's environment variable, which wins over the saved key.
-    Env(&'static str),
+    Env(String),
 }
 
 pub const DEFAULT_TIMEOUT_SECS: u32 = 1800;
@@ -495,7 +507,41 @@ pub struct AiPrefs {
     /// The last servers and models, for the list under the Server and Model rows.
     #[serde(default, skip_serializing_if = "AiRecent::is_empty")]
     pub recent: AiRecent,
+    /// Providers the user added and named. Each has its own kind, server, model,
+    /// key (or key variable), and models.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named: Vec<NamedProvider>,
+    /// Name of the selected named provider. Empty: the built-in `provider` is
+    /// selected. While a named one is selected, `provider` is its kind and
+    /// `server` / `model` / `api_key` are its values.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub active: String,
 }
+
+/// A provider the user added: `kind` says how it is talked to (Ollama native,
+/// LM Studio, OpenAI-compatible, or OpenRouter headers).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedProvider {
+    pub name: String,
+    #[serde(default)]
+    pub kind: AiProvider,
+    /// Empty uses the kind's default server.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub server: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key: String,
+    /// Environment variable that wins over `api_key` when it is set. Empty: none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key_env: String,
+    /// Extra models offered in the Model list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+}
+
+/// Longest name a named provider may have.
+pub const PROVIDER_NAME_MAX: usize = 40;
 
 fn default_context_size() -> String {
     "16384".to_string()
@@ -536,6 +582,8 @@ impl Default for AiPrefs {
             openrouter_referer: default_referer(),
             profiles: BTreeMap::new(),
             recent: AiRecent::default(),
+            named: Vec::new(),
+            active: String::new(),
         }
     }
 }
@@ -553,6 +601,10 @@ impl AiPrefs {
                 | SettingId::AiRetries
                 | SettingId::AiAppName
                 | SettingId::AiReferer
+                | SettingId::AiProviderAdd
+                | SettingId::AiProviderName
+                | SettingId::AiProviderKeyEnv
+                | SettingId::AiProviderModels
         )
     }
 
@@ -638,8 +690,17 @@ impl AiPrefs {
                 ));
                 seeds
             }
-            SettingId::AiModel if !self.model.trim().is_empty() => {
-                vec![(self.model.trim().to_string(), PickSource::Current)]
+            SettingId::AiModel => {
+                let mut seeds = Vec::new();
+                if !self.model.trim().is_empty() {
+                    seeds.push((self.model.trim().to_string(), PickSource::Current));
+                }
+                if let Some(index) = self.active_named() {
+                    for model in &self.named[index].models {
+                        seeds.push((model.clone(), PickSource::Saved));
+                    }
+                }
+                seeds
             }
             _ => Vec::new(),
         }
@@ -656,25 +717,188 @@ impl AiPrefs {
 
     /// Selects `next` and swaps in the server, model, and key it had last time.
     /// The provider being left keeps its own in `profiles`.
+    /// Selects a built-in provider, keeping what the current one had.
     pub fn switch_provider(&mut self, next: AiProvider) {
-        if next == self.provider {
+        if next == self.provider && self.active_named().is_none() {
             return;
         }
-        let leaving = ProviderProfile {
-            server: std::mem::take(&mut self.server),
-            model: std::mem::take(&mut self.model),
-            api_key: std::mem::take(&mut self.api_key),
-        };
-        if leaving.is_empty() {
-            self.profiles.remove(&self.provider);
-        } else {
-            self.profiles.insert(self.provider, leaving);
-        }
+        self.stash();
         let arriving = self.profiles.remove(&next).unwrap_or_default();
         self.server = arriving.server;
         self.model = arriving.model;
         self.api_key = arriving.api_key;
         self.provider = next;
+    }
+
+    /// Puts the selected provider's server, model, and key back where they live:
+    /// its named entry, or `profiles` for a built-in. Leaves no provider active.
+    fn stash(&mut self) {
+        let server = std::mem::take(&mut self.server);
+        let model = std::mem::take(&mut self.model);
+        let api_key = std::mem::take(&mut self.api_key);
+        if let Some(index) = self.active_named() {
+            let entry = &mut self.named[index];
+            entry.kind = self.provider;
+            entry.server = server;
+            entry.model = model;
+            entry.api_key = api_key;
+        } else {
+            let leaving = ProviderProfile {
+                server,
+                model,
+                api_key,
+            };
+            if leaving.is_empty() {
+                self.profiles.remove(&self.provider);
+            } else {
+                self.profiles.insert(self.provider, leaving);
+            }
+        }
+        self.active.clear();
+    }
+
+    /// Index of the selected named provider in `named`.
+    pub fn active_named(&self) -> Option<usize> {
+        if self.active.is_empty() {
+            return None;
+        }
+        self.named
+            .iter()
+            .position(|entry| entry.name == self.active)
+    }
+
+    /// Index of the named provider called `name`, in any case.
+    pub fn find_named(&self, name: &str) -> Option<usize> {
+        let name = name.trim();
+        self.named
+            .iter()
+            .position(|entry| entry.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Selects the named provider called `name`. `false` when there is none.
+    pub fn switch_named(&mut self, name: &str) -> bool {
+        let Some(index) = self.find_named(name) else {
+            return false;
+        };
+        if self.active_named() == Some(index) {
+            return true;
+        }
+        self.stash();
+        let entry = self.named[index].clone();
+        self.server = entry.server;
+        self.model = entry.model;
+        self.api_key = entry.api_key;
+        self.provider = entry.kind;
+        self.active = entry.name;
+        true
+    }
+
+    /// Why `name` cannot name a provider, if it cannot. `except` is the entry being renamed.
+    fn name_problem(&self, name: &str, except: Option<usize>) -> Option<String> {
+        if name.is_empty() {
+            return Some("Type a name for the provider".to_string());
+        }
+        if name.chars().count() > PROVIDER_NAME_MAX {
+            return Some(format!(
+                "A provider name is at most {PROVIDER_NAME_MAX} characters"
+            ));
+        }
+        let builtin = AiProvider::ALL.iter().any(|provider| {
+            provider.label().eq_ignore_ascii_case(name)
+                || AiProvider::parse(name) == Some(*provider)
+        });
+        if builtin {
+            return Some(format!("{name} is a built-in provider name"));
+        }
+        if name.contains(':') {
+            return Some("A provider name cannot contain :".to_string());
+        }
+        if self
+            .find_named(name)
+            .is_some_and(|index| Some(index) != except)
+        {
+            return Some(format!("A provider named {name} already exists"));
+        }
+        None
+    }
+
+    /// Adds a named provider of the selected kind and server, and selects it.
+    pub fn add_named(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if let Some(problem) = self.name_problem(name, None) {
+            return Err(problem);
+        }
+        self.named.push(NamedProvider {
+            name: name.to_string(),
+            kind: self.provider,
+            server: self.server.trim().to_string(),
+            ..NamedProvider::default()
+        });
+        self.switch_named(name);
+        Ok(())
+    }
+
+    /// Renames the selected named provider.
+    pub fn rename_named(&mut self, name: &str) -> Result<bool, String> {
+        let name = name.trim();
+        let Some(index) = self.active_named() else {
+            return Ok(false);
+        };
+        if self.named[index].name == name {
+            return Ok(false);
+        }
+        if let Some(problem) = self.name_problem(name, Some(index)) {
+            return Err(problem);
+        }
+        self.named[index].name = name.to_string();
+        self.active = name.to_string();
+        Ok(true)
+    }
+
+    /// Removes the selected named provider and returns to the built-in of its
+    /// kind. Returns the removed name.
+    pub fn delete_named(&mut self) -> Option<String> {
+        let index = self.active_named()?;
+        let removed = self.named.remove(index);
+        self.active.clear();
+        let arriving = self.profiles.remove(&removed.kind).unwrap_or_default();
+        self.server = arriving.server;
+        self.model = arriving.model;
+        self.api_key = arriving.api_key;
+        self.provider = removed.kind;
+        Some(removed.name)
+    }
+
+    /// The selected provider's name: a named one's name, else the built-in label.
+    pub fn provider_name(&self) -> String {
+        match self.active_named() {
+            Some(index) => self.named[index].name.clone(),
+            None => self.provider.label().to_string(),
+        }
+    }
+
+    /// The environment variable whose value wins over the saved key.
+    pub fn key_env_name(&self) -> Option<String> {
+        match self.active_named() {
+            Some(index) => {
+                let name = self.named[index].api_key_env.trim();
+                (!name.is_empty()).then(|| name.to_string())
+            }
+            None => self.provider.key_env().map(str::to_string),
+        }
+    }
+
+    /// Choice names that depend on what is saved: the Provider list adds the named ones.
+    pub fn choice_names_with(&self, id: SettingId) -> Vec<String> {
+        let mut names = Self::choice_names(id);
+        if id == SettingId::AiProvider {
+            names.extend(
+                self.named
+                    .iter()
+                    .map(|entry| format!("{} · {}", entry.name, entry.kind.label())),
+            );
+        }
+        names
     }
 
     /// The key a request sends and where it came from. A set environment variable wins.
@@ -686,8 +910,8 @@ impl AiPrefs {
         &self,
         env: impl Fn(&str) -> Option<String>,
     ) -> (String, KeySource) {
-        if let Some(name) = self.provider.key_env()
-            && let Some(value) = env(name).filter(|value| !value.trim().is_empty())
+        if let Some(name) = self.key_env_name()
+            && let Some(value) = env(&name).filter(|value| !value.trim().is_empty())
         {
             return (value.trim().to_string(), KeySource::Env(name));
         }
@@ -748,6 +972,11 @@ impl AiPrefs {
         match id {
             SettingId::AiContextSize | SettingId::AiThink => self.provider == AiProvider::Ollama,
             SettingId::AiAppName | SettingId::AiReferer => self.provider == AiProvider::OpenRouter,
+            SettingId::AiProviderName
+            | SettingId::AiProviderKind
+            | SettingId::AiProviderKeyEnv
+            | SettingId::AiProviderModels
+            | SettingId::AiProviderDelete => self.active_named().is_some(),
             _ => true,
         }
     }
@@ -758,7 +987,7 @@ impl AiPrefs {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiThink => vec!["On".into(), "Off".into()],
-            SettingId::AiProvider => AiProvider::ALL
+            SettingId::AiProvider | SettingId::AiProviderKind => AiProvider::ALL
                 .iter()
                 .map(|provider| provider.label().to_string())
                 .collect(),
@@ -772,7 +1001,11 @@ impl AiPrefs {
             SettingId::AiAutoApprove => usize::from(!self.auto_approve),
             SettingId::AiStreaming => usize::from(!self.streaming),
             SettingId::AiThink => usize::from(!self.think),
-            SettingId::AiProvider => self.provider.index(),
+            SettingId::AiProvider => match self.active_named() {
+                Some(index) => AiProvider::ALL.len() + index,
+                None => self.provider.index(),
+            },
+            SettingId::AiProviderKind => self.provider.index(),
             _ => 0,
         }
     }
@@ -783,13 +1016,17 @@ impl AiPrefs {
             SettingId::AiAutoApprove => on_off(self.auto_approve),
             SettingId::AiStreaming => on_off(self.streaming),
             SettingId::AiThink => on_off(self.think),
-            SettingId::AiProvider => self.provider.as_str().to_string(),
+            SettingId::AiProvider => match self.active_named() {
+                Some(index) => format!("named:{}", self.named[index].name),
+                None => self.provider.as_str().to_string(),
+            },
+            SettingId::AiProviderKind => self.provider.as_str().to_string(),
             _ => String::new(),
         }
     }
 
     pub fn choice_label(&self, id: SettingId) -> String {
-        Self::choice_names(id)
+        self.choice_names_with(id)
             .get(self.choice_index(id))
             .cloned()
             .unwrap_or_default()
@@ -801,7 +1038,17 @@ impl AiPrefs {
             SettingId::AiAutoApprove => self.auto_approve = index == 0,
             SettingId::AiStreaming => self.streaming = index == 0,
             SettingId::AiThink => self.think = index == 0,
-            SettingId::AiProvider => self.switch_provider(AiProvider::from_index(index)),
+            SettingId::AiProvider => match index.checked_sub(AiProvider::ALL.len()) {
+                Some(named) => {
+                    if let Some(name) = self.named.get(named).map(|entry| entry.name.clone()) {
+                        self.switch_named(&name);
+                    }
+                }
+                None => self.switch_provider(AiProvider::from_index(index)),
+            },
+            SettingId::AiProviderKind if self.active_named().is_some() => {
+                self.provider = AiProvider::from_index(index);
+            }
             _ => {}
         }
     }
@@ -812,8 +1059,12 @@ impl AiPrefs {
             SettingId::AiAutoApprove => self.auto_approve = token != "off",
             SettingId::AiStreaming => self.streaming = token != "off",
             SettingId::AiThink => self.think = token != "off",
-            SettingId::AiProvider => {
-                self.switch_provider(AiProvider::parse(token).unwrap_or_default());
+            SettingId::AiProvider => match token.strip_prefix("named:") {
+                Some(name) if self.switch_named(name) => {}
+                _ => self.switch_provider(AiProvider::parse(token).unwrap_or_default()),
+            },
+            SettingId::AiProviderKind if self.active_named().is_some() => {
+                self.provider = AiProvider::parse(token).unwrap_or(self.provider);
             }
             _ => {}
         }
@@ -836,6 +1087,16 @@ impl AiPrefs {
             SettingId::AiAppName => self.openrouter_app_name = default_app_name(),
             SettingId::AiReferer => self.openrouter_referer = default_referer(),
             SettingId::AiClearRecent => self.recent = AiRecent::default(),
+            SettingId::AiProviderKeyEnv | SettingId::AiProviderModels => {
+                if let Some(index) = self.active_named() {
+                    let entry = &mut self.named[index];
+                    if id == SettingId::AiProviderKeyEnv {
+                        entry.api_key_env.clear();
+                    } else {
+                        entry.models.clear();
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1222,6 +1483,8 @@ pub enum PickSource {
     Current,
     /// The provider's built-in server.
     Default,
+    /// Listed under the named provider's Saved models.
+    Saved,
 }
 
 impl PickSource {
@@ -1232,6 +1495,7 @@ impl PickSource {
             Self::Server => "server",
             Self::Current => "current",
             Self::Default => "default",
+            Self::Saved => "saved",
         }
     }
 }
@@ -1383,8 +1647,13 @@ pub fn sections() -> &'static [Section] {
                         },
                         Item {
                             label: "Provider",
-                            detail: "Ollama, LM Studio, OpenAI-compatible, or OpenRouter. Each keeps its own server, model, and key.",
+                            detail: "Ollama, LM Studio, OpenAI-compatible, OpenRouter, or one you added. Each keeps its own server, model, and key.",
                             id: SettingId::AiProvider,
+                        },
+                        Item {
+                            label: "Add provider",
+                            detail: "Type a name to add your own provider, starting from the selected one's kind and server.",
+                            id: SettingId::AiProviderAdd,
                         },
                         Item {
                             label: "Server",
@@ -1400,6 +1669,31 @@ pub fn sections() -> &'static [Section] {
                             label: "API key",
                             detail: "Bearer token for this provider. OPENROUTER_API_KEY or OPENAI_API_KEY wins when set.",
                             id: SettingId::AiApiKey,
+                        },
+                        Item {
+                            label: "Provider name",
+                            detail: "Name of this named provider, shown in the Provider list and /provider.",
+                            id: SettingId::AiProviderName,
+                        },
+                        Item {
+                            label: "Provider kind",
+                            detail: "How this named provider is talked to: Ollama, LM Studio, OpenAI-compatible, or OpenRouter.",
+                            id: SettingId::AiProviderKind,
+                        },
+                        Item {
+                            label: "API key variable",
+                            detail: "Environment variable whose value wins over the saved key, e.g. WORK_OPENAI_KEY. Empty: none.",
+                            id: SettingId::AiProviderKeyEnv,
+                        },
+                        Item {
+                            label: "Saved models",
+                            detail: "Models offered in the Model list for this provider, separated by commas.",
+                            id: SettingId::AiProviderModels,
+                        },
+                        Item {
+                            label: "Delete provider",
+                            detail: "Remove this named provider. Enter twice. Its server, model, and key are forgotten.",
+                            id: SettingId::AiProviderDelete,
                         },
                         Item {
                             label: "Max tokens",
@@ -1654,7 +1948,7 @@ mod tests {
         );
         assert_eq!(
             ai.resolved_api_key_with(env),
-            ("sk-env".into(), KeySource::Env("OPENROUTER_API_KEY"))
+            ("sk-env".into(), KeySource::Env("OPENROUTER_API_KEY".into()))
         );
         ai.switch_provider(AiProvider::OpenaiCompatible);
         assert_eq!(
@@ -1667,6 +1961,144 @@ mod tests {
             ai.resolved_api_key_with(all),
             (String::new(), KeySource::None)
         );
+    }
+
+    #[test]
+    fn an_older_file_saves_back_unchanged_with_no_named_providers() {
+        let text = r#"{"ai":{"provider":"openrouter","model":"x/y","profiles":{"ollama":{"server":"http://10.0.0.2:11434/v1","model":"qwen3"}}}}"#;
+        let file: SettingsFile = serde_json::from_str(text).unwrap();
+        assert!(file.ai.named.is_empty() && file.ai.active.is_empty());
+        let saved = serde_json::to_string(&file.ai).unwrap();
+        assert!(
+            !saved.contains("named") && !saved.contains("active"),
+            "{saved}"
+        );
+        let back: AiPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, file.ai);
+    }
+
+    #[test]
+    fn named_providers_keep_their_own_values_and_the_built_ins_keep_theirs() {
+        let mut ai = AiPrefs {
+            server: "http://10.0.0.2:11434/v1".into(),
+            model: "qwen3:8b".into(),
+            ..AiPrefs::default()
+        };
+        ai.add_named("Work box").unwrap();
+        assert_eq!(ai.active, "Work box");
+        assert_eq!(
+            ai.provider,
+            AiProvider::Ollama,
+            "starts as the selected kind"
+        );
+        assert_eq!(ai.server, "http://10.0.0.2:11434/v1", "and server");
+        assert_eq!(ai.model, "", "with no model yet");
+        ai.model = "llama3.3:70b".into();
+        ai.api_key = "work-key".into();
+
+        ai.switch_provider(AiProvider::Ollama);
+        assert!(ai.active.is_empty());
+        assert_eq!(ai.model, "qwen3:8b", "the built-in Ollama is untouched");
+        assert_eq!(ai.api_key, "");
+        assert!(ai.switch_named("work BOX"), "names match in any case");
+        assert_eq!(ai.model, "llama3.3:70b");
+        assert_eq!(ai.api_key, "work-key");
+
+        let saved = serde_json::to_string(&ai).unwrap();
+        let back: AiPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, ai);
+        assert!(saved.contains(r#""active":"Work box""#), "{saved}");
+
+        // The Provider list: built-ins, then the named ones.
+        let names = ai.choice_names_with(SettingId::AiProvider);
+        assert_eq!(names.len(), 5);
+        assert_eq!(names[4], "Work box · Ollama");
+        assert_eq!(ai.choice_index(SettingId::AiProvider), 4);
+        assert_eq!(ai.choice_label(SettingId::AiProvider), "Work box · Ollama");
+        let token = ai.choice_token(SettingId::AiProvider);
+        ai.set_choice(SettingId::AiProvider, 3);
+        assert_eq!(ai.provider, AiProvider::OpenRouter);
+        ai.restore_choice(SettingId::AiProvider, &token);
+        assert_eq!(ai.active, "Work box");
+        assert_eq!(ai.model, "llama3.3:70b");
+
+        // Kind changes how it is talked to, not its values.
+        ai.set_choice(SettingId::AiProviderKind, 2);
+        assert_eq!(ai.provider, AiProvider::OpenaiCompatible);
+        assert_eq!(ai.server, "http://10.0.0.2:11434/v1");
+        ai.switch_provider(AiProvider::OpenaiCompatible);
+        assert!(ai.active.is_empty());
+        assert_eq!(ai.named[0].kind, AiProvider::OpenaiCompatible);
+        assert_eq!(ai.server, "", "the built-in OpenAI-compatible has its own");
+
+        // Delete goes back to the built-in of its kind.
+        ai.switch_provider(AiProvider::Ollama);
+        ai.switch_named("Work box");
+        assert_eq!(ai.delete_named().as_deref(), Some("Work box"));
+        assert!(ai.named.is_empty() && ai.active.is_empty());
+        assert_eq!(ai.provider, AiProvider::OpenaiCompatible);
+    }
+
+    #[test]
+    fn provider_names_are_checked() {
+        let mut ai = AiPrefs::default();
+        assert!(ai.add_named("").is_err());
+        assert_eq!(
+            ai.add_named("OpenRouter").unwrap_err(),
+            "OpenRouter is a built-in provider name"
+        );
+        assert!(ai.add_named("lmstudio").is_err());
+        assert!(ai.add_named("a:b").is_err());
+        assert!(ai.add_named(&"x".repeat(41)).is_err());
+        ai.add_named("Home").unwrap();
+        ai.add_named("Work").unwrap();
+        assert_eq!(
+            ai.add_named("home").unwrap_err(),
+            "A provider named home already exists"
+        );
+        assert!(ai.rename_named("Home").is_err());
+        assert_eq!(ai.rename_named("Office"), Ok(true));
+        assert_eq!(ai.rename_named("Office"), Ok(false));
+        assert_eq!(ai.active, "Office");
+        assert_eq!(ai.named[1].name, "Office");
+    }
+
+    #[test]
+    fn a_named_provider_uses_its_own_key_variable_and_models() {
+        let mut ai = AiPrefs::default();
+        ai.switch_provider(AiProvider::OpenRouter);
+        ai.add_named("Team").unwrap();
+        ai.api_key = "saved".into();
+        let env = |name: &str| (name == "TEAM_KEY").then(|| "from-env".to_string());
+        let openrouter_env = |name: &str| (name == "OPENROUTER_API_KEY").then(|| "or".to_string());
+        assert_eq!(
+            ai.resolved_api_key_with(openrouter_env),
+            ("saved".into(), KeySource::Saved),
+            "the kind's variable does not leak into a named provider"
+        );
+        ai.named[0].api_key_env = "TEAM_KEY".into();
+        assert_eq!(
+            ai.resolved_api_key_with(env),
+            ("from-env".into(), KeySource::Env("TEAM_KEY".into()))
+        );
+        ai.named[0].models = vec!["a/b".into(), "c/d".into()];
+        ai.model = "a/b".into();
+        assert_eq!(
+            ai.seeds_for(SettingId::AiModel),
+            [
+                ("a/b".to_string(), PickSource::Current),
+                ("a/b".to_string(), PickSource::Saved),
+                ("c/d".to_string(), PickSource::Saved),
+            ]
+        );
+        assert!(
+            !ai.extra_headers().is_empty(),
+            "OpenRouter kind keeps its headers"
+        );
+        // A hand-edited `active` naming nothing is the built-in.
+        ai.active = "Gone".into();
+        assert_eq!(ai.active_named(), None);
+        assert_eq!(ai.provider_name(), "OpenRouter");
     }
 
     #[test]

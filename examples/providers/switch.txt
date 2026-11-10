@@ -19,3 +19,8 @@
 # Type part of a name to filter it. Delete forgets the highlighted value.
 # The Model list also shows the models the server has (marked server).
 # Clear recent history, the last AI row, forgets all of them.
+# Add provider, under Provider: type a name such as Lab and press Enter.
+# It starts with the selected kind and server; set Server, Model, API key.
+# Provider kind, API key variable, and Saved models belong to it alone.
+# It joins the Provider list as "Lab · Ollama". /provider lab picks it too.
+# Delete provider needs Enter twice.

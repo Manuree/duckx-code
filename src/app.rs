@@ -478,6 +478,8 @@ enum Pending {
 }
 
 pub struct App {
+    /// Delete provider was pressed once for this named provider; the next `Enter` removes it.
+    provider_delete_armed: Option<String>,
     editors: Vec<Editor>,
     active: EditorId,
     next_id: u64,
@@ -660,6 +662,7 @@ impl App {
             listed_models_error: None,
             agent_target: None,
             agent_tx: None,
+            provider_delete_armed: None,
             agent: crate::agent::Panel::default(),
             key_overrides: std::collections::BTreeMap::new(),
             keys: crate::keys::KeyMap::defaults(),
@@ -1482,6 +1485,26 @@ impl App {
             state.install(parsed);
         }
         self.queue_parse(tab_id);
+    }
+
+    /// Delete provider: the first `Enter` asks, the second removes it.
+    fn delete_named_provider(&mut self, armed: Option<String>) {
+        let Some(index) = self.ai.active_named() else {
+            self.message = Some("Only for a named provider. Add one first".to_string());
+            return;
+        };
+        let name = self.ai.named[index].name.clone();
+        if armed.as_deref() != Some(name.as_str()) {
+            self.message = Some(format!("Press Enter again to delete {name}"));
+            self.provider_delete_armed = Some(name);
+            return;
+        }
+        self.ai.delete_named();
+        self.message = Some(format!(
+            "Deleted {name}; now using {}",
+            self.ai.provider_name()
+        ));
+        self.queue_settings_save();
     }
 
     /// Queues one write of `settings.json`. A change that arrives while a write
@@ -2532,6 +2555,17 @@ impl App {
             }
             return;
         }
+        let armed = self.provider_delete_armed.take();
+        if let Some(crate::settings::SettingId::AiProviderDelete) = opens_menu {
+            self.delete_named_provider(armed);
+            return;
+        }
+        if let Some(crate::settings::SettingId::AiProviderKind) = opens_menu
+            && self.ai.active_named().is_none()
+        {
+            self.message = Some("Only for a named provider. Add one first".to_string());
+            return;
+        }
         if let Some(crate::settings::SettingId::AiClearRecent) = opens_menu {
             let count = self.ai.recent.len();
             self.ai.reset(crate::settings::SettingId::AiClearRecent);
@@ -2846,6 +2880,11 @@ impl App {
                 SettingId::AiAppName | SettingId::AiReferer => {
                     "Only used when the provider is OpenRouter".to_string()
                 }
+                SettingId::AiProviderName
+                | SettingId::AiProviderKeyEnv
+                | SettingId::AiProviderModels => {
+                    "Only for a named provider. Add one first".to_string()
+                }
                 _ => "Only used when the provider is Ollama".to_string(),
             });
             return;
@@ -2866,6 +2905,20 @@ impl App {
             SettingId::AiRetries => self.ai.resolved_retries().to_string(),
             SettingId::AiAppName => self.ai.openrouter_app_name.clone(),
             SettingId::AiReferer => self.ai.openrouter_referer.clone(),
+            SettingId::AiProviderAdd => String::new(),
+            SettingId::AiProviderName
+            | SettingId::AiProviderKeyEnv
+            | SettingId::AiProviderModels => {
+                let Some(index) = self.ai.active_named() else {
+                    return;
+                };
+                let entry = &self.ai.named[index];
+                match id {
+                    SettingId::AiProviderName => entry.name.clone(),
+                    SettingId::AiProviderKeyEnv => entry.api_key_env.clone(),
+                    _ => entry.models.join(", "),
+                }
+            }
             _ => return,
         };
         if let Some(page) = self.settings.as_mut() {
@@ -3003,6 +3056,36 @@ impl App {
             }
             SettingId::AiAppName => put(&mut self.ai.openrouter_app_name, value),
             SettingId::AiReferer => put(&mut self.ai.openrouter_referer, value),
+            SettingId::AiProviderAdd => {
+                self.ai.add_named(&value)?;
+                self.message = Some(format!(
+                    "Added {value}; set its Server, Model, and API key below"
+                ));
+                true
+            }
+            SettingId::AiProviderName => self.ai.rename_named(&value)?,
+            SettingId::AiProviderKeyEnv => {
+                if !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return Err("API key variable is letters, digits, and _".to_string());
+                }
+                match self.ai.active_named() {
+                    Some(index) => put(&mut self.ai.named[index].api_key_env, value),
+                    None => false,
+                }
+            }
+            SettingId::AiProviderModels => {
+                let mut models: Vec<String> = Vec::new();
+                for model in value.split(',').map(str::trim).filter(|m| !m.is_empty()) {
+                    if !models.iter().any(|have| have == model) {
+                        models.push(model.to_string());
+                    }
+                }
+                models.truncate(20);
+                match self.ai.active_named() {
+                    Some(index) => put(&mut self.ai.named[index].models, models),
+                    None => false,
+                }
+            }
             _ => false,
         })
     }
@@ -3033,7 +3116,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => {
+            | SettingId::AiThink
+            | SettingId::AiProviderKind) => {
                 self.ai.set_choice(id, index);
             }
             SettingId::AiServer
@@ -3045,6 +3129,11 @@ impl App {
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
+            | SettingId::AiProviderAdd
+            | SettingId::AiProviderName
+            | SettingId::AiProviderKeyEnv
+            | SettingId::AiProviderModels
+            | SettingId::AiProviderDelete
             | SettingId::AiClearRecent
             | SettingId::Binding(_) => return,
         }
@@ -3079,7 +3168,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => {
+            | SettingId::AiThink
+            | SettingId::AiProviderKind) => {
                 self.ai.restore_choice(id, origin);
             }
             SettingId::AiServer
@@ -3091,6 +3181,11 @@ impl App {
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
+            | SettingId::AiProviderAdd
+            | SettingId::AiProviderName
+            | SettingId::AiProviderKeyEnv
+            | SettingId::AiProviderModels
+            | SettingId::AiProviderDelete
             | SettingId::AiClearRecent
             | SettingId::Binding(_) => {}
         }
@@ -3115,7 +3210,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => self.ai.choice_token(id),
+            | SettingId::AiThink
+            | SettingId::AiProviderKind) => self.ai.choice_token(id),
             SettingId::AiServer
             | SettingId::AiModel
             | SettingId::AiApiKey
@@ -3125,13 +3221,18 @@ impl App {
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
+            | SettingId::AiProviderAdd
+            | SettingId::AiProviderName
+            | SettingId::AiProviderKeyEnv
+            | SettingId::AiProviderModels
+            | SettingId::AiProviderDelete
             | SettingId::AiClearRecent
             | SettingId::Binding(_) => String::new(),
         }
     }
 
     fn choice_state(&self, id: crate::settings::SettingId) -> Option<(usize, String, usize)> {
-        use crate::settings::{AiPrefs, EditorPrefs, FilePrefs, LspPrefs, SettingId};
+        use crate::settings::{EditorPrefs, FilePrefs, LspPrefs, SettingId};
         let (index, token, len) = match id {
             SettingId::ColorTheme => (
                 self.appearance.color_index(),
@@ -3165,10 +3266,11 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => (
+            | SettingId::AiThink
+            | SettingId::AiProviderKind) => (
                 self.ai.choice_index(id),
                 self.ai.choice_token(id),
-                AiPrefs::choice_names(id).len(),
+                self.ai.choice_names_with(id).len(),
             ),
             SettingId::AiServer
             | SettingId::AiModel
@@ -3179,6 +3281,11 @@ impl App {
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
+            | SettingId::AiProviderAdd
+            | SettingId::AiProviderName
+            | SettingId::AiProviderKeyEnv
+            | SettingId::AiProviderModels
+            | SettingId::AiProviderDelete
             | SettingId::AiClearRecent
             | SettingId::Binding(_) => return None,
         };
@@ -3262,11 +3369,17 @@ impl App {
             | SettingId::AiApiKey
             | SettingId::AiContextSize
             | SettingId::AiThink
+            | SettingId::AiProviderKind
             | SettingId::AiMaxTokens
             | SettingId::AiTimeout
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
+            | SettingId::AiProviderAdd
+            | SettingId::AiProviderName
+            | SettingId::AiProviderKeyEnv
+            | SettingId::AiProviderModels
+            | SettingId::AiProviderDelete
             | SettingId::AiClearRecent) => self.ai.reset(id),
         }
     }
@@ -10707,9 +10820,15 @@ mod tests {
             [
                 "Assistant",
                 "Provider",
+                "Add provider",
                 "Server",
                 "Model",
                 "API key",
+                "Provider name",
+                "Provider kind",
+                "API key variable",
+                "Saved models",
+                "Delete provider",
                 "Max tokens",
                 "Request timeout",
                 "Retries",
@@ -10722,15 +10841,122 @@ mod tests {
                 "Clear recent history",
             ]
         );
-        for item in ai
-            .items
-            .iter()
-            .filter(|item| item.id != crate::settings::SettingId::AiClearRecent)
-        {
+        for item in ai.items.iter().filter(|item| {
+            !matches!(
+                item.id,
+                crate::settings::SettingId::AiClearRecent
+                    | crate::settings::SettingId::AiProviderDelete
+            )
+        }) {
             let text = crate::settings::AiPrefs::is_text(item.id);
             let choices = !crate::settings::AiPrefs::choice_names(item.id).is_empty();
             assert!(text != choices, "{} is either typed or picked", item.label);
         }
+    }
+
+    #[test]
+    fn named_providers_are_added_edited_and_deleted_from_settings() {
+        use crate::settings::{AiProvider, SettingId};
+        let mut app = App::new(Buffer::new(), None);
+        let type_row = |app: &mut App, id: SettingId, text: &str| {
+            ai_row(app, id);
+            settings(app, SettingsAction::Enter);
+            for _ in 0..40 {
+                settings(app, SettingsAction::DeleteChar);
+            }
+            settings(app, SettingsAction::Insert(text.into()));
+            settings(app, SettingsAction::Enter);
+        };
+        ai_row(&mut app, SettingId::AiProviderName);
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Only for a named provider. Add one first")
+        );
+        type_row(&mut app, SettingId::AiProviderAdd, "Lab GPU");
+        assert_eq!(app.ai.active, "Lab GPU");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Added Lab GPU; set its Server, Model, and API key below")
+        );
+        type_row(&mut app, SettingId::AiServer, "http://10.1.1.5:11434/v1");
+        type_row(&mut app, SettingId::AiModel, "qwen3:32b");
+        type_row(&mut app, SettingId::AiProviderKeyEnv, "LAB-KEY");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("API key variable is letters, digits, and _")
+        );
+        settings(&mut app, SettingsAction::Back);
+        type_row(&mut app, SettingId::AiProviderKeyEnv, "LAB_KEY");
+        type_row(
+            &mut app,
+            SettingId::AiProviderModels,
+            "qwen3:32b, gemma3 ,, qwen3:32b",
+        );
+        type_row(&mut app, SettingId::AiProviderName, "Lab");
+        let entry = &app.ai.named[0];
+        assert_eq!(entry.name, "Lab");
+        assert_eq!(entry.api_key_env, "LAB_KEY");
+        assert_eq!(entry.models, ["qwen3:32b", "gemma3"]);
+        assert_eq!(app.ai.endpoint(), "http://10.1.1.5:11434/v1");
+
+        // The built-in Ollama kept its default server.
+        app.ai.switch_provider(AiProvider::Ollama);
+        assert_eq!(app.ai.endpoint(), "http://127.0.0.1:11434/v1");
+        app.ai.switch_named("Lab");
+
+        ai_row(&mut app, SettingId::AiProviderDelete);
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Press Enter again to delete Lab")
+        );
+        assert_eq!(app.ai.named.len(), 1);
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.ai.named.is_empty());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Deleted Lab; now using Ollama")
+        );
+    }
+
+    #[test]
+    fn a_turn_goes_to_the_named_providers_server_and_key() {
+        let mut app = App::new(Buffer::new(), None);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.agent_tx = Some(tx);
+        app.ai
+            .switch_provider(crate::settings::AiProvider::OpenaiCompatible);
+        app.ai.add_named("Groq").unwrap();
+        app.ai.server = "https://api.groq.com/openai/v1".into();
+        app.ai.model = "llama-3.3-70b".into();
+        app.ai.api_key = "gsk".into();
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.agent.prompt = "/provider ollama".into();
+        app.submit_agent();
+        assert!(app.ai.active.is_empty());
+        app.agent.prompt = "/provider groq".into();
+        app.submit_agent();
+        assert_eq!(app.ai.active, "Groq");
+        let line = &app.agent.transcript.last().unwrap().text;
+        assert!(line.contains("provider Groq · openai-compatible"), "{line}");
+        app.agent.prompt = "hi".into();
+        app.submit_agent();
+        let Ok(crate::agent::AgentCommand::Turn {
+            server,
+            model,
+            api_key,
+            ollama_native,
+            ..
+        }) = rx.try_recv()
+        else {
+            panic!("no turn");
+        };
+        assert_eq!(server, "https://api.groq.com/openai/v1");
+        assert_eq!(model, "llama-3.3-70b");
+        assert_eq!(api_key, "gsk");
+        assert!(!ollama_native);
     }
 
     #[test]
