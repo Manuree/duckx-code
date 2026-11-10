@@ -32,7 +32,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "provider",
-        usage: "/provider [ollama|openai]",
+        usage: "/provider [ollama|lmstudio|openai-compatible|openrouter]",
         summary: "Show or switch the AI provider",
     },
     SlashCommand {

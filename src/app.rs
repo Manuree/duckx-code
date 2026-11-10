@@ -2726,10 +2726,23 @@ impl App {
             | SettingId::PythonChecking) => {
                 self.appearance.lsp.set_choice(id, index);
             }
-            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
+            id @ (SettingId::AiEnabled
+            | SettingId::AiAutoApprove
+            | SettingId::AiStreaming
+            | SettingId::AiProvider
+            | SettingId::AiThink) => {
                 self.ai.set_choice(id, index);
             }
-            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize | SettingId::Binding(_) => return,
+            SettingId::AiServer
+            | SettingId::AiModel
+            | SettingId::AiApiKey
+            | SettingId::AiContextSize
+            | SettingId::AiMaxTokens
+            | SettingId::AiTimeout
+            | SettingId::AiRetries
+            | SettingId::AiAppName
+            | SettingId::AiReferer
+            | SettingId::Binding(_) => return,
         }
         if let Some(menu) = self.settings.as_mut().and_then(|page| page.menu.as_mut()) {
             menu.index = index;
@@ -2758,10 +2771,23 @@ impl App {
             | SettingId::PythonChecking) => {
                 self.appearance.lsp.restore_choice(id, origin);
             }
-            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
+            id @ (SettingId::AiEnabled
+            | SettingId::AiAutoApprove
+            | SettingId::AiStreaming
+            | SettingId::AiProvider
+            | SettingId::AiThink) => {
                 self.ai.restore_choice(id, origin);
             }
-            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize | SettingId::Binding(_) => {}
+            SettingId::AiServer
+            | SettingId::AiModel
+            | SettingId::AiApiKey
+            | SettingId::AiContextSize
+            | SettingId::AiMaxTokens
+            | SettingId::AiTimeout
+            | SettingId::AiRetries
+            | SettingId::AiAppName
+            | SettingId::AiReferer
+            | SettingId::Binding(_) => {}
         }
     }
 
@@ -2780,8 +2806,21 @@ impl App {
             | SettingId::CheckOnSave
             | SettingId::FormatOnSave
             | SettingId::PythonChecking) => self.appearance.lsp.choice_token(id),
-            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => self.ai.choice_token(id),
-            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize | SettingId::Binding(_) => String::new(),
+            id @ (SettingId::AiEnabled
+            | SettingId::AiAutoApprove
+            | SettingId::AiStreaming
+            | SettingId::AiProvider
+            | SettingId::AiThink) => self.ai.choice_token(id),
+            SettingId::AiServer
+            | SettingId::AiModel
+            | SettingId::AiApiKey
+            | SettingId::AiContextSize
+            | SettingId::AiMaxTokens
+            | SettingId::AiTimeout
+            | SettingId::AiRetries
+            | SettingId::AiAppName
+            | SettingId::AiReferer
+            | SettingId::Binding(_) => String::new(),
         }
     }
 
@@ -2816,12 +2855,25 @@ impl App {
                 self.appearance.lsp.choice_token(id),
                 LspPrefs::choice_names(id).len(),
             ),
-            id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => (
+            id @ (SettingId::AiEnabled
+            | SettingId::AiAutoApprove
+            | SettingId::AiStreaming
+            | SettingId::AiProvider
+            | SettingId::AiThink) => (
                 self.ai.choice_index(id),
                 self.ai.choice_token(id),
                 AiPrefs::choice_names(id).len(),
             ),
-            SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize | SettingId::Binding(_) => return None,
+            SettingId::AiServer
+            | SettingId::AiModel
+            | SettingId::AiApiKey
+            | SettingId::AiContextSize
+            | SettingId::AiMaxTokens
+            | SettingId::AiTimeout
+            | SettingId::AiRetries
+            | SettingId::AiAppName
+            | SettingId::AiReferer
+            | SettingId::Binding(_) => return None,
         };
         Some((index, token, len))
     }
@@ -2901,7 +2953,13 @@ impl App {
             | SettingId::AiServer
             | SettingId::AiModel
             | SettingId::AiApiKey
-            | SettingId::AiContextSize) => self.ai.reset(id),
+            | SettingId::AiContextSize
+            | SettingId::AiThink
+            | SettingId::AiMaxTokens
+            | SettingId::AiTimeout
+            | SettingId::AiRetries
+            | SettingId::AiAppName
+            | SettingId::AiReferer) => self.ai.reset(id),
         }
     }
 

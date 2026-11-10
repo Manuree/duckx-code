@@ -276,7 +276,11 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool, drafting:
         | SettingId::PythonChecking) => {
             format!("{} {mark}", app.appearance.lsp.choice_label(id))
         }
-        id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
+        id @ (SettingId::AiEnabled
+        | SettingId::AiAutoApprove
+        | SettingId::AiStreaming
+        | SettingId::AiProvider
+        | SettingId::AiThink) => {
             format!("{} {mark}", app.ai.choice_label(id))
         }
         SettingId::AiServer => {
@@ -308,6 +312,24 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool, drafting:
                 app.ai.context_size.clone()
             }
         }
+        SettingId::AiMaxTokens => match (app.ai.max_tokens.trim(), app.ai.resolved_max_tokens()) {
+            ("", Some(n)) => format!("{n} (default)"),
+            ("", None) => "(omit)".to_string(),
+            (_, Some(n)) => n.to_string(),
+            (_, None) => "off (omit)".to_string(),
+        },
+        SettingId::AiTimeout => format!("{} s", app.ai.resolved_timeout()),
+        SettingId::AiRetries => app.ai.resolved_retries().to_string(),
+        SettingId::AiAppName => text_or_none(&app.ai.openrouter_app_name),
+        SettingId::AiReferer => text_or_none(&app.ai.openrouter_referer),
+    }
+}
+
+fn text_or_none(value: &str) -> String {
+    if value.trim().is_empty() {
+        "(none)".to_string()
+    } else {
+        value.to_string()
     }
 }
 
@@ -347,10 +369,21 @@ fn paint_menu(
         | SettingId::CheckOnSave
         | SettingId::FormatOnSave
         | SettingId::PythonChecking) => crate::settings::LspPrefs::choice_names(id),
-        id @ (SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming | SettingId::AiProvider) => {
-            crate::settings::AiPrefs::choice_names(id)
-        }
-        SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize | SettingId::Binding(_) => return,
+        id @ (SettingId::AiEnabled
+        | SettingId::AiAutoApprove
+        | SettingId::AiStreaming
+        | SettingId::AiProvider
+        | SettingId::AiThink) => crate::settings::AiPrefs::choice_names(id),
+        SettingId::AiServer
+        | SettingId::AiModel
+        | SettingId::AiApiKey
+        | SettingId::AiContextSize
+        | SettingId::AiMaxTokens
+        | SettingId::AiTimeout
+        | SettingId::AiRetries
+        | SettingId::AiAppName
+        | SettingId::AiReferer
+        | SettingId::Binding(_) => return,
     };
     if names.is_empty() || width < 8 || footer_row == 0 {
         return;

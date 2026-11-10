@@ -375,15 +375,17 @@ impl App {
         self.agent.thinking_draft = None;
         self.agent.status = "waiting".to_string();
         let ollama_native = self.ai.provider == crate::settings::AiProvider::Ollama;
+        let (api_key, _) = self.ai.resolved_api_key();
         let _ = tx.send(AgentCommand::Turn {
             id,
             server: self.ai.endpoint(),
             model: self.ai.model.trim().to_string(),
-            api_key: self.ai.api_key.clone(),
+            api_key,
             stream: self.ai.streaming,
             num_ctx: Some(ctx),
             ollama_native,
             think: self.ai.think,
+            tuning: ai_tuning(&self.ai),
             history,
             prompt: model_prompt,
         });
@@ -1139,16 +1141,14 @@ impl App {
     fn slash_provider(&mut self, args: &str) {
         let token = args.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
         if !token.is_empty() {
-            match token.as_str() {
-                "ollama" => self.ai.provider = crate::settings::AiProvider::Ollama,
-                "openai" | "lmstudio" | "lm-studio" => {
-                    self.ai.provider = crate::settings::AiProvider::Openai
-                }
-                _ => {
-                    self.push_line(false, "Usage: /provider [ollama|openai]".into());
-                    return;
-                }
-            }
+            let Some(provider) = crate::settings::AiProvider::parse(&token) else {
+                self.push_line(
+                    false,
+                    "Usage: /provider [ollama|lmstudio|openai-compatible|openrouter]".into(),
+                );
+                return;
+            };
+            self.ai.switch_provider(provider);
             self.persist_ai_prefs();
         }
         self.push_line(
@@ -1202,7 +1202,7 @@ impl App {
         } else {
             self.ai.model.clone()
         };
-        let listed = fetch_model_names(&self.ai.endpoint(), self.ai.provider);
+        let listed = fetch_model_names(&self.ai);
         if listed.is_empty() {
             self.push_line(
                 false,
@@ -1319,15 +1319,53 @@ fn read_attachment(path: &std::path::Path, cap: usize) -> Result<(String, bool),
     Ok((body, truncated))
 }
 
-fn fetch_model_names(endpoint: &str, provider: crate::settings::AiProvider) -> Vec<String> {
-    let endpoint = endpoint.trim().trim_end_matches('/').to_string();
-    let url = match provider {
+/// Max tokens, OpenRouter headers, timeout, and retries for one turn.
+pub(crate) fn ai_tuning(ai: &crate::settings::AiPrefs) -> crate::agent::Tuning {
+    crate::agent::Tuning {
+        max_tokens: ai.resolved_max_tokens(),
+        headers: ai.extra_headers(),
+        timeout: Some(std::time::Duration::from_secs(u64::from(
+            ai.resolved_timeout(),
+        ))),
+        retries: ai.resolved_retries(),
+        ..crate::agent::Tuning::default()
+    }
+}
+
+/// `/api/tags` for Ollama, `/models` for every OpenAI-compatible server.
+pub(crate) fn models_url(endpoint: &str, provider: crate::settings::AiProvider) -> String {
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    match provider {
         crate::settings::AiProvider::Ollama => {
-            let base = endpoint.strip_suffix("/v1").unwrap_or(&endpoint);
+            let base = endpoint.strip_suffix("/v1").unwrap_or(endpoint);
             format!("{}/api/tags", base.trim_end_matches('/'))
         }
-        crate::settings::AiProvider::Openai => format!("{endpoint}/models"),
+        _ => format!("{endpoint}/models"),
+    }
+}
+
+/// Model ids from an Ollama `/api/tags` (`models[].name`) or an OpenAI `/models` (`data[].id`) body.
+pub(crate) fn parse_model_names(text: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
     };
+    let mut names = Vec::new();
+    for (list, field) in [("models", "name"), ("data", "id")] {
+        if let Some(arr) = value.get(list).and_then(|v| v.as_array()) {
+            for m in arr {
+                if let Some(name) = m.get(field).and_then(|v| v.as_str()) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+fn fetch_model_names(ai: &crate::settings::AiPrefs) -> Vec<String> {
+    let url = models_url(&ai.endpoint(), ai.provider);
+    let (api_key, _) = ai.resolved_api_key();
+    let headers = ai.extra_headers();
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1338,24 +1376,15 @@ fn fetch_model_names(endpoint: &str, provider: crate::settings::AiProvider) -> V
                 .timeout(std::time::Duration::from_secs(4))
                 .build()
                 .ok()?;
-            let text = client.get(&url).send().await.ok()?.text().await.ok()?;
-            let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-            let mut names = Vec::new();
-            if let Some(arr) = value.get("models").and_then(|v| v.as_array()) {
-                for m in arr {
-                    if let Some(name) = m.get("name").and_then(|v| v.as_str()) {
-                        names.push(name.to_string());
-                    }
-                }
+            let mut request = client.get(&url);
+            if !api_key.is_empty() {
+                request = request.header("Authorization", format!("Bearer {api_key}"));
             }
-            if let Some(arr) = value.get("data").and_then(|v| v.as_array()) {
-                for m in arr {
-                    if let Some(name) = m.get("id").and_then(|v| v.as_str()) {
-                        names.push(name.to_string());
-                    }
-                }
+            for (name, value) in &headers {
+                request = request.header(name.as_str(), value.as_str());
             }
-            Some(names)
+            let text = request.send().await.ok()?.text().await.ok()?;
+            Some(parse_model_names(&text))
         })
     });
     handle.join().ok().flatten().unwrap_or_default()
@@ -1806,4 +1835,47 @@ fn prompt_row_for(rows: &[(usize, usize)], cursor: usize, len: usize) -> usize {
             }
         })
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+    use crate::settings::{AiPrefs, AiProvider};
+
+    #[test]
+    fn local_providers_keep_the_tuning_they_had_before() {
+        for provider in [AiProvider::Ollama, AiProvider::LmStudio] {
+            let mut ai = AiPrefs::default();
+            ai.switch_provider(provider);
+            let tuning = ai_tuning(&ai);
+            assert_eq!(tuning.max_tokens, Some(16384), "{provider:?}");
+            assert!(tuning.headers.is_empty(), "{provider:?}");
+            // Same as the worker's client-wide limit, so nothing changes by default.
+            assert_eq!(
+                tuning.timeout,
+                Some(std::time::Duration::from_secs(60 * 30))
+            );
+        }
+    }
+
+    #[test]
+    fn models_url_uses_api_tags_only_for_ollama() {
+        assert_eq!(
+            models_url("http://127.0.0.1:11434/v1/", AiProvider::Ollama),
+            "http://127.0.0.1:11434/api/tags"
+        );
+        assert_eq!(
+            models_url("https://openrouter.ai/api/v1", AiProvider::OpenRouter),
+            "https://openrouter.ai/api/v1/models"
+        );
+        assert_eq!(
+            parse_model_names(r#"{"data":[{"id":"openai/gpt-4o"},{"id":"x/y"}]}"#),
+            ["openai/gpt-4o", "x/y"]
+        );
+        assert_eq!(
+            parse_model_names(r#"{"models":[{"name":"qwen3:8b"}]}"#),
+            ["qwen3:8b"]
+        );
+        assert!(parse_model_names("not json").is_empty());
+    }
 }

@@ -49,6 +49,18 @@ pub enum SettingId {
     AiStreaming,
     /// Prompt context window size in tokens (Ollama `num_ctx`). `auto` uses 16384.
     AiContextSize,
+    /// Ollama `think: true` when the model supports it.
+    AiThink,
+    /// `max_tokens` cap. Blank keeps the provider's default.
+    AiMaxTokens,
+    /// Seconds one request may take.
+    AiTimeout,
+    /// Extra attempts after a 408, 429, or 5xx answer.
+    AiRetries,
+    /// OpenRouter `X-Title`.
+    AiAppName,
+    /// OpenRouter `HTTP-Referer`.
+    AiReferer,
 }
 
 /// How a new line is ended. `Auto` keeps the ending detected in the file.
@@ -233,27 +245,62 @@ fn on_off(on: bool) -> String {
     if on { "on" } else { "off" }.to_string()
 }
 
-/// Which local server the assistant talks to. Both speak `/v1/chat/completions`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+/// Which server the assistant talks to. Ollama uses its native `/api/chat`; the
+/// rest speak OpenAI-compatible `/v1/chat/completions`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum AiProvider {
     #[default]
+    #[serde(rename = "ollama")]
     Ollama,
-    Openai,
+    /// Older files wrote `"openai"` for LM Studio, so that still loads here.
+    #[serde(rename = "lmstudio", alias = "openai")]
+    LmStudio,
+    /// Any server that speaks `/v1/chat/completions` (OpenAI, vLLM, llama.cpp, Groq, ...).
+    #[serde(rename = "openai-compatible")]
+    OpenaiCompatible,
+    #[serde(rename = "openrouter")]
+    OpenRouter,
 }
 
 impl AiProvider {
+    /// Picker order in Settings → AI.
+    pub const ALL: [Self; 4] = [
+        Self::Ollama,
+        Self::LmStudio,
+        Self::OpenaiCompatible,
+        Self::OpenRouter,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Ollama => "Ollama",
-            Self::Openai => "OpenAI-compatible / LM Studio",
+            Self::LmStudio => "LM Studio",
+            Self::OpenaiCompatible => "OpenAI-compatible",
+            Self::OpenRouter => "OpenRouter",
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ollama => "ollama",
-            Self::Openai => "openai",
+            Self::LmStudio => "lmstudio",
+            Self::OpenaiCompatible => "openai-compatible",
+            Self::OpenRouter => "openrouter",
+        }
+    }
+
+    /// A name typed after `/provider`, or a token saved by an older build.
+    pub fn parse(token: &str) -> Option<Self> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "ollama" => Some(Self::Ollama),
+            "lmstudio" | "lm-studio" | "lm_studio" => Some(Self::LmStudio),
+            "openai-compatible" | "openai" | "compatible" | "custom" => {
+                Some(Self::OpenaiCompatible)
+            }
+            "openrouter" | "open-router" => Some(Self::OpenRouter),
+            _ => None,
         }
     }
 
@@ -261,26 +308,76 @@ impl AiProvider {
     pub fn default_server(self) -> &'static str {
         match self {
             Self::Ollama => "http://127.0.0.1:11434/v1",
-            Self::Openai => "http://127.0.0.1:1234/v1",
+            Self::LmStudio => "http://127.0.0.1:1234/v1",
+            Self::OpenaiCompatible => "https://api.openai.com/v1",
+            Self::OpenRouter => "https://openrouter.ai/api/v1",
         }
+    }
+
+    /// Environment variable that wins over the key saved in `settings.json`.
+    pub fn key_env(self) -> Option<&'static str> {
+        match self {
+            Self::Ollama | Self::LmStudio => None,
+            Self::OpenaiCompatible => Some("OPENAI_API_KEY"),
+            Self::OpenRouter => Some("OPENROUTER_API_KEY"),
+        }
+    }
+
+    /// A server on this machine. These keep the legacy 16384-token cap by default.
+    pub fn is_local(self) -> bool {
+        matches!(self, Self::Ollama | Self::LmStudio)
     }
 
     fn index(self) -> usize {
-        match self {
-            Self::Ollama => 0,
-            Self::Openai => 1,
-        }
+        Self::ALL
+            .iter()
+            .position(|provider| *provider == self)
+            .unwrap_or(0)
     }
 
     fn from_index(index: usize) -> Self {
-        match index {
-            1 => Self::Openai,
-            _ => Self::Ollama,
-        }
+        Self::ALL.get(index).copied().unwrap_or_default()
     }
 }
 
+/// Server, model, and key kept for a provider while another one is selected.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderProfile {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub server: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key: String,
+}
+
+impl ProviderProfile {
+    fn is_empty(&self) -> bool {
+        self.server.is_empty() && self.model.is_empty() && self.api_key.is_empty()
+    }
+}
+
+/// Where the key a request will send comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeySource {
+    None,
+    Saved,
+    /// The provider's environment variable, which wins over the saved key.
+    Env(&'static str),
+}
+
+pub const DEFAULT_TIMEOUT_SECS: u32 = 1800;
+pub const TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 10..=7200;
+pub const DEFAULT_RETRIES: u32 = 3;
+pub const MAX_RETRIES: u32 = 10;
+/// Cap sent to Ollama and LM Studio when Max tokens is blank, as before this setting.
+pub const LOCAL_MAX_TOKENS: u32 = 16384;
+pub const MAX_TOKENS_LIMIT: u32 = 1_000_000;
+
 /// Assistant choices stored in `settings.json` under `ai`.
+///
+/// `server`, `model`, and `api_key` belong to the selected `provider`. The other
+/// providers keep theirs in `profiles` and get them back when they are selected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiPrefs {
     #[serde(default = "enabled")]
@@ -292,7 +389,8 @@ pub struct AiPrefs {
     pub server: String,
     #[serde(default)]
     pub model: String,
-    /// Optional Bearer token. Empty means no Authorization header.
+    /// Optional Bearer token. Empty means no Authorization header, unless the
+    /// provider's environment variable is set.
     #[serde(default)]
     pub api_key: String,
     /// When true, apply_edit / create_file / save run without asking.
@@ -308,10 +406,45 @@ pub struct AiPrefs {
     /// Prefer Ollama `think: true` when the model supports it.
     #[serde(default = "enabled")]
     pub think: bool,
+    /// Blank: 16384 for Ollama / LM Studio, left out for cloud providers.
+    /// `off` leaves it out everywhere. A number caps every answer.
+    #[serde(default)]
+    pub max_tokens: String,
+    /// Seconds one request may take, streaming included.
+    #[serde(default = "default_timeout")]
+    pub request_timeout: u32,
+    /// Extra attempts after a 408, 429, or 5xx answer.
+    #[serde(default = "default_retries")]
+    pub retries: u32,
+    /// OpenRouter `X-Title`: the app name shown on openrouter.ai. Empty sends none.
+    #[serde(default = "default_app_name")]
+    pub openrouter_app_name: String,
+    /// OpenRouter `HTTP-Referer`: the app's site. Empty sends none.
+    #[serde(default = "default_referer")]
+    pub openrouter_referer: String,
+    /// Server, model, and key of the providers that are not selected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<AiProvider, ProviderProfile>,
 }
 
 fn default_context_size() -> String {
     "16384".to_string()
+}
+
+fn default_timeout() -> u32 {
+    DEFAULT_TIMEOUT_SECS
+}
+
+fn default_retries() -> u32 {
+    DEFAULT_RETRIES
+}
+
+pub fn default_app_name() -> String {
+    "duckx-code".to_string()
+}
+
+pub fn default_referer() -> String {
+    "https://github.com/Manuree/duckx-code".to_string()
 }
 
 impl Default for AiPrefs {
@@ -326,13 +459,30 @@ impl Default for AiPrefs {
             streaming: true,
             context_size: default_context_size(),
             think: true,
+            max_tokens: String::new(),
+            request_timeout: DEFAULT_TIMEOUT_SECS,
+            retries: DEFAULT_RETRIES,
+            openrouter_app_name: default_app_name(),
+            openrouter_referer: default_referer(),
+            profiles: BTreeMap::new(),
         }
     }
 }
 
 impl AiPrefs {
     pub fn is_text(id: SettingId) -> bool {
-        matches!(id, SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize)
+        matches!(
+            id,
+            SettingId::AiServer
+                | SettingId::AiModel
+                | SettingId::AiApiKey
+                | SettingId::AiContextSize
+                | SettingId::AiMaxTokens
+                | SettingId::AiTimeout
+                | SettingId::AiRetries
+                | SettingId::AiAppName
+                | SettingId::AiReferer
+        )
     }
 
     /// URL the assistant posts to, including `/v1`.
@@ -345,12 +495,114 @@ impl AiPrefs {
         }
     }
 
+    /// Selects `next` and swaps in the server, model, and key it had last time.
+    /// The provider being left keeps its own in `profiles`.
+    pub fn switch_provider(&mut self, next: AiProvider) {
+        if next == self.provider {
+            return;
+        }
+        let leaving = ProviderProfile {
+            server: std::mem::take(&mut self.server),
+            model: std::mem::take(&mut self.model),
+            api_key: std::mem::take(&mut self.api_key),
+        };
+        if leaving.is_empty() {
+            self.profiles.remove(&self.provider);
+        } else {
+            self.profiles.insert(self.provider, leaving);
+        }
+        let arriving = self.profiles.remove(&next).unwrap_or_default();
+        self.server = arriving.server;
+        self.model = arriving.model;
+        self.api_key = arriving.api_key;
+        self.provider = next;
+    }
+
+    /// The key a request sends and where it came from. A set environment variable wins.
+    pub fn resolved_api_key(&self) -> (String, KeySource) {
+        self.resolved_api_key_with(|name| std::env::var(name).ok())
+    }
+
+    pub fn resolved_api_key_with(
+        &self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> (String, KeySource) {
+        if let Some(name) = self.provider.key_env()
+            && let Some(value) = env(name).filter(|value| !value.trim().is_empty())
+        {
+            return (value.trim().to_string(), KeySource::Env(name));
+        }
+        let saved = self.api_key.trim();
+        if saved.is_empty() {
+            (String::new(), KeySource::None)
+        } else {
+            (saved.to_string(), KeySource::Saved)
+        }
+    }
+
+    /// `max_tokens` / `num_predict` for this provider. `None` leaves it out.
+    pub fn resolved_max_tokens(&self) -> Option<u32> {
+        let raw = self.max_tokens.trim();
+        if raw.is_empty() {
+            return self.provider.is_local().then_some(LOCAL_MAX_TOKENS);
+        }
+        if matches!(raw.to_ascii_lowercase().as_str(), "off" | "none" | "0") {
+            return None;
+        }
+        match raw.parse::<u32>() {
+            Ok(n) if (1..=MAX_TOKENS_LIMIT).contains(&n) => Some(n),
+            _ => self.provider.is_local().then_some(LOCAL_MAX_TOKENS),
+        }
+    }
+
+    pub fn resolved_timeout(&self) -> u32 {
+        if TIMEOUT_RANGE.contains(&self.request_timeout) {
+            self.request_timeout
+        } else {
+            DEFAULT_TIMEOUT_SECS
+        }
+    }
+
+    pub fn resolved_retries(&self) -> u32 {
+        self.retries.min(MAX_RETRIES)
+    }
+
+    /// OpenRouter's attribution headers. Other providers get none.
+    pub fn extra_headers(&self) -> Vec<(String, String)> {
+        if self.provider != AiProvider::OpenRouter {
+            return Vec::new();
+        }
+        let mut headers = Vec::new();
+        let referer = self.openrouter_referer.trim();
+        if !referer.is_empty() {
+            headers.push(("HTTP-Referer".to_string(), referer.to_string()));
+        }
+        let title = self.openrouter_app_name.trim();
+        if !title.is_empty() {
+            headers.push(("X-Title".to_string(), title.to_string()));
+        }
+        headers
+    }
+
+    /// Context size and Thinking only reach Ollama's native API.
+    pub fn applies(&self, id: SettingId) -> bool {
+        match id {
+            SettingId::AiContextSize | SettingId::AiThink => self.provider == AiProvider::Ollama,
+            SettingId::AiAppName | SettingId::AiReferer => self.provider == AiProvider::OpenRouter,
+            _ => true,
+        }
+    }
+
     pub fn choice_names(id: SettingId) -> Vec<String> {
         match id {
-            SettingId::AiEnabled | SettingId::AiAutoApprove | SettingId::AiStreaming => {
-                vec!["On".into(), "Off".into()]
-            }
-            SettingId::AiProvider => vec![AiProvider::Ollama.label().into(), AiProvider::Openai.label().into()],
+            SettingId::AiEnabled
+            | SettingId::AiAutoApprove
+            | SettingId::AiStreaming
+            | SettingId::AiThink => vec!["On".into(), "Off".into()],
+            SettingId::AiProvider => AiProvider::ALL
+                .iter()
+                .map(|provider| provider.label().to_string())
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -360,6 +612,7 @@ impl AiPrefs {
             SettingId::AiEnabled => usize::from(!self.enabled),
             SettingId::AiAutoApprove => usize::from(!self.auto_approve),
             SettingId::AiStreaming => usize::from(!self.streaming),
+            SettingId::AiThink => usize::from(!self.think),
             SettingId::AiProvider => self.provider.index(),
             _ => 0,
         }
@@ -370,6 +623,7 @@ impl AiPrefs {
             SettingId::AiEnabled => on_off(self.enabled),
             SettingId::AiAutoApprove => on_off(self.auto_approve),
             SettingId::AiStreaming => on_off(self.streaming),
+            SettingId::AiThink => on_off(self.think),
             SettingId::AiProvider => self.provider.as_str().to_string(),
             _ => String::new(),
         }
@@ -387,7 +641,8 @@ impl AiPrefs {
             SettingId::AiEnabled => self.enabled = index == 0,
             SettingId::AiAutoApprove => self.auto_approve = index == 0,
             SettingId::AiStreaming => self.streaming = index == 0,
-            SettingId::AiProvider => self.provider = AiProvider::from_index(index),
+            SettingId::AiThink => self.think = index == 0,
+            SettingId::AiProvider => self.switch_provider(AiProvider::from_index(index)),
             _ => {}
         }
     }
@@ -397,12 +652,9 @@ impl AiPrefs {
             SettingId::AiEnabled => self.enabled = token != "off",
             SettingId::AiAutoApprove => self.auto_approve = token != "off",
             SettingId::AiStreaming => self.streaming = token != "off",
+            SettingId::AiThink => self.think = token != "off",
             SettingId::AiProvider => {
-                self.provider = if token == "openai" {
-                    AiProvider::Openai
-                } else {
-                    AiProvider::Ollama
-                };
+                self.switch_provider(AiProvider::parse(token).unwrap_or_default());
             }
             _ => {}
         }
@@ -413,11 +665,17 @@ impl AiPrefs {
             SettingId::AiEnabled => self.enabled = true,
             SettingId::AiAutoApprove => self.auto_approve = false,
             SettingId::AiStreaming => self.streaming = true,
-            SettingId::AiProvider => self.provider = AiProvider::Ollama,
+            SettingId::AiThink => self.think = true,
+            SettingId::AiProvider => self.switch_provider(AiProvider::Ollama),
             SettingId::AiServer => self.server.clear(),
             SettingId::AiModel => self.model.clear(),
             SettingId::AiApiKey => self.api_key.clear(),
             SettingId::AiContextSize => self.context_size = default_context_size(),
+            SettingId::AiMaxTokens => self.max_tokens.clear(),
+            SettingId::AiTimeout => self.request_timeout = DEFAULT_TIMEOUT_SECS,
+            SettingId::AiRetries => self.retries = DEFAULT_RETRIES,
+            SettingId::AiAppName => self.openrouter_app_name = default_app_name(),
+            SettingId::AiReferer => self.openrouter_referer = default_referer(),
             _ => {}
         }
     }
@@ -1057,5 +1315,143 @@ mod tests {
             Some("ctrl+shift+s")
         );
         assert!(!saved.contains("\"keybindings\": {}"));
+    }
+
+    #[test]
+    fn an_older_openai_provider_loads_as_lm_studio_and_keeps_its_fields() {
+        let text = r#"{"ai":{"provider":"openai","server":"http://10.0.0.5:1234/v1","model":"qwen","api_key":"k","think":false}}"#;
+        let file: SettingsFile = serde_json::from_str(text).unwrap();
+        assert_eq!(file.ai.provider, AiProvider::LmStudio);
+        assert_eq!(file.ai.server, "http://10.0.0.5:1234/v1");
+        assert_eq!(file.ai.model, "qwen");
+        assert_eq!(file.ai.api_key, "k");
+        assert!(!file.ai.think);
+        assert_eq!(file.ai.max_tokens, "");
+        assert_eq!(file.ai.request_timeout, DEFAULT_TIMEOUT_SECS);
+        assert_eq!(file.ai.retries, DEFAULT_RETRIES);
+        assert_eq!(file.ai.openrouter_app_name, "duckx-code");
+        assert!(file.ai.profiles.is_empty());
+        let saved = file.to_pretty();
+        assert!(saved.contains("\"provider\": \"lmstudio\""), "{saved}");
+        assert!(!saved.contains("\"profiles\""), "{saved}");
+        let back: SettingsFile = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, file);
+    }
+
+    #[test]
+    fn every_provider_round_trips_through_settings_json() {
+        for provider in AiProvider::ALL {
+            let mut ai = AiPrefs::default();
+            ai.switch_provider(provider);
+            let text = serde_json::to_string(&ai).unwrap();
+            let back: AiPrefs = serde_json::from_str(&text).unwrap();
+            assert_eq!(back.provider, provider, "{text}");
+            assert_eq!(AiProvider::parse(provider.as_str()), Some(provider));
+            assert_eq!(AiProvider::from_index(provider.index()), provider);
+        }
+        assert_eq!(AiPrefs::choice_names(SettingId::AiProvider).len(), 4);
+    }
+
+    #[test]
+    fn switching_providers_keeps_each_ones_server_model_and_key() {
+        let mut ai = AiPrefs::default();
+        ai.model = "qwen2.5-coder".into();
+        ai.switch_provider(AiProvider::OpenRouter);
+        assert_eq!(ai.model, "");
+        assert_eq!(ai.endpoint(), "https://openrouter.ai/api/v1");
+        ai.model = "anthropic/claude-sonnet-4".into();
+        ai.api_key = "sk-or".into();
+        ai.switch_provider(AiProvider::Ollama);
+        assert_eq!(ai.model, "qwen2.5-coder");
+        assert_eq!(ai.api_key, "");
+        assert_eq!(ai.endpoint(), "http://127.0.0.1:11434/v1");
+        let text = serde_json::to_string(&ai).unwrap();
+        let mut back: AiPrefs = serde_json::from_str(&text).unwrap();
+        back.switch_provider(AiProvider::OpenRouter);
+        assert_eq!(back.model, "anthropic/claude-sonnet-4");
+        assert_eq!(back.api_key, "sk-or");
+        assert!(!back.profiles.contains_key(&AiProvider::OpenRouter));
+        assert!(back.profiles.contains_key(&AiProvider::Ollama));
+    }
+
+    #[test]
+    fn the_provider_environment_variable_wins_over_the_saved_key() {
+        let mut ai = AiPrefs::default();
+        ai.switch_provider(AiProvider::OpenRouter);
+        let env = |name: &str| (name == "OPENROUTER_API_KEY").then(|| " sk-env ".to_string());
+        let none = |_: &str| None;
+        assert_eq!(
+            ai.resolved_api_key_with(none),
+            (String::new(), KeySource::None)
+        );
+        ai.api_key = "sk-saved".into();
+        assert_eq!(
+            ai.resolved_api_key_with(none),
+            ("sk-saved".into(), KeySource::Saved)
+        );
+        assert_eq!(
+            ai.resolved_api_key_with(env),
+            ("sk-env".into(), KeySource::Env("OPENROUTER_API_KEY"))
+        );
+        ai.switch_provider(AiProvider::OpenaiCompatible);
+        assert_eq!(
+            ai.resolved_api_key_with(env),
+            (String::new(), KeySource::None)
+        );
+        ai.switch_provider(AiProvider::Ollama);
+        let all = |_: &str| Some("x".to_string());
+        assert_eq!(
+            ai.resolved_api_key_with(all),
+            (String::new(), KeySource::None)
+        );
+    }
+
+    #[test]
+    fn max_tokens_blank_keeps_the_local_cap_and_omits_it_for_cloud() {
+        let mut ai = AiPrefs::default();
+        assert_eq!(ai.resolved_max_tokens(), Some(LOCAL_MAX_TOKENS));
+        ai.switch_provider(AiProvider::LmStudio);
+        assert_eq!(ai.resolved_max_tokens(), Some(LOCAL_MAX_TOKENS));
+        ai.switch_provider(AiProvider::OpenRouter);
+        assert_eq!(ai.resolved_max_tokens(), None);
+        ai.max_tokens = "4096".into();
+        assert_eq!(ai.resolved_max_tokens(), Some(4096));
+        ai.switch_provider(AiProvider::Ollama);
+        ai.max_tokens = "off".into();
+        assert_eq!(ai.resolved_max_tokens(), None);
+        ai.max_tokens = "lots".into();
+        assert_eq!(ai.resolved_max_tokens(), Some(LOCAL_MAX_TOKENS));
+    }
+
+    #[test]
+    fn only_openrouter_gets_attribution_headers() {
+        let mut ai = AiPrefs::default();
+        for provider in [
+            AiProvider::Ollama,
+            AiProvider::LmStudio,
+            AiProvider::OpenaiCompatible,
+        ] {
+            ai.switch_provider(provider);
+            assert!(ai.extra_headers().is_empty(), "{provider:?}");
+        }
+        ai.switch_provider(AiProvider::OpenRouter);
+        assert_eq!(
+            ai.extra_headers(),
+            vec![
+                ("HTTP-Referer".to_string(), default_referer()),
+                ("X-Title".to_string(), "duckx-code".to_string()),
+            ]
+        );
+        ai.openrouter_referer.clear();
+        assert_eq!(ai.extra_headers().len(), 1);
+    }
+
+    #[test]
+    fn out_of_range_timeout_and_retries_fall_back() {
+        let mut ai = AiPrefs::default();
+        ai.request_timeout = 1;
+        ai.retries = 99;
+        assert_eq!(ai.resolved_timeout(), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(ai.resolved_retries(), MAX_RETRIES);
     }
 }
