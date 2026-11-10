@@ -757,6 +757,22 @@ impl Buffer {
         self.apply_edit(start, end, replacement, EditKind::Other);
     }
 
+    /// Replaces each char range `[start, end)` with `replacement` as one undo step.
+    /// Ranges must be sorted and must not overlap. The selection is not moved to the
+    /// edit: it is carried through it, so someone typing elsewhere keeps their place.
+    pub fn replace_spans_in_place(&mut self, spans: &[(usize, usize)], replacement: &str) {
+        let len = self.rope.len_chars();
+        let edits = spans
+            .iter()
+            .map(|&(start, end)| {
+                let start = start.min(len);
+                let end = end.min(len).max(start);
+                (start, end - start, replacement.to_string())
+            })
+            .collect();
+        self.apply_batch_cursor(edits, None, false);
+    }
+
     /// Replaces every non-overlapping match as one undo step.
     /// Text inserted by a replacement is not searched again.
     /// The cursor is left at the start of the first replacement.

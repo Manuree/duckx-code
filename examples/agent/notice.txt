@@ -1,0 +1,7 @@
+# Close the assistant and keep working. The answer still finds you.
+# Press F6 and ask a short question. Then press Esc before the answer comes.
+# The panel hides. The assistant keeps working.
+# When the answer arrives, a note pops up at the bottom right,
+# just above the status bar. It shows the first line, and F6.
+# It stays for 6 seconds.
+# Press F6 to read the whole answer. The note goes away.

@@ -20,12 +20,27 @@ const CHARS_PER_TOKEN: f64 = 3.5;
 const MEMORY_STORE: usize = 1_000_000;
 /// Longest summary kept, in characters.
 const SUMMARY_CLIP: usize = 12_000;
+/// With auto compact on, a tool result is stored up to this many characters.
+const TOOL_RESULT_STORE: usize = 6_000;
+/// The newest tool results sent in full; older ones are cut to [`MEMORY_TOOL_CLIP`].
+const KEEP_TOOL_RESULTS: usize = 4;
+/// Entries `/changes` remembers.
+const MAX_CHANGES: usize = 100;
+/// How long an edit waits for the language server's diagnostics.
+const DIAGNOSTICS_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+/// How long a background load or a language server query may take.
+const TOOL_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Lines of context returned around an edit.
+const EDIT_CONTEXT: usize = 2;
+/// Most lines an edit returns.
+const EDIT_ECHO_LINES: usize = 30;
 
 impl App {
     /// Next frame of the wait spinner. Idle turns stay on the current frame.
     pub fn advance_agent_spin(&mut self) {
         if self.agent.busy {
             self.agent.spin = self.agent.spin.wrapping_add(1);
+            self.expire_agent_wait();
         }
     }
 
@@ -41,7 +56,8 @@ impl App {
                 if !matches!(self.agent.context_used, Some((_, true))) {
                     self.agent.context_used = Some((self.estimate_context(""), false));
                 }
-                self.push_line(false, text);
+                self.push_line(false, text.clone());
+                self.note_folded_reply(&text, false);
                 self.remember_working_target();
                 self.agent.busy = false;
                 self.agent.busy_started = None;
@@ -79,6 +95,7 @@ impl App {
                     self.agent.memory.clear();
                 }
                 self.push_line(false, text.clone());
+                self.note_folded_reply(&text, true);
                 self.agent.busy = false;
                 self.agent.busy_started = None;
                 self.agent.status = clip(&text, 80);
@@ -183,6 +200,42 @@ impl App {
         self.end_file_mode();
         if self.agent.status.is_empty() {
             self.agent.status = "ready".to_string();
+        }
+        self.snackbar = None;
+    }
+
+    /// A reply that lands while the panel is hidden. The user is looking at the
+    /// editor, so the answer is also shown above the status bar.
+    fn note_folded_reply(&mut self, text: &str, error: bool) {
+        if self.focus() == crate::action::Focus::Agent {
+            return;
+        }
+        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let line = clip(&line, 80);
+        self.snackbar = Some(super::Snackbar {
+            text: if line.is_empty() {
+                "The assistant replied.".to_string()
+            } else {
+                line
+            },
+            error,
+            until: std::time::Instant::now() + std::time::Duration::from_secs(6),
+        });
+    }
+
+    /// When the notice should leave the screen. The main loop sleeps until then.
+    pub fn snackbar_deadline(&self) -> Option<std::time::Instant> {
+        self.snackbar.as_ref().map(|bar| bar.until)
+    }
+
+    /// Drops the notice once its time is up.
+    pub fn expire_snackbar(&mut self) {
+        if self
+            .snackbar
+            .as_ref()
+            .is_some_and(|bar| bar.until <= std::time::Instant::now())
+        {
+            self.snackbar = None;
         }
     }
 
@@ -340,9 +393,7 @@ impl App {
                 if self.agent.popup.take().is_some() {
                     return;
                 }
-                if self.agent.busy {
-                    self.cancel_agent();
-                }
+                // Esc only leaves the panel. A running turn keeps going.
                 self.agent.focused = false;
             }
             AgentAction::NewChat => self.clear_agent_chat(),
@@ -361,11 +412,19 @@ impl App {
     }
 
     /// Drop transcript + tool memory so the next turn starts fresh.
+    /// A running turn is left alone: only `/stop` ends it.
     pub(super) fn clear_agent_chat(&mut self) {
         if self.agent.busy {
-            self.cancel_agent();
+            self.push_line(
+                false,
+                "The assistant is still working. /stop to stop it.".into(),
+            );
+            return;
         }
         self.agent.pending = None;
+        self.agent.wait = None;
+        self.agent.reads.clear();
+        self.agent.changes.clear();
         self.agent.session_allow.clear();
         self.agent.memory.clear();
         self.agent.summary = None;
@@ -384,7 +443,18 @@ impl App {
 
     pub(crate) fn submit_agent(&mut self) {
         let prompt = self.agent.prompt.to_string();
-        if prompt.trim().is_empty() || self.agent.busy {
+        if prompt.trim().is_empty() {
+            return;
+        }
+        // A running turn ignores a new prompt. /stop is the one command that
+        // still runs, and it is the only way to end that turn.
+        if self.agent.busy {
+            if let Some(parsed) = agent::parse_slash(&prompt) {
+                if parsed.name == "stop" {
+                    self.agent.popup = None;
+                    self.run_slash_command(parsed);
+                }
+            }
             return;
         }
         self.agent.popup = None;
@@ -470,6 +540,11 @@ impl App {
             self.ai.endpoint(),
             self.ai.model.trim().to_string(),
         ));
+        let mode = self.agent.mode;
+        let mut tuning = ai_tuning(&self.ai);
+        tuning.read_only = mode.read_only();
+        let workspace = (!self.explorer.root.as_os_str().is_empty())
+            .then(|| self.explorer.root.clone());
         let _ = tx.send(AgentCommand::Turn {
             id,
             server: self.ai.endpoint(),
@@ -479,12 +554,100 @@ impl App {
             num_ctx: Some(ctx),
             ollama_native,
             think: self.ai.think,
-            tuning: ai_tuning(&self.ai),
+            tuning,
             history,
             prompt: model_prompt,
             summary: self.agent.summary.clone(),
             compact,
+            mode,
+            workspace,
         });
+    }
+
+    /// `/plan`, `/ask`, `/agent`. Naming the mode already on returns to Agent.
+    fn set_agent_mode(&mut self, wanted: agent::AgentMode) {
+        let next = if self.agent.mode == wanted {
+            agent::AgentMode::Agent
+        } else {
+            wanted
+        };
+        self.agent.mode = next;
+        let text = match next {
+            agent::AgentMode::Agent => {
+                "Agent mode: the assistant can edit files again.".to_string()
+            }
+            agent::AgentMode::Plan => {
+                "Plan mode: the assistant reads code and writes a plan. It cannot edit. /agent to carry it out."
+                    .to_string()
+            }
+            agent::AgentMode::Ask => {
+                "Ask mode: the assistant reads code and answers. It cannot edit. /agent to edit again."
+                    .to_string()
+            }
+        };
+        self.push_line(false, text);
+    }
+
+    /// `/changes` lists this chat's edits. `/changes 2` opens the second one.
+    fn slash_changes(&mut self, args: &str) {
+        if self.agent.changes.is_empty() {
+            self.push_line(false, "The assistant has not changed any file in this chat.".into());
+            return;
+        }
+        if let Ok(number) = args.trim().parse::<usize>() {
+            let Some(change) = number
+                .checked_sub(1)
+                .and_then(|index| self.agent.changes.get(index))
+                .cloned()
+            else {
+                self.push_line(
+                    false,
+                    format!("There are {} changes. Try /changes 1.", self.agent.changes.len()),
+                );
+                return;
+            };
+            self.open_at(change.path.clone(), Some(change.line));
+            self.agent.focused = false;
+            return;
+        }
+        let mut lines = vec!["Changes in this chat (Ctrl+Z in a file undoes one):".to_string()];
+        for (index, change) in self.agent.changes.iter().enumerate() {
+            let path = self.agent_relative(&change.path);
+            let unsaved = self
+                .tab_with_path(&change.path)
+                .and_then(|id| self.find_tab(id))
+                .is_some_and(|tab| tab.dirty);
+            let mark = if unsaved { " · unsaved" } else { "" };
+            lines.push(format!(
+                "{}. {path}:{} {}{mark}",
+                index + 1,
+                change.line,
+                change.summary
+            ));
+        }
+        lines.push("/changes 2 opens the second one.".to_string());
+        self.push_line(false, lines.join("\n"));
+    }
+
+    fn agent_relative(&self, path: &std::path::Path) -> String {
+        super::relative_to(&self.explorer.root, path)
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| path.display().to_string())
+    }
+
+    pub(super) fn agent_opened_new_file(&mut self, path: &std::path::Path) {
+        self.note_agent_change(path, 1, "Created the file");
+    }
+
+    fn note_agent_change(&mut self, path: &std::path::Path, line: usize, summary: &str) {
+        self.agent.changes.push(agent::AgentChange {
+            path: path.to_path_buf(),
+            line: line.max(1),
+            summary: summary.to_string(),
+        });
+        if self.agent.changes.len() > MAX_CHANGES {
+            self.agent.changes.remove(0);
+        }
     }
 
     /// `(used, limit)` for the `ctx` counter in the assistant panel's bottom border.
@@ -510,6 +673,7 @@ impl App {
             .map(sanitize_memory_message)
             .collect();
         reconcile_tool_pairs(&mut history);
+        clear_old_tool_results(&mut history, KEEP_TOOL_RESULTS);
         estimate_request(self.agent.summary.as_deref(), &history, prompt)
     }
 
@@ -574,6 +738,7 @@ impl App {
         self.agent.busy = false;
         self.agent.busy_started = None;
         self.agent.pending = None;
+        self.agent.wait = None;
         self.agent.compacting = None;
         self.agent.stream_draft = None;
         self.agent.thinking_draft = None;
@@ -609,6 +774,18 @@ impl App {
 
     fn run_tool(&mut self, turn: u64, call_id: String, name: &str, arguments: &str) {
         let (name, arguments) = agent::normalize_call(name, arguments);
+        let mode = self.agent.mode;
+        if mode.read_only() && !agent::is_read_only_tool(&name) && name != "shell" {
+            self.reply_tool(
+                turn,
+                call_id,
+                format!(
+                    "{name} is not available in {} mode: files cannot change. Reply with text instead.",
+                    mode.label()
+                ),
+            );
+            return;
+        }
         if agent::needs_approval(&name)
             && !self.ai.auto_approve
             && !(agent::session_approvable(&name) && self.agent.session_allow.contains(&name))
@@ -631,8 +808,15 @@ impl App {
             summary,
             choice: ApprovalChoice::Yes,
         });
-        if !self.agent.open || !self.agent.focused {
-            self.focus_agent();
+        // Someone typing in the editor keeps the keys: a `y`, `n`, or `a` they type must
+        // not answer the card. The status line tells them where it waits.
+        if !self.agent.focused
+            && let Some(pending) = &self.agent.pending
+        {
+            self.message = Some(format!(
+                "The assistant asks to run {}. F6 to answer",
+                pending.name
+            ));
         }
     }
 
@@ -745,6 +929,8 @@ impl App {
             ),
             "read_file" => self.tool_read(&value, turn, call_id.clone()),
             "list_dir" => self.tool_list(&value, turn, call_id.clone()),
+            "search" => self.tool_search(&value, turn, call_id.clone()),
+            "lsp" => self.tool_lsp(&value, turn, call_id.clone()),
             "editor_state" => Some(self.tool_state()),
             "diagnostics" => Some(self.tool_diagnostics(&value)),
             "apply_edit" => self.tool_edit(&value, turn, call_id.clone()),
@@ -778,12 +964,21 @@ impl App {
         let start = args.start_line.max(1);
         let end = args.end_line;
         if let Some(tab_id) = self.tab_with_path(&path) {
-            return Some(
-                self.find_tab(tab_id)
-                    .map(|tab| agent::read_lines_rope(tab.buffer.rope(), start, end))
-                    .unwrap_or_else(|| Err("File is not open".to_string()))
-                    .unwrap_or_else(|err| err),
-            );
+            let Some((result, revision)) = self.find_tab(tab_id).map(|tab| {
+                (
+                    agent::read_lines_rope(tab.buffer.rope(), start, end),
+                    tab.buffer.revision(),
+                )
+            }) else {
+                return Some("File is not open".to_string());
+            };
+            return Some(match result {
+                Ok(lines) => {
+                    self.agent.reads.insert(path, agent::ReadMark::Buffer(revision));
+                    lines
+                }
+                Err(err) => err,
+            });
         }
         self.jobs.push(Job::AgentDisk {
             turn,
@@ -847,30 +1042,42 @@ impl App {
         } else {
             return "No file is focused".to_string();
         };
-        let items = self.diagnostics.get(&path);
-        if items.is_empty() {
+        let lines = self.diagnostic_lines(&path, false);
+        if lines.is_empty() {
             return "No diagnostics".to_string();
         }
-        let mut lines = Vec::new();
-        for item in items.iter().take(30) {
-            let line = self
-                .tab_with_path(&path)
-                .and_then(|id| self.find_tab(id))
-                .map(|tab| {
-                    let rope = tab.buffer.rope();
-                    let at = item.start.min(rope.len_bytes());
-                    rope.byte_to_line(at) + 1
-                });
-            let where_ = line
-                .map(|line| line.to_string())
-                .unwrap_or_else(|| "?:?".to_string());
-            lines.push(format!(
-                "{where_} {} {}",
-                item.severity.letter(),
-                clip(&item.message, 160)
-            ));
-        }
         lines.join("\n")
+    }
+
+    /// `line severity message` for up to 30 diagnostics. `serious` keeps only
+    /// errors and warnings.
+    fn diagnostic_lines(&self, path: &std::path::Path, serious: bool) -> Vec<String> {
+        let items = self.diagnostics.get(path);
+        let rope = self
+            .tab_with_path(path)
+            .and_then(|id| self.find_tab(id))
+            .map(|tab| tab.buffer.rope());
+        items
+            .iter()
+            .filter(|item| {
+                !serious
+                    || matches!(
+                        item.severity,
+                        crate::lsp::Severity::Error | crate::lsp::Severity::Warning
+                    )
+            })
+            .take(30)
+            .map(|item| {
+                let where_ = rope
+                    .map(|rope| (rope.byte_to_line(item.start.min(rope.len_bytes())) + 1).to_string())
+                    .unwrap_or_else(|| "?:?".to_string());
+                format!(
+                    "{where_} {} {}",
+                    item.severity.letter(),
+                    clip(&item.message, 160)
+                )
+            })
+            .collect()
     }
 
     fn tool_edit(
@@ -891,6 +1098,7 @@ impl App {
             FileEdit::Snippet {
                 find,
                 replace: args.replace.unwrap_or_default(),
+                all: args.replace_all,
             }
         } else if args.start_line > 0 {
             FileEdit::Lines {
@@ -902,34 +1110,123 @@ impl App {
             return Some("apply_edit needs a line range or find".to_string());
         };
         if let Some(tab_id) = self.tab_with_path(&path) {
-            let result = match self.find_tab_mut(tab_id) {
-                Some(tab) => {
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        agent::apply_to_buffer(&mut tab.buffer, &edit)
-                    })) {
-                        Ok(inner) => inner,
-                        Err(payload) => Err(format!(
-                            "Edit panicked: {}",
-                            crate::utf8::panic_message(payload)
-                        )),
-                    }
-                }
-                None => Err("File is not open".to_string()),
-            };
-            return Some(match result {
-                Ok(summary) => {
-                    self.note_tab_change(tab_id);
-                    summary
-                }
-                Err(err) => err,
-            });
+            return self.edit_open_tab(turn, call_id, tab_id, &path, &edit);
         }
-        self.jobs.push(Job::AgentDisk {
+        if !path.is_file() {
+            return Some(format!(
+                "{} does not exist. Use create_file for a new file.",
+                self.agent_relative(&path)
+            ));
+        }
+        if let Err(err) = agent::check_file_size(&path) {
+            return Some(err);
+        }
+        // A closed file opens in a background tab, so the edit is an undo step and
+        // stays unsaved like any other edit. The visible tab does not change.
+        let tab = self.open_in_background(path.clone());
+        self.agent.wait = Some(agent::ToolWait {
             turn,
             call_id,
-            task: DiskTask::Edit { path, edit },
+            deadline: std::time::Instant::now() + TOOL_WAIT,
+            kind: agent::WaitKind::Load {
+                tab,
+                path,
+                then: agent::AfterLoad::Edit(edit),
+            },
         });
         None
+    }
+
+    /// Applies `edit` to an open tab. `None` when the reply waits for diagnostics.
+    fn edit_open_tab(
+        &mut self,
+        turn: u64,
+        call_id: String,
+        tab_id: crate::layout::TabId,
+        path: &std::path::Path,
+        edit: &FileEdit,
+    ) -> Option<String> {
+        if let FileEdit::Lines { .. } = edit {
+            let Some((revision, fingerprint)) = self
+                .find_tab(tab_id)
+                .map(|tab| (tab.buffer.revision(), tab.buffer.fingerprint()))
+            else {
+                return Some("File is not open".to_string());
+            };
+            match self.agent.reads.get(path) {
+                Some(agent::ReadMark::Buffer(seen)) if *seen == revision => {}
+                Some(agent::ReadMark::Disk(seen)) if *seen == fingerprint => {}
+                Some(_) => {
+                    return Some(format!(
+                        "{} changed since you read it (the user may be typing). read_file those lines again, or use find/replace.",
+                        self.agent_relative(path)
+                    ));
+                }
+                None => {
+                    return Some(format!(
+                        "read_file {} before a line-range edit, or use find/replace.",
+                        self.agent_relative(path)
+                    ));
+                }
+            }
+        }
+        let result = match self.find_tab_mut(tab_id) {
+            Some(tab) => {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    agent::apply_to_buffer(&mut tab.buffer, edit)
+                })) {
+                    Ok(inner) => inner,
+                    Err(payload) => Err(format!(
+                        "Edit panicked: {}",
+                        crate::utf8::panic_message(payload)
+                    )),
+                }
+            }
+            None => Err("File is not open".to_string()),
+        };
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(err) => return Some(err),
+        };
+        self.note_tab_change(tab_id);
+        let (echo, revision) = match self.find_tab(tab_id) {
+            Some(tab) => {
+                let from = outcome.first_line.saturating_sub(EDIT_CONTEXT).max(1);
+                let to = (outcome.last_line + EDIT_CONTEXT).min(from + EDIT_ECHO_LINES - 1);
+                (
+                    agent::read_lines_rope(tab.buffer.rope(), from, to).unwrap_or_default(),
+                    tab.buffer.revision(),
+                )
+            }
+            None => (String::new(), 0),
+        };
+        // The model has seen its own edit: a next line-range edit is not stale.
+        self.agent
+            .reads
+            .insert(path.to_path_buf(), agent::ReadMark::Buffer(revision));
+        self.note_agent_change(path, outcome.first_line, &outcome.summary);
+        let report = format!(
+            "{} in {} (unsaved; Ctrl+Z undoes it). Now:\n{echo}",
+            outcome.summary,
+            self.agent_relative(path)
+        );
+        match self.lsp_doc_version(tab_id) {
+            Some(version) => {
+                self.agent.wait = Some(agent::ToolWait {
+                    turn,
+                    call_id,
+                    deadline: std::time::Instant::now() + DIAGNOSTICS_WAIT,
+                    kind: agent::WaitKind::Diagnostics {
+                        path: path.to_path_buf(),
+                        version,
+                        report,
+                    },
+                });
+                self.agent.status = "checking".to_string();
+                None
+            }
+            None => Some(report),
+        }
     }
 
     fn tool_create(
@@ -969,11 +1266,378 @@ impl App {
         };
         match agent::within(&self.explorer.root, raw) {
             Ok(path) => {
-                self.open_path(path.clone());
-                format!("Opening {}", path.display())
+                let name = self.agent_relative(&path);
+                if self.agent_may_move_view() {
+                    self.open_path(path);
+                    format!("Opening {name}")
+                } else {
+                    if self.tab_with_path(&path).is_none() {
+                        self.open_in_background(path);
+                    }
+                    format!(
+                        "Opened {name} in a background tab. The user is typing in the editor, so the view did not change."
+                    )
+                }
             }
             Err(err) => err,
         }
+    }
+
+    /// The visible tab and the cursor may move only while the user is in the
+    /// assistant panel. Someone typing in the editor keeps their place.
+    pub(super) fn agent_may_move_view(&self) -> bool {
+        self.agent.open && self.agent.focused
+    }
+
+    /// Opens `path` in a new tab behind the visible one, or finds the open tab.
+    /// Neither the visible tab nor the focus changes.
+    pub(super) fn open_in_background(&mut self, path: std::path::PathBuf) -> crate::layout::TabId {
+        let path = agent::strip_verbatim(&path);
+        if let Some(tab) = self.tab_with_path(&path) {
+            return tab;
+        }
+        let pane = self.active;
+        let buffer = self.style_buffer(crate::buffer::Buffer::new());
+        let tab = self.alloc_tab(buffer, None);
+        let id = tab.id;
+        if let Some(editor) = self.editor_mut(pane) {
+            editor.tabs.push(tab);
+        }
+        self.start_load(
+            pane,
+            id,
+            path,
+            crate::jobs::LoadKind::Open {
+                encoding: None,
+                place: None,
+                focus: false,
+            },
+            true,
+        );
+        id
+    }
+
+    fn tool_search(
+        &mut self,
+        value: &serde_json::Value,
+        turn: u64,
+        call_id: String,
+    ) -> Option<String> {
+        let query = value
+            .get("query")
+            .and_then(|query| query.as_str())
+            .unwrap_or("")
+            .to_string();
+        if query.trim().is_empty() {
+            return Some("search needs a query".to_string());
+        }
+        if self.explorer.root.as_os_str().is_empty() {
+            return Some("No workspace folder is open".to_string());
+        }
+        let glob = value
+            .get("glob")
+            .and_then(|glob| glob.as_str())
+            .map(str::to_string);
+        let open = self
+            .editors
+            .iter()
+            .flat_map(|editor| editor.tabs.iter())
+            .filter_map(|tab| Some((tab.path.clone()?, tab.buffer.rope().clone())))
+            .collect();
+        self.jobs.push(Job::AgentDisk {
+            turn,
+            call_id,
+            task: DiskTask::Search {
+                root: self.explorer.root.clone(),
+                query,
+                glob,
+                open,
+            },
+        });
+        None
+    }
+
+    fn tool_lsp(
+        &mut self,
+        value: &serde_json::Value,
+        turn: u64,
+        call_id: String,
+    ) -> Option<String> {
+        let Some(op) = value
+            .get("op")
+            .and_then(|op| op.as_str())
+            .and_then(agent::LspOp::parse)
+        else {
+            return Some("lsp needs op: definition, references, or hover".to_string());
+        };
+        let line = value
+            .get("line")
+            .and_then(loose_number)
+            .filter(|line| *line > 0);
+        let Some(line) = line else {
+            return Some("lsp needs a 1-based line".to_string());
+        };
+        let path = match value.get("path").and_then(|path| path.as_str()) {
+            Some(raw) => match agent::within(&self.explorer.root, raw) {
+                Ok(path) => path,
+                Err(err) => return Some(err),
+            },
+            None => match self.path() {
+                Some(path) => path.to_path_buf(),
+                None => return Some("lsp needs a path".to_string()),
+            },
+        };
+        let query = agent::LspQuery {
+            op,
+            line,
+            column: value
+                .get("column")
+                .and_then(loose_number)
+                .filter(|column| *column > 0),
+            symbol: value
+                .get("symbol")
+                .and_then(|symbol| symbol.as_str())
+                .map(str::trim)
+                .filter(|symbol| !symbol.is_empty())
+                .map(str::to_string),
+        };
+        if let Some(tab) = self.tab_with_path(&path) {
+            return self.send_agent_lsp(turn, call_id, tab, &path, &query);
+        }
+        if !path.is_file() {
+            return Some(format!("{} does not exist", self.agent_relative(&path)));
+        }
+        let tab = self.open_in_background(path.clone());
+        self.agent.wait = Some(agent::ToolWait {
+            turn,
+            call_id,
+            deadline: std::time::Instant::now() + TOOL_WAIT,
+            kind: agent::WaitKind::Load {
+                tab,
+                path,
+                then: agent::AfterLoad::Lsp(query),
+            },
+        });
+        None
+    }
+
+    /// Sends one language server query for an open tab. `None` while it waits.
+    fn send_agent_lsp(
+        &mut self,
+        turn: u64,
+        call_id: String,
+        tab_id: crate::layout::TabId,
+        path: &std::path::Path,
+        query: &agent::LspQuery,
+    ) -> Option<String> {
+        let Some(tab) = self.find_tab(tab_id) else {
+            return Some("File is not open".to_string());
+        };
+        let rope = tab.buffer.rope();
+        let lines = rope.len_lines();
+        if query.line > lines {
+            return Some(format!("Line {} is past the end of the file", query.line));
+        }
+        let line_start = rope.line_to_char(query.line - 1);
+        let text: String = rope.line(query.line - 1).chars().collect();
+        let column = match (&query.symbol, query.column) {
+            (Some(symbol), _) => match symbol_column(&text, symbol) {
+                Some(column) => column,
+                None => {
+                    return Some(format!(
+                        "{symbol} is not on line {}. That line is: {}",
+                        query.line,
+                        clip(text.trim_end(), 160)
+                    ));
+                }
+            },
+            (None, Some(column)) => column - 1,
+            (None, None) => text.chars().take_while(|ch| ch.is_whitespace()).count(),
+        };
+        let line_len = text.trim_end_matches(['\r', '\n']).chars().count();
+        let at_char = line_start + column.min(line_len);
+        let at = rope.char_to_byte(at_char);
+        let kind = match query.op {
+            agent::LspOp::Definition => crate::lsp::protocol::QueryKind::Definition,
+            agent::LspOp::References => crate::lsp::protocol::QueryKind::References,
+            agent::LspOp::Hover => crate::lsp::protocol::QueryKind::Hover,
+        };
+        match self.agent_lsp_query(path, at, kind) {
+            Ok(token) => {
+                self.agent.wait = Some(agent::ToolWait {
+                    turn,
+                    call_id,
+                    deadline: std::time::Instant::now() + TOOL_WAIT,
+                    kind: agent::WaitKind::Lsp {
+                        token,
+                        op: query.op,
+                    },
+                });
+                None
+            }
+            Err(err) => Some(err),
+        }
+    }
+
+    /// The assistant is waiting for the language server reply with `token`.
+    pub(super) fn agent_waits_lsp(&self, token: u64) -> bool {
+        matches!(
+            &self.agent.wait,
+            Some(agent::ToolWait { kind: agent::WaitKind::Lsp { token: wanted, .. }, .. })
+                if *wanted == token
+        )
+    }
+
+    /// A language server reply. `true` when it answered the assistant's query.
+    pub(super) fn agent_lsp_answer(&mut self, token: u64, answer: AgentLspAnswer) -> bool {
+        let Some(wait) = &self.agent.wait else {
+            return false;
+        };
+        let agent::WaitKind::Lsp { token: wanted, op } = wait.kind else {
+            return false;
+        };
+        if wanted != token {
+            return false;
+        }
+        let Some(wait) = self.agent.wait.take() else {
+            return false;
+        };
+        let text = match answer {
+            AgentLspAnswer::Hover(Some(text)) => clip(text.trim(), 2_000),
+            AgentLspAnswer::Hover(None) => "No hover information here".to_string(),
+            AgentLspAnswer::Locations(locations) if locations.is_empty() => match op {
+                agent::LspOp::Definition => "No definition found".to_string(),
+                _ => "No references found".to_string(),
+            },
+            AgentLspAnswer::Locations(locations) => {
+                let total = locations.len();
+                let mut lines: Vec<String> = locations
+                    .iter()
+                    .take(40)
+                    .map(|target| self.target_label(target))
+                    .collect();
+                if total > 40 {
+                    lines.push(format!("… and {} more", total - 40));
+                }
+                lines.join("\n")
+            }
+        };
+        self.reply_tool(wait.turn, wait.call_id, text);
+        true
+    }
+
+    /// Fresh diagnostics arrived for `path` at `version`.
+    pub(super) fn agent_diagnostics_in(&mut self, path: &std::path::Path, version: u64) {
+        let fresh = matches!(
+            &self.agent.wait,
+            Some(agent::ToolWait {
+                kind: agent::WaitKind::Diagnostics { path: wanted, version: before, .. },
+                ..
+            }) if super::same_path(wanted, path) && (version > *before || version == 0)
+        );
+        if fresh {
+            self.finish_diagnostics_wait(false);
+        }
+    }
+
+    fn finish_diagnostics_wait(&mut self, timed_out: bool) {
+        let Some(wait) = self.agent.wait.take() else {
+            return;
+        };
+        let agent::WaitKind::Diagnostics { path, report, .. } = wait.kind else {
+            self.agent.wait = Some(wait);
+            return;
+        };
+        let found = self.diagnostic_lines(&path, true);
+        let tail = match (found.is_empty(), timed_out) {
+            (true, false) => "No errors or warnings after the edit.".to_string(),
+            (true, true) => "The language server has not reported on the edit yet.".to_string(),
+            (false, _) => format!("Errors and warnings now:\n{}", found.join("\n")),
+        };
+        self.reply_tool(wait.turn, wait.call_id, format!("{report}\n{tail}"));
+    }
+
+    /// A background tab finished loading (or failed). Runs the tool waiting on it.
+    pub(super) fn agent_tab_loaded(&mut self, tab_id: crate::layout::TabId, error: Option<String>) {
+        let waiting = matches!(
+            &self.agent.wait,
+            Some(agent::ToolWait { kind: agent::WaitKind::Load { tab, .. }, .. }) if *tab == tab_id
+        );
+        if !waiting {
+            return;
+        }
+        let Some(wait) = self.agent.wait.take() else {
+            return;
+        };
+        let agent::WaitKind::Load { path, then, .. } = wait.kind else {
+            return;
+        };
+        if let Some(error) = error {
+            self.reply_tool(wait.turn, wait.call_id, error);
+            return;
+        }
+        let landed = self
+            .find_tab(tab_id)
+            .and_then(|tab| tab.path.as_deref())
+            .is_some_and(|open| super::same_path(open, &path));
+        if !landed {
+            let name = self.agent_relative(&path);
+            self.reply_tool(wait.turn, wait.call_id, format!("Could not open {name}"));
+            return;
+        }
+        let reply = match then {
+            agent::AfterLoad::Edit(edit) => {
+                if let Some(agent::ReadMark::Disk(seen)) = self.agent.reads.get(&path).copied()
+                    && let Some(tab) = self.find_tab(tab_id)
+                    && tab.buffer.fingerprint() == seen
+                {
+                    let revision = tab.buffer.revision();
+                    self.agent
+                        .reads
+                        .insert(path.clone(), agent::ReadMark::Buffer(revision));
+                }
+                self.edit_open_tab(wait.turn, wait.call_id.clone(), tab_id, &path, &edit)
+            }
+            agent::AfterLoad::Lsp(query) => {
+                self.send_agent_lsp(wait.turn, wait.call_id.clone(), tab_id, &path, &query)
+            }
+        };
+        if let Some(reply) = reply {
+            self.reply_tool(wait.turn, wait.call_id, reply);
+        }
+    }
+
+    /// Ends a wait that took too long. Called on the busy tick.
+    fn expire_agent_wait(&mut self) {
+        let expired = self
+            .agent
+            .wait
+            .as_ref()
+            .is_some_and(|wait| std::time::Instant::now() >= wait.deadline);
+        if !expired {
+            return;
+        }
+        if matches!(
+            self.agent.wait.as_ref().map(|wait| &wait.kind),
+            Some(agent::WaitKind::Diagnostics { .. })
+        ) {
+            self.finish_diagnostics_wait(true);
+            return;
+        }
+        let Some(wait) = self.agent.wait.take() else {
+            return;
+        };
+        let text = match wait.kind {
+            agent::WaitKind::Load { path, .. } => {
+                format!("Opening {} took too long", self.agent_relative(&path))
+            }
+            agent::WaitKind::Lsp { .. } => {
+                "The language server did not answer. It may still be starting; try search instead."
+                    .to_string()
+            }
+            agent::WaitKind::Diagnostics { .. } => return,
+        };
+        self.reply_tool(wait.turn, wait.call_id, text);
     }
 
     fn tool_save(&mut self, value: &serde_json::Value) -> String {
@@ -997,23 +1661,28 @@ impl App {
     }
 
     fn tool_goto(&mut self, value: &serde_json::Value) -> String {
-        let line = value
-            .get("line")
-            .and_then(|line| line.as_u64())
-            .unwrap_or(1) as usize;
-        let line = line.max(1);
-        if let Some(raw) = value.get("path").and_then(|path| path.as_str()) {
-            match agent::within(&self.explorer.root, raw) {
-                Ok(path) => {
-                    self.open_at(path, Some(line));
-                    format!("Line {line}")
-                }
-                Err(err) => err,
-            }
-        } else {
-            self.buffer_mut().goto_line(line - 1);
-            format!("Line {line}")
+        let line = value.get("line").and_then(loose_number).unwrap_or(1).max(1);
+        let path = match value.get("path").and_then(|path| path.as_str()) {
+            Some(raw) => match agent::within(&self.explorer.root, raw) {
+                Ok(path) => Some(path),
+                Err(err) => return err,
+            },
+            None => None,
+        };
+        if !self.agent_may_move_view() {
+            let place = match &path {
+                Some(path) => format!("{}:{line}", self.agent_relative(path)),
+                None => format!("line {line}"),
+            };
+            return format!(
+                "The user is typing in the editor, so the cursor stays where it is. Tell them to look at {place}."
+            );
         }
+        match path {
+            Some(path) => self.open_at(path, Some(line)),
+            None => self.buffer_mut().goto_line(line - 1),
+        }
+        format!("Line {line}")
     }
 }
 
@@ -1231,6 +1900,10 @@ impl App {
                 }
             }
             "compact" => self.compact_now(),
+            "plan" => self.set_agent_mode(agent::AgentMode::Plan),
+            "ask" => self.set_agent_mode(agent::AgentMode::Ask),
+            "agent" => self.set_agent_mode(agent::AgentMode::Agent),
+            "changes" => self.slash_changes(args),
             "settings" => {
                 self.close_picker();
                 self.about = false;
@@ -1700,10 +2373,17 @@ impl App {
     }
 
     fn remember_tool_result(&mut self, call_id: &str, content: &str) {
+        // With auto compact the newest results go out whole (older ones are cut when
+        // sent); without it only a short trail fits, so each result is cut now.
+        let stored = if self.ai.auto_compact {
+            clip(content.trim(), TOOL_RESULT_STORE)
+        } else {
+            summarize_tool_result(content)
+        };
         self.agent.memory.push(serde_json::json!({
             "role": "tool",
             "tool_call_id": call_id,
-            "content": summarize_tool_result(content)
+            "content": stored
         }));
         let cap = self.memory_cap();
         trim_memory(&mut self.agent.memory, cap);
@@ -1726,6 +2406,7 @@ fn budget_memory(
     current_prompt: &str,
 ) -> Vec<serde_json::Value> {
     let mut out: Vec<_> = memory.iter().map(sanitize_memory_message).collect();
+    clear_old_tool_results(&mut out, KEEP_TOOL_RESULTS);
     // Current user message is appended by the worker; drop a trailing duplicate user if present.
     if out
         .last()
@@ -1782,6 +2463,7 @@ fn compact_plan(
     summary: Option<&str>,
 ) -> (Vec<serde_json::Value>, usize) {
     let mut out: Vec<_> = memory.iter().map(sanitize_memory_message).collect();
+    clear_old_tool_results(&mut out, KEEP_TOOL_RESULTS);
     if out
         .last()
         .and_then(|last| last.get("role"))
@@ -1983,6 +2665,60 @@ fn clip_width(text: &str, max: usize) -> String {
     out
 }
 
+/// A language server answer for the assistant.
+pub(super) enum AgentLspAnswer {
+    Hover(Option<String>),
+    Locations(Vec<crate::lsp::protocol::JumpTarget>),
+}
+
+/// `12` or `"12"`.
+fn loose_number(value: &serde_json::Value) -> Option<usize> {
+    match value {
+        serde_json::Value::Number(number) => number.as_u64().map(|n| n as usize),
+        serde_json::Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// Char column of `symbol` on `line`: a whole-word match first, then any match.
+fn symbol_column(line: &str, symbol: &str) -> Option<usize> {
+    let word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let mut fallback = None;
+    for (byte, _) in line.match_indices(symbol) {
+        let before = line[..byte].chars().next_back();
+        let after = line[byte + symbol.len()..].chars().next();
+        let column = line[..byte].chars().count();
+        if !before.is_some_and(word) && !after.is_some_and(word) {
+            return Some(column);
+        }
+        fallback.get_or_insert(column);
+    }
+    fallback
+}
+
+/// Old tool results beyond the newest `keep` are cut to a short head, the way
+/// microcompaction works: the model still sees what it did, not every byte it read.
+fn clear_old_tool_results(history: &mut [serde_json::Value], keep: usize) {
+    let tools: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.get("role").and_then(|r| r.as_str()) == Some("tool"))
+        .map(|(index, _)| index)
+        .collect();
+    let old = tools.len().saturating_sub(keep);
+    for &index in &tools[..old] {
+        let Some(content) = history[index].get("content").and_then(|c| c.as_str()) else {
+            continue;
+        };
+        if content.chars().count() <= MEMORY_TOOL_CLIP {
+            continue;
+        }
+        let head: String = content.chars().take(MEMORY_TOOL_CLIP).collect();
+        history[index]["content"] =
+            serde_json::Value::String(format!("{head}… [older tool result cleared]"));
+    }
+}
+
 #[derive(Deserialize)]
 struct ReadArgs {
     path: String,
@@ -2005,6 +2741,21 @@ struct EditArgs {
     find: Option<String>,
     #[serde(default)]
     replace: Option<String>,
+    #[serde(default, deserialize_with = "loose_bool")]
+    replace_all: bool,
+}
+
+/// `true`, `"true"`, `1`, or `"yes"`; models send all of them.
+fn loose_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Bool(flag) => flag,
+        serde_json::Value::Number(number) => number.as_u64().unwrap_or(0) != 0,
+        serde_json::Value::String(text) => {
+            matches!(text.trim().to_ascii_lowercase().as_str(), "true" | "yes" | "1")
+        }
+        _ => false,
+    })
 }
 
 /// Where `Ctrl+Left` / `Ctrl+Right` land in the prompt, the same way as the editor:
@@ -2280,6 +3031,7 @@ mod tests {
             panic!("no turn sent");
         };
         assert_eq!(summary.as_deref(), Some("Earlier: renamed foo."));
+        app.agent.busy = false;
         app.clear_agent_chat();
         assert_eq!(app.agent.summary, None);
     }
@@ -2362,5 +3114,307 @@ mod tests {
         app.ai.switch_provider(crate::settings::AiProvider::Ollama);
         app.ai.context_size = "auto".into();
         assert_eq!(app.context_gauge().1, Some(16384));
+    }
+}
+
+#[cfg(test)]
+mod editor_first_tests {
+    use super::{App, clear_old_tool_results, symbol_column};
+    use crate::action::{Focus, SemanticAction};
+    use crate::agent::{AgentCommand, AgentEvent, AgentMode};
+    use crate::buffer::Buffer;
+    use serde_json::{Value, json};
+    use std::path::{Path, PathBuf};
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    fn workspace(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "duckx-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// `a.txt` is open in the editor and has focus. The assistant panel is open
+    /// but not focused, the way it is while the user types.
+    fn typing_app(root: &Path, text: &str) -> (App, UnboundedReceiver<AgentCommand>) {
+        let file = root.join("a.txt");
+        std::fs::write(&file, text).unwrap();
+        let mut app = App::new(Buffer::from_text(text), Some(file));
+        app.explorer = crate::explorer::Explorer::new(root.to_path_buf());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.attach_agent(tx);
+        app.ai.model = "m".into();
+        app.ai.auto_approve = true;
+        app.agent.open = true;
+        app.agent.focused = false;
+        app.agent.busy = true;
+        app.agent.turn = 1;
+        (app, rx)
+    }
+
+    fn tool(app: &mut App, name: &str, args: Value) {
+        app.agent.busy = true;
+        app.handle_agent(AgentEvent::Tool {
+            id: 1,
+            call_id: "c".into(),
+            name: name.into(),
+            arguments: args.to_string(),
+        });
+    }
+
+    fn reply(rx: &mut UnboundedReceiver<AgentCommand>) -> String {
+        let Ok(AgentCommand::ToolResult { content, .. }) = rx.try_recv() else {
+            panic!("no tool result");
+        };
+        content
+    }
+
+    fn run_jobs(app: &mut App) {
+        for job in app.take_jobs() {
+            let event = crate::jobs::run(job);
+            app.handle_event(event);
+        }
+    }
+
+    fn slash(app: &mut App, text: &str) {
+        app.agent.busy = false;
+        app.agent.prompt = text.into();
+        app.submit_agent();
+    }
+
+    #[test]
+    fn an_edit_keeps_the_users_cursor_and_focus() {
+        let root = workspace("keep-cursor");
+        let (mut app, mut rx) = typing_app(&root, "one\ntwo\nthree\n");
+        app.buffer_mut().move_to(10, false);
+        tool(&mut app, "apply_edit", json!({"path": "a.txt", "find": "one", "replace": "first"}));
+        let content = reply(&mut rx);
+        assert!(content.contains("unsaved"), "{content}");
+        assert!(content.contains("first"), "the edit echoes its lines: {content}");
+        assert_eq!(app.buffer().rope().to_string(), "first\ntwo\nthree\n");
+        assert_eq!(app.buffer().selection().head, 12, "the cursor stays on `three`");
+        assert_eq!(app.focus(), Focus::Editor);
+        assert!(!app.agent.focused);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "one\ntwo\nthree\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_line_edit_needs_a_fresh_read() {
+        let root = workspace("stale-read");
+        let (mut app, mut rx) = typing_app(&root, "one\ntwo\n");
+        let edit = json!({"path": "a.txt", "start_line": 1, "end_line": 1, "text": "uno"});
+        tool(&mut app, "apply_edit", edit.clone());
+        assert!(reply(&mut rx).contains("read_file"));
+
+        tool(&mut app, "read_file", json!({"path": "a.txt"}));
+        reply(&mut rx);
+        tool(&mut app, "apply_edit", edit);
+        reply(&mut rx);
+        assert_eq!(app.buffer().rope().to_string(), "uno\ntwo\n");
+
+        app.handle(SemanticAction::InsertChar('!'));
+        tool(
+            &mut app,
+            "apply_edit",
+            json!({"path": "a.txt", "start_line": 2, "end_line": 2, "text": "dos"}),
+        );
+        let content = reply(&mut rx);
+        assert!(content.contains("changed since you read it"), "{content}");
+        assert!(app.buffer().rope().to_string().contains("two"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_edit_to_a_closed_file_goes_to_a_background_tab() {
+        let root = workspace("background-edit");
+        let (mut app, mut rx) = typing_app(&root, "alpha\n");
+        let other = root.join("b.txt");
+        std::fs::write(&other, "beta\n").unwrap();
+        tool(&mut app, "apply_edit", json!({"path": "b.txt", "find": "beta", "replace": "BETA"}));
+        assert!(rx.try_recv().is_err(), "the reply waits for the file to load");
+        run_jobs(&mut app);
+        let content = reply(&mut rx);
+        assert!(content.contains("unsaved"), "{content}");
+        assert_eq!(app.path(), Some(root.join("a.txt").as_path()), "the visible tab stays");
+        assert_eq!(app.focus(), Focus::Editor);
+        let tab = app.tab_with_path(&other).and_then(|id| app.find_tab(id)).unwrap();
+        assert_eq!(tab.buffer.rope().to_string(), "BETA\n");
+        assert!(tab.dirty);
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "beta\n", "nothing is written");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plan_and_ask_modes_refuse_edits_and_toggle_off() {
+        let root = workspace("modes");
+        let (mut app, mut rx) = typing_app(&root, "one\n");
+        slash(&mut app, "/plan");
+        assert_eq!(app.agent.mode, AgentMode::Plan);
+        tool(&mut app, "apply_edit", json!({"path": "a.txt", "find": "one", "replace": "1"}));
+        assert!(reply(&mut rx).contains("not available in plan mode"));
+        assert_eq!(app.buffer().rope().to_string(), "one\n");
+
+        slash(&mut app, "/ask");
+        assert_eq!(app.agent.mode, AgentMode::Ask);
+        slash(&mut app, "/ask");
+        assert_eq!(app.agent.mode, AgentMode::Agent, "the same mode again turns it off");
+        tool(&mut app, "apply_edit", json!({"path": "a.txt", "find": "one", "replace": "1"}));
+        reply(&mut rx);
+        assert_eq!(app.buffer().rope().to_string(), "1\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_approval_waits_without_taking_focus() {
+        let root = workspace("approval-focus");
+        let (mut app, mut rx) = typing_app(&root, "one\n");
+        app.ai.auto_approve = false;
+        tool(&mut app, "apply_edit", json!({"path": "a.txt", "find": "one", "replace": "1"}));
+        assert!(app.agent.pending.is_some());
+        assert!(rx.try_recv().is_err());
+        assert!(!app.agent.focused);
+        assert_eq!(app.focus(), Focus::Editor);
+        assert!(app.message.as_deref().is_some_and(|text| text.contains("F6")));
+        app.handle(SemanticAction::InsertChar('y'));
+        assert_eq!(app.buffer().rope().to_string(), "yone\n", "typing still goes to the file");
+        assert!(app.agent.pending.is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn open_file_and_goto_do_not_move_the_view_while_the_user_types() {
+        let root = workspace("open-behind");
+        let (mut app, mut rx) = typing_app(&root, "one\ntwo\n");
+        std::fs::write(root.join("b.txt"), "beta\n").unwrap();
+        tool(&mut app, "open_file", json!({"path": "b.txt"}));
+        assert!(reply(&mut rx).contains("background"));
+        assert_eq!(app.path(), Some(root.join("a.txt").as_path()));
+
+        tool(&mut app, "goto", json!({"line": 2}));
+        assert!(reply(&mut rx).contains("cursor stays"));
+        assert_eq!(app.buffer().selection().head, 0);
+
+        app.agent.focused = true;
+        tool(&mut app, "goto", json!({"line": 2}));
+        reply(&mut rx);
+        assert_eq!(app.buffer().selection().head, 4, "in the panel, goto moves the cursor");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn slash_changes_lists_the_edits_of_this_chat() {
+        let root = workspace("changes");
+        let (mut app, mut rx) = typing_app(&root, "one\ntwo\n");
+        slash(&mut app, "/changes");
+        assert!(app.agent.transcript.last().unwrap().text.contains("has not changed"));
+        tool(&mut app, "apply_edit", json!({"path": "a.txt", "find": "two", "replace": "2"}));
+        reply(&mut rx);
+        slash(&mut app, "/changes");
+        let text = &app.agent.transcript.last().unwrap().text;
+        assert!(text.contains("1. a.txt:2"), "{text}");
+        assert!(text.contains("unsaved"), "{text}");
+        app.agent.busy = false;
+        app.clear_agent_chat();
+        assert!(app.agent.changes.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_the_newest_tool_results_stay_whole() {
+        let long = "x".repeat(5000);
+        let mut history: Vec<Value> = (0..3)
+            .map(|i| json!({"role": "tool", "tool_call_id": format!("c{i}"), "content": long}))
+            .collect();
+        clear_old_tool_results(&mut history, 2);
+        let first = history[0]["content"].as_str().unwrap();
+        assert!(first.ends_with("[older tool result cleared]"), "{first}");
+        assert!(first.len() < long.len());
+        assert_eq!(history[1]["content"].as_str(), Some(long.as_str()));
+        assert_eq!(history[2]["content"].as_str(), Some(long.as_str()));
+    }
+
+    #[test]
+    fn symbol_column_prefers_a_whole_word() {
+        assert_eq!(symbol_column("let foobar = foo();", "foo"), Some(13));
+        assert_eq!(symbol_column("ไทย foo", "foo"), Some(4));
+        assert_eq!(symbol_column("foobar", "foo"), Some(0));
+        assert_eq!(symbol_column("bar", "foo"), None);
+    }
+
+    #[test]
+    fn esc_hides_the_panel_and_only_stop_ends_the_run() {
+        let root = workspace("esc-stop");
+        let (mut app, mut rx) = typing_app(&root, "one\n");
+        app.agent.focused = true;
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Close));
+        assert!(app.agent.busy, "Esc does not stop the turn");
+        assert!(!app.agent.focused);
+        assert!(rx.try_recv().is_err(), "no cancel was sent");
+
+        app.agent.focused = true;
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::NewChat));
+        assert!(app.agent.busy, "Ctrl+L does not stop a running turn");
+        assert!(rx.try_recv().is_err());
+        assert!(
+            app.agent.transcript.last().unwrap().text.contains("/stop"),
+            "{}",
+            app.agent.transcript.last().unwrap().text
+        );
+
+        app.agent.prompt = "/stop".into();
+        app.submit_agent();
+        assert!(!app.agent.busy);
+        assert_eq!(app.agent.status, "ready");
+        match rx.try_recv() {
+            Ok(AgentCommand::Cancel { id }) => assert_eq!(id, 1),
+            other => panic!("expected a cancel, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_reply_while_the_panel_is_hidden_shows_a_note() {
+        let root = workspace("snack");
+        let (mut app, _rx) = typing_app(&root, "one\n");
+        app.agent.focused = false;
+        app.handle_agent(AgentEvent::Reply {
+            id: 1,
+            text: "Sorted the list.\nTry it.".into(),
+        });
+        let note = app.snackbar.as_ref().expect("a note");
+        assert_eq!(note.text, "Sorted the list. Try it.");
+        assert!(!note.error);
+
+        app.focus_agent();
+        assert!(app.snackbar.is_none(), "opening the panel clears the note");
+
+        app.agent.focused = true;
+        app.agent.busy = true;
+        app.agent.turn = 2;
+        app.handle_agent(AgentEvent::Reply {
+            id: 2,
+            text: "seen".into(),
+        });
+        assert!(app.snackbar.is_none(), "an open panel needs no note");
+
+        app.agent.focused = false;
+        app.agent.busy = true;
+        app.agent.turn = 3;
+        app.handle_agent(AgentEvent::Failed {
+            id: 3,
+            text: "Server error".into(),
+        });
+        assert!(app.snackbar.as_ref().is_some_and(|note| note.error));
+        app.snackbar.as_mut().unwrap().until = std::time::Instant::now();
+        app.expire_snackbar();
+        assert!(app.snackbar.is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

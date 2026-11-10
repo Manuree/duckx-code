@@ -26,6 +26,26 @@ pub const COMMANDS: &[SlashCommand] = &[
         summary: "List slash commands and key hints",
     },
     SlashCommand {
+        name: "plan",
+        usage: "/plan",
+        summary: "Plan mode: read code and write a plan, no edits",
+    },
+    SlashCommand {
+        name: "ask",
+        usage: "/ask",
+        summary: "Ask mode: read code and answer, no edits",
+    },
+    SlashCommand {
+        name: "agent",
+        usage: "/agent",
+        summary: "Agent mode: read and edit files (default)",
+    },
+    SlashCommand {
+        name: "changes",
+        usage: "/changes [n]",
+        summary: "List the assistant's edits; n opens that one",
+    },
+    SlashCommand {
         name: "model",
         usage: "/model [name]",
         summary: "Show or switch the model",
@@ -58,7 +78,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "stop",
         usage: "/stop",
-        summary: "Cancel the current assistant run",
+        summary: "Stop the assistant. The only way to stop it",
     },
     SlashCommand {
         name: "retry",
@@ -139,14 +159,15 @@ pub fn filter_commands(filter: &str) -> Vec<&'static SlashCommand> {
         .iter()
         .filter(|cmd| matches_fuzzy(&cmd.name.to_ascii_lowercase(), &needle))
         .collect();
-    // Prefer exact / prefix matches first, then shorter names.
+    // Prefer exact / prefix matches first, then shorter names, then catalog order.
+    let place = |cmd: &SlashCommand| COMMANDS.iter().position(|c| c.name == cmd.name);
     out.sort_by(|a, b| {
         let a_pref = a.name.starts_with(&filter.to_ascii_lowercase()) as i32;
         let b_pref = b.name.starts_with(&filter.to_ascii_lowercase()) as i32;
         b_pref
             .cmp(&a_pref)
             .then_with(|| a.name.len().cmp(&b.name.len()))
-            .then_with(|| a.name.cmp(b.name))
+            .then_with(|| place(a).cmp(&place(b)))
     });
     out
 }
@@ -183,7 +204,8 @@ pub fn help_text() -> String {
         lines.push(format!("  {:<22} {}", cmd.usage, cmd.summary));
     }
     lines.push(String::new());
-    lines.push("Keys: Enter send · Shift+Enter newline · Ctrl+L new chat · Esc close popup".into());
+    lines.push("Keys: Enter send · Shift+Enter newline · Ctrl+L new chat · Alt+Up/Down panel height · Esc hides the panel".into());
+    lines.push("A running turn keeps going when the panel hides. /stop is the only way to stop it.".into());
     lines.push("@file: type @ after a space (or at start) to attach a workspace file.".into());
     lines.push(
         "Approval: [ Yes ] [ Yes, this session ] [ No ] · ←/→ Tab h/l move · y yes · a this session · n/Esc no"
@@ -191,6 +213,14 @@ pub fn help_text() -> String {
     );
     lines.push(
         "  \"This session\" allows that tool (create_file / apply_edit / save) until /new, /clear or Ctrl+L. Command tools always ask."
+            .into(),
+    );
+    lines.push(
+        "Modes: /plan and /ask only read files; /agent edits again. The title reads \"ready : plan\". The editor itself has no modes."
+            .into(),
+    );
+    lines.push(
+        "Edits stay unsaved in the editor. Ctrl+Z undoes one. /changes lists them, /changes 2 opens the second."
             .into(),
     );
     lines.join("\n")

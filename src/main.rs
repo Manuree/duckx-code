@@ -259,6 +259,11 @@ async fn drive(
             needs_draw = false;
         }
 
+        let snack_at = app.snackbar_deadline().map(|until| {
+            tokio::time::Instant::now()
+                + until.saturating_duration_since(std::time::Instant::now())
+        });
+
         tokio::select! {
             event = events.next() => {
                 let Some(event) = event else {
@@ -356,6 +361,10 @@ async fn drive(
             }
             _ = tokio::time::sleep(Duration::from_millis(80)), if app.agent.busy => {
                 app.advance_agent_spin();
+                needs_draw = true;
+            }
+            _ = tokio::time::sleep_until(snack_at.unwrap_or_else(tokio::time::Instant::now)), if snack_at.is_some() => {
+                app.expire_snackbar();
                 needs_draw = true;
             }
         }

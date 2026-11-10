@@ -1,0 +1,11 @@
+# The assistant panel can be taller or shorter.
+# Press F6 to open it.
+# Alt+Up adds one row. Alt+Down removes one row.
+# The editor keeps at least six rows.
+# At the limit the status bar says so.
+# The size stays until you quit.
+# In the editor, Alt+Up and Alt+Down still move a line.
+
+one
+two
+three

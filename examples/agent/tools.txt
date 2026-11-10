@@ -1,0 +1,14 @@
+# The assistant can look around the code by itself.
+# Press F6 and ask: "where is greet used?"
+#   It uses search to find the text in every file.
+# Ask: "what does greet return?" in a Rust file with a language server.
+#   It uses lsp to go to the definition, list references, or read hover text.
+# Ask: "change hello to hi in this file"
+#   The change goes into the editor, not to the disk.
+#   You see the file is unsaved. Ctrl+Z undoes it. Ctrl+S saves it.
+#   If the file has errors after the edit, the assistant sees them too.
+# Ask: "change every greet to welcome"
+#   It can change every copy at once.
+
+greet: hello
+greet: hello again

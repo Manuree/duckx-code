@@ -16,6 +16,8 @@ Before making structural, UX, or architectural changes, always consult:
 1. **True Modeless Operation:**
    * Never introduce modal editing states (`Normal`, `Insert`, `Visual` modes) or `hjkl` navigation bindings.
    * When the editor canvas has focus, printable characters must always insert text directly into the buffer.
+ * Modeless is the editor's rule. The assistant panel may have its own modes (`/plan`, `/ask`, `/agent`), but they must never change editor keys or state.
+ * The assistant must not move the user's cursor or selection, switch the visible tab, or take focus while the editor has focus. Its edits go to buffers (undoable, unsaved), never straight to disk.
 2. **75% Keyboard Navigation & Shift-Selection:**
    * All cursor movement must center around `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PgUp`, and `PgDn` (plus `Alt` word and `Ctrl` document modifiers).
    * `Ctrl + Left / Right / Up / Down` moves focus to the open surface that borders the current one on that side. It must not open a closed surface and must not move the text cursor.

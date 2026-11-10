@@ -446,6 +446,14 @@ fn route_agent(
         burst.note();
         return Some(SemanticAction::Agent(AgentAction::Insert("\n".into())));
     }
+    // Alt+Up / Alt+Down change the panel height. In the editor those keys move a line.
+    if alt && !ctrl && !shift {
+        match key.code {
+            KeyCode::Up => return Some(SemanticAction::ResizeAgent { taller: true }),
+            KeyCode::Down => return Some(SemanticAction::ResizeAgent { taller: false }),
+            _ => {}
+        }
+    }
     if ctrl && !alt {
         match key.code {
             KeyCode::Left | KeyCode::Right => {
@@ -1636,6 +1644,14 @@ mod tests {
         assert_eq!(
             agent(KeyCode::Down, KeyModifiers::CONTROL),
             Some(SemanticAction::Agent(AgentAction::Below))
+        );
+        assert_eq!(
+            agent(KeyCode::Up, KeyModifiers::ALT),
+            Some(SemanticAction::ResizeAgent { taller: true })
+        );
+        assert_eq!(
+            agent(KeyCode::Down, KeyModifiers::ALT),
+            Some(SemanticAction::ResizeAgent { taller: false })
         );
     }
 

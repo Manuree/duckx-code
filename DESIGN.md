@@ -9,7 +9,7 @@ Legacy terminal editors (`vi`/`vim`, `helix`, `emacs`) were designed in an era b
 
 **duckx-code** treats these dedicated hardware keys as first-class citizens:
 1. **Zero Mnemonic Overhead:** Users never need to memorize arbitrary letter keys (`hjkl`, `w`, `b`, `d`, `y`) that do not visually correspond to their actions.
-2. **True Modeless Editing:** Opening a file places the user directly in an editable state. Every printable key inserts text immediately—no switching between Normal, Insert, or Visual modes.
+2. **True Modeless Editing:** Opening a file places the user directly in an editable state. Every printable key inserts text immediately—no switching between Normal, Insert, or Visual modes. This rule covers the editor. The assistant panel may have its own modes (Agent, Plan, Ask) that change only what the assistant may do; they never change how keys behave in the editor. The assistant is editor first: while the user types in the editor, it never moves their cursor, switches the visible tab, or takes focus.
 3. **Muscle-Memory Compatibility:** Navigation and selection work identically to standard desktop applications while remaining 100% keyboard-driven.
 
 ---

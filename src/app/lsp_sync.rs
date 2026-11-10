@@ -192,6 +192,28 @@ impl App {
         }
     }
 
+    /// The document version the server last got for `tab`, while a server for its
+    /// language is up. `0` when the tab has not been sent yet. `None` when no
+    /// diagnostics will come, so an edit does not wait for them.
+    pub(super) fn lsp_doc_version(&self, tab: TabId) -> Option<u64> {
+        if !self.appearance.lsp.enabled {
+            return None;
+        }
+        let (language, version) = match self.lsp_docs.get(&tab) {
+            Some(doc) => (doc.language, doc.version),
+            None => {
+                let path = self.find_tab(tab)?.path.as_ref()?;
+                let language = Language::detect(path).filter(|language| registry::supports(*language))?;
+                (language, 0)
+            }
+        };
+        let group = registry::servers_for(language).first()?.name;
+        match self.lsp_servers.get(group) {
+            Some((_, ServerStatus::Ready | ServerStatus::Busy(_))) => Some(version),
+            _ => None,
+        }
+    }
+
     pub fn handle_lsp(&mut self, event: LspEvent) {
         if self.lsp_resetting && !matches!(event, LspEvent::ResetDone) {
             return;
@@ -211,7 +233,8 @@ impl App {
                         None => break,
                     }
                 }
-                self.diagnostics.set(path, diagnostics);
+                self.diagnostics.set(path.clone(), diagnostics);
+                self.agent_diagnostics_in(&path, version);
             }
             LspEvent::PulledDiagnostics {
                 path,
@@ -227,7 +250,8 @@ impl App {
                         None => break,
                     }
                 }
-                self.diagnostics.set_layer(path, diagnostics, true);
+                self.diagnostics.set_layer(path.clone(), diagnostics, true);
+                self.agent_diagnostics_in(&path, version);
             }
             LspEvent::Status {
                 group,

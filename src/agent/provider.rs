@@ -9,6 +9,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde_json::{Value, json};
 
+use super::tool_specs_for;
+#[cfg(test)]
 use super::tool_specs;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +81,8 @@ pub struct Tuning {
     pub backoff: Duration,
     /// Native tools: detect per model (default), always, or never.
     pub tools: ToolsMode,
+    /// Plan and Ask mode: offer only the tools that never change a file.
+    pub read_only: bool,
 }
 
 /// Whether a request carries native `tools`. `Auto` sends them until the server
@@ -117,6 +121,7 @@ pub static DEFAULT_TUNING: Tuning = Tuning {
     retries: 0,
     backoff: Duration::from_millis(1000),
     tools: ToolsMode::Auto,
+    read_only: false,
 };
 
 impl Default for Tuning {
@@ -443,8 +448,13 @@ fn tools_not_supported(status: reqwest::StatusCode, body: &str) -> bool {
 }
 
 /// When the server rejects `tools`, describe them in the system text so textual parsing still works.
+#[cfg(test)]
 pub fn messages_with_tool_prompt(messages: &[Value]) -> Vec<Value> {
-    let catalog = tool_catalog_prompt();
+    messages_with_tool_prompt_for(messages, false)
+}
+
+fn messages_with_tool_prompt_for(messages: &[Value], read_only: bool) -> Vec<Value> {
+    let catalog = tool_catalog_prompt(read_only);
     let mut out = Vec::with_capacity(messages.len() + 1);
     let mut injected = false;
     for message in messages {
@@ -466,14 +476,14 @@ pub fn messages_with_tool_prompt(messages: &[Value]) -> Vec<Value> {
     out
 }
 
-fn tool_catalog_prompt() -> String {
+fn tool_catalog_prompt(read_only: bool) -> String {
     let mut lines = vec![
         "You can call tools by emitting one of these forms (no other prose around the call):".into(),
         r#"{"name":"<tool>","arguments":{...}}"#.into(),
         "or ```json / ```tool_code fences, or <tool_call>...</tool_call>, or Python-style name(arg=value).".into(),
         "Available tools:".into(),
     ];
-    for tool in tool_specs() {
+    for tool in tool_specs_for(read_only) {
         let name = tool["function"]["name"].as_str().unwrap_or("?");
         let desc = tool["function"]["description"].as_str().unwrap_or("");
         lines.push(format!("- {name}: {desc}"));
@@ -2064,7 +2074,7 @@ async fn complete_once(
         let use_tools = allow_tools && tools_wanted(tuning.tools, &key);
         let use_think = allow_think && !model_skips_think(&key);
         let tools = if use_tools {
-            tool_specs()
+            tool_specs_for(tuning.read_only)
         } else {
             Vec::new()
         };
@@ -2072,7 +2082,7 @@ async fn complete_once(
         let msgs = if use_tools {
             working.as_slice()
         } else {
-            owned = messages_with_tool_prompt(&working);
+            owned = messages_with_tool_prompt_for(&working, tuning.read_only);
             owned.as_slice()
         };
         let ollama_msgs;
@@ -2161,7 +2171,7 @@ where
     let response = loop {
         let use_tools = allow_tools && tools_wanted(tuning.tools, &key);
         let tools = if use_tools {
-            tool_specs()
+            tool_specs_for(tuning.read_only)
         } else {
             Vec::new()
         };
@@ -2169,7 +2179,7 @@ where
         let msgs = if use_tools {
             working.as_slice()
         } else {
-            owned = messages_with_tool_prompt(&working);
+            owned = messages_with_tool_prompt_for(&working, tuning.read_only);
             owned.as_slice()
         };
         let body = request_body_with(model, msgs, &tools, true, tuning.max_tokens);
@@ -2353,7 +2363,7 @@ where
         let use_tools = allow_tools && tools_wanted(tuning.tools, &key);
         let use_think = allow_think && !model_skips_think(&key);
         let tools = if use_tools {
-            tool_specs()
+            tool_specs_for(tuning.read_only)
         } else {
             Vec::new()
         };
@@ -2361,7 +2371,7 @@ where
         let msgs = if use_tools {
             working.as_slice()
         } else {
-            owned = messages_with_tool_prompt(&working);
+            owned = messages_with_tool_prompt_for(&working, tuning.read_only);
             owned.as_slice()
         };
         let ollama_msgs = messages_for_ollama_native(msgs);

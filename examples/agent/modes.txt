@@ -1,0 +1,25 @@
+# The assistant has modes. The editor does not.
+# Press F6 to open the assistant.
+# Type /plan and press Enter.
+#   The title says "ready : plan" and the border turns yellow.
+#   The assistant reads code and writes a plan. It can not edit.
+# Type /ask and press Enter.
+#   The title says "ready : ask". The assistant only answers.
+# Type /agent, or the same mode again, to go back. Now it can edit.
+#
+# Try it: in plan mode, ask "how would you sort the list below?"
+# Then type /agent and ask "do it".
+#
+# The assistant does not take your place while you type here.
+#   It does not move your cursor or change the tab you see.
+#   A file it opens goes to a tab behind this one.
+#   When it asks to edit, the status bar says "F6 to answer".
+#   Your y and n keys still go into this file.
+#
+# Its edits are not saved. Ctrl+Z undoes one.
+# Type /changes to see what it changed. /changes 1 opens the first one.
+
+pear
+apple
+mango
+banana

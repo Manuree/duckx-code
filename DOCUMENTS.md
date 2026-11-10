@@ -674,7 +674,7 @@ Code uses the syntax theme's `text` color. The other syntax roles are stored for
 
 ## Assistant
 
-`agent` or `F6` opens a panel under the editor, and the panel is drawn only while its prompt is focused. The editor above it keeps its own text; the panel does not cover those lines, and keys in the prompt do not move the editor cursor. `Tab` in the command bar closes the bar and shows the panel. `Tab` in the prompt opens the command bar and hides the panel when no completion popup is open; with a `/` or `@` popup open, `Tab` completes the highlighted entry instead. `Esc` closes an open popup first, then leaves the prompt and hides the panel. `F6` from the editor shows it again, and `F6` while the prompt is focused closes it. `Ctrl + Down` moves into the panel only while it is showing. Inside the panel, `Ctrl + Up` reads the messages and `Ctrl + Down` returns to the prompt. `Up` and `Down` move a completion popup when one is open; otherwise they scroll messages or move between wrapped prompt rows. `Ctrl + L` in the panel, or the slash commands `/new` and `/clear`, starts a new chat: transcript and tool-trail memory are cleared so a long session cannot push the system prompt and tools out of a small context window. Bare prompt words `clear` / `agent new` are no longer treated as commands (they would collide with normal chat); the command-bar entry `clear` (alias `agent-new`) remains as a shortcut outside the prompt.
+`agent` or `F6` opens a panel under the editor, and the panel is drawn only while its prompt is focused. The editor above it keeps its own text; the panel does not cover those lines, and keys in the prompt do not move the editor cursor. `Tab` in the command bar closes the bar and shows the panel. `Tab` in the prompt opens the command bar and hides the panel when no completion popup is open; with a `/` or `@` popup open, `Tab` completes the highlighted entry instead. `Esc` closes an open popup first, then leaves the prompt and hides the panel. Hiding the panel, with `Esc` or `F6`, does not stop a running turn. Only `/stop` stops it. A reply that arrives while the panel is hidden shows a note above the status bar, at the bottom right, for 6 seconds. The note is the first line of the answer and says `F6`. Opening the panel clears it. A failed turn uses the error color. `/new`, `/clear`, and `Ctrl + L` wait until the turn is done, and say so. `F6` from the editor shows it again, and `F6` while the prompt is focused closes it. `Ctrl + Down` moves into the panel only while it is showing. Inside the panel, `Ctrl + Up` reads the messages and `Ctrl + Down` returns to the prompt. `Alt + Up` makes the panel one row taller and `Alt + Down` makes it one row shorter. The editor keeps at least six rows. At either limit the status bar says `Assistant is at its tallest` or `Assistant is at its shortest`. The size lasts until duckx-code quits. In the editor those two keys still move a line. `Up` and `Down` move a completion popup when one is open; otherwise they scroll messages or move between wrapped prompt rows. `Ctrl + L` in the panel, or the slash commands `/new` and `/clear`, starts a new chat: transcript and tool-trail memory are cleared so a long session cannot push the system prompt and tools out of a small context window. Bare prompt words `clear` / `agent new` are no longer treated as commands (they would collide with normal chat); the command-bar entry `clear` (alias `agent-new`) remains as a shortcut outside the prompt.
 
 ### Slash commands
 
@@ -682,7 +682,7 @@ A line is a slash command only when `/` is the first character of the prompt (po
 
 | Command | Description |
 | :--- | :--- |
-| `/new` | Start a new chat (also `Ctrl+L`). |
+| `/new` | Start a new chat (also `Ctrl+L`). While a turn is running it does nothing and says to use `/stop` first. |
 | `/clear` | Same as `/new`. |
 | `/help` | List slash commands and key hints. |
 | `/model [name]` | Show the current model, list models from the server (`/api/tags` or `/v1/models`, sent with the provider's key), or switch to `name`. The list is fetched in the background and appears in the transcript when it arrives. |
@@ -691,10 +691,36 @@ A line is a slash command only when `/` is the first character of the prompt (po
 | `/stream on or off` | Toggle response streaming. |
 | `/auto-approve on or off` | Toggle tool auto-approve. |
 | `/think on or off` | Toggle sending `think: true` to Ollama when supported. |
-| `/stop` | Cancel the current assistant run. |
+| `/stop` | Stop the current assistant run. This is the only way to stop it. `Esc` and `F6` only hide the panel. |
 | `/retry` | Resend the last user prompt. |
 | `/compact` | Summarize everything before the latest turn now, with the current model, and keep that turn. The title says `compacting` until the summary arrives. With no model set, or the assistant Off, it only drops the older messages. |
+| `/plan` | Plan mode: the assistant reads code and writes a plan, but cannot edit. `/plan` again (or `/agent`) turns it off. |
+| `/ask` | Ask mode: the assistant reads code and answers, but cannot edit. `/ask` again (or `/agent`) turns it off. |
+| `/agent` | Back to Agent mode, where the assistant can edit. |
+| `/changes [n]` | List the files the assistant changed in this chat (path, line, what changed, `· unsaved`). `/changes 2` opens the second one at its line and moves focus to the editor. |
 | `/settings` | Open Settings → AI. |
+
+### Modes
+
+The editor has no modes. Only the assistant panel does, and a mode changes only what the assistant may do; keys in the editor stay the same.
+
+| Mode | Title | Border | Tools |
+| :--- | :--- | :--- | :--- |
+| Agent (default) | `ready` | Sidebar border | All tools. |
+| Plan | `ready : plan` | Yellow, the same warning color as the PANE border | Read-only tools only. The model is asked for a short step-by-step plan. |
+| Ask | `ready : ask` | The theme's info color | Read-only tools only. The model is asked to answer, not to plan or edit. |
+
+The mode stays across `/new` and lasts until you change it. If a model still calls an editing tool in Plan or Ask, the call is refused with a tool result that says which mode is on.
+
+### Editor first
+
+The assistant never takes the editor away from you while you type. While focus is in the editor (the panel hidden, or open but not focused):
+
+- An edit changes the text around your cursor, but your cursor and selection stay on the same text.
+- `open_file` and `create_file` open the file in a background tab. The visible tab does not change. `goto` does not move the cursor; the model is told to name the place instead.
+- A tool that needs approval waits in the panel. Focus does not move, so a `y` you type goes into your file, not into the approval. The status bar says `The assistant asks to run apply_edit. F6 to answer`.
+
+While the prompt is focused, `open_file`, `create_file`, and `goto` show the file and move the cursor as before.
 
 ### @file mentions
 
@@ -702,7 +728,7 @@ Typing `@` at the start of the prompt or after whitespace opens file hints above
 
 Messages and the prompt wrap onto the next row when they are wider than the panel. The prompt holds multiple lines (up to 8 visible rows, then it scrolls). Printable keys edit the prompt. `Left` and `Right` move the cursor, and `Shift` with either key extends the selection. `Up` and `Down` move between wrapped rows. `Home` and `End` jump to the start or end of the current wrap row. `Backspace` and `Delete` remove the selection, or one character (Backspace at the start of a line joins it to the previous line). `Enter` sends the prompt. `Shift + Enter` inserts a newline. When the terminal cannot report Shift with Enter, `Alt + Enter` or `Ctrl + J` do the same. Bracketed paste keeps newlines (CRLF is normalized). While a mutating tool waits for approval, the prompt is replaced by `[ Yes ]` / `[ No ]` buttons (default Yes); Left/Right or Tab move the highlight and Enter confirms. Keys typed then do not edit the chat prompt. On terminals without bracketed paste (classic Windows conhost), a fast burst of keys treats Enter inside the burst as a newline so a multi-line paste is not sent as only the first line. `Ctrl + Up` leaves the prompt to read the messages above it. `Up` and `Down` then scroll those messages, `Home` and `End` jump to the top and the latest line, and `Ctrl + Down` returns to the prompt. The model also receives the focused file, the cursor line and column, and any selection, and it is told to edit at that cursor unless the prompt names another place. The chat line stays the text you typed. The panel title is only the status: `ready`, `waiting`, `running read_file` (or another tool), `approve apply_edit`, or a short server error — not the word Assistant and not key hints. Key hints stay in this document (`Enter` sends, `Shift + Enter` newline). While the model is reasoning, the title shows a spinner and `thinking…`, optionally with a short live snippet of the latest reasoning line (reasoning is not written into the transcript). While the assistant is waiting or running a tool, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` spins in front of that word. The same tool with the same arguments three times in a row stops the turn, and so does a 33rd tool call. A missing model, or Assistant set to Off, is a status-bar message.
 
-The assistant can run these tools. A path that climbs out of the workspace with `..`, or through a symlink that leaves the folder, is refused. Files larger than 2 MB are not read or edited on disk. `create_file` refuses to create more than one new folder level under a missing parent. `apply_edit`, `create_file`, and `save` wait in the assistant panel with a Yes/No button row under a short card (tool name, path, and a compact `-`/`+` preview). Left/Right, `h`/`l`, or Tab move the highlight; Enter confirms the selected button (Yes is selected by default for a fast allow flow). Shortcuts `y` (Allow) and `n` / Esc (Deny) still work. Unless Auto-approve tools is On. Deny returns a tool result to the model so the turn can continue. Read-only tools (`read_file`, `list_dir`, `editor_state`, `diagnostics`, `open_file`, `goto`) run without asking. Later turns keep prior messages, tool calls, and clipped tool results. Before each request the client estimates tokens (chars ÷ 3.5) against Context size. With Auto compact On (default), older turns past Context size less Compact buffer are folded into a summary as described under Settings → AI; `/new` clears the summary too. With Auto compact Off, only a small trail is kept (about 2500 characters, oldest dropped first) and the oldest history is dropped to fit, always keeping the system prompt, tool specs, and the current user message.
+The assistant can run these tools. A path that climbs out of the workspace with `..`, or through a symlink that leaves the folder, is refused. Files larger than 2 MB are not read or edited on disk. `create_file` refuses to create more than one new folder level under a missing parent. `apply_edit`, `create_file`, and `save` wait in the assistant panel with a Yes/No button row under a short card (tool name, path, and a compact `-`/`+` preview). Left/Right, `h`/`l`, or Tab move the highlight; Enter confirms the selected button (Yes is selected by default for a fast allow flow). Shortcuts `y` (Allow) and `n` / Esc (Deny) still work. Unless Auto-approve tools is On. Deny returns a tool result to the model so the turn can continue. Read-only tools (`read_file`, `list_dir`, `editor_state`, `diagnostics`, `search`, `lsp`, `open_file`, `goto`) run without asking. The system prompt also carries the workspace's `AGENTS.md` (read in the background, up to 6000 characters) when there is one. Later turns keep prior messages and tool calls. With Auto compact On, the newest 4 tool results stay whole and older ones are cut to a short head; with it Off, tool results are clipped. Before each request the client estimates tokens (chars ÷ 3.5) against Context size. With Auto compact On (default), older turns past Context size less Compact buffer are folded into a summary as described under Settings → AI; `/new` clears the summary too. With Auto compact Off, only a small trail is kept (about 2500 characters, oldest dropped first) and the oldest history is dropped to fit, always keeping the system prompt, tool specs, and the current user message.
 
 **Context gauge.** The assistant panel's bottom border shows `ctx 12.4k/32k 37%` at its right corner whenever the panel is showing: tokens in use, the Context size, and the share. Tokens come from the server's last answer (`usage`, or Ollama's `prompt_eval_count` + `eval_count`) when it reports them, otherwise from the same estimate auto compact uses (before the first turn, the estimate of what would be sent). It updates after every request and after compaction. The text is dim under 70 %, the theme's warning color from 70 %, and its error color from 90 %. A limit that is not known reads `?`. In a narrow panel it shortens to `12.4k/32k`, then disappears; the corners stay. The `/` and `@` lists open above the prompt, inside the panel, so they never cover it. The status line is unchanged.
 
@@ -712,13 +738,15 @@ The assistant can run these tools. A path that climbs out of the workspace with 
 | `list_dir` | List one directory. |
 | `editor_state` | Focused path, cursor line, and the selection. |
 | `diagnostics` | Errors and warnings for a file. |
-| `apply_edit` | Replace a line range, or one unique snippet. An open file is one undo step (`Ctrl + Z`). A closed file is written in the background. |
+| `search` | Find text in the workspace (`path:line: text`, up to 60 hits). A lowercase query ignores case. `glob` limits the files (`*.rs`). Files in `.gitignore` and hidden files are skipped. An open file is searched as it is in the editor, unsaved text included. |
+| `lsp` | Ask the language server: `definition`, `references`, or `hover` at a line and a symbol (or column). A closed file opens in a background tab first. Needs a running language server for that file. |
+| `apply_edit` | Replace a line range, or a snippet. A snippet must be unique, or set `replace_all` to change every copy. A snippet still matches when only line endings, curly quotes, or `12\|` line-number prefixes differ. The edit always goes to an editor buffer, never straight to disk: an open file, or a closed file opened in a background tab. It is one undo step (`Ctrl + Z`) and stays unsaved until you or `save` save it. A line-range edit is refused when the model has not read the file, or the file changed since it read it (you typed). The result shows the changed lines, and, when a language server runs for the file, the errors and warnings after the edit (it waits up to 4 seconds; the title says `checking`). |
 | `create_file` | Write a new file and open it. A path that already exists is refused. |
-| `open_file` | Open a workspace file. |
+| `open_file` | Open a workspace file. While you are in the editor it opens in a background tab. |
 | `save` | Save an open file. |
-| `goto` | Move to a line. A path opens that file first. |
+| `goto` | Move to a line. A path opens that file first. While you are in the editor the cursor does not move. |
 
-`write_file` is `create_file`. `search_replace` is `apply_edit`. `list_files` is `list_dir`. `read` is `read_file`. `bash` and `shell` are refused in the tool result, so the turn keeps going. A reply that arrives only in the server's reasoning field is shown. The request allows 8192 tokens. An empty reply says so in the panel. Set the server and the model under [Settings](#10-settings), section AI, before the first prompt.
+`write_file` is `create_file`. `search_replace` is `apply_edit`. `list_files` is `list_dir`. `read` is `read_file`. `grep`, `rg`, and `find` are `search`. `definition`, `goto_definition`, `references`, and `hover` are `lsp`. `bash` and `shell` are refused in the tool result, so the turn keeps going. A reply that arrives only in the server's reasoning field is shown. The request allows 8192 tokens. An empty reply says so in the panel. Set the server and the model under [Settings](#10-settings), section AI, before the first prompt.
 
 ## 12. Planned
 

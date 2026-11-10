@@ -26,12 +26,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     }
     let theme = *app.styles();
     let focused = app.focus() == crate::action::Focus::Agent;
-    let border = if focused {
-        theme.sidebar_border_focused
-    } else {
-        theme.sidebar_border
-    };
-    let title = format!(" {} ", fit(&status_label(app), 56));
+    let border = mode_border(&theme, app.agent.mode, focused);
+    let title = format!(" {} ", titled_status(app, 56));
     let mut block = panel(&title).border_style(border).style(theme.sidebar);
     // Context use in the bottom-right corner; the bottom border is otherwise empty.
     // Two corner cells and one dash on each side stay as border.
@@ -385,6 +381,45 @@ fn prompt_line(
     let at = cursor.clamp(row.0.min(len), end);
     let column = prefix.width() + crate::agent::column_at(prompt, row.0.min(len), at);
     (spans, column)
+}
+
+/// Plan draws the border in the warning yellow (the PANE color); Ask in the info
+/// color. Agent keeps the sidebar border.
+fn mode_border(
+    theme: &crate::theme::UiStyles,
+    mode: crate::agent::AgentMode,
+    focused: bool,
+) -> Style {
+    let base = match mode {
+        crate::agent::AgentMode::Agent => {
+            return if focused {
+                theme.sidebar_border_focused
+            } else {
+                theme.sidebar_border
+            };
+        }
+        crate::agent::AgentMode::Plan => Style::new().fg(theme.diagnostic_warning),
+        crate::agent::AgentMode::Ask => Style::new().fg(theme.diagnostic_info),
+    };
+    if focused {
+        base.add_modifier(Modifier::BOLD)
+    } else {
+        base
+    }
+}
+
+/// The status, then ` : plan` or ` : ask` outside Agent mode (`ready : plan`).
+/// A long status is cut so the mode always shows.
+fn titled_status(app: &App, width: usize) -> String {
+    let status = status_label(app);
+    match app.agent.mode.label() {
+        "" => fit(&status, width),
+        mode => {
+            let suffix = format!(" : {mode}");
+            let room = width.saturating_sub(suffix.width());
+            format!("{}{suffix}", fit(&status, room))
+        }
+    }
 }
 
 fn status_label(app: &App) -> String {

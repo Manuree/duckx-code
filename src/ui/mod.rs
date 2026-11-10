@@ -10,6 +10,7 @@ mod preview_side;
 mod prompt;
 mod settings;
 mod sidebar;
+mod snackbar;
 mod status_bar;
 mod viewport;
 
@@ -512,6 +513,14 @@ pub fn render(frame: &mut Frame, app: &App) {
     picker::render(frame, app, above_status);
     preview_side::render(frame, app, above_status);
     prompt::render(frame, app, above_status);
+    let floor = if layout.diagnostic.height > 0 {
+        layout.diagnostic.y
+    } else if layout.status.height > 0 {
+        layout.status.y
+    } else {
+        area.bottom()
+    };
+    snackbar::render(frame, app, area, floor);
 }
 
 #[cfg(test)]
@@ -561,6 +570,57 @@ mod tests {
         assert!(screen.contains("ready"), "{screen}");
         assert!(!screen.contains("Assistant ·"), "{screen}");
         assert!(screen.contains("fn main"), "{screen}");
+    }
+
+    #[test]
+    fn plan_mode_titles_the_panel_and_paints_its_rounded_border_yellow() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.set_screen_size(80, 24);
+        for (mode, title, color) in [
+            (crate::agent::AgentMode::Plan, "ready : plan", app.styles().diagnostic_warning),
+            (crate::agent::AgentMode::Ask, "ready : ask", app.styles().diagnostic_info),
+        ] {
+            app.agent.mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let screen = draw(&app, 80, 24);
+            assert!(screen.contains(title), "{screen}");
+            let (x, y) = (0..24u16)
+                .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+                .filter(|&(x, y)| buffer[(x, y)].symbol() == "╭")
+                .find(|&(x, y)| buffer[(x, y)].fg == color)
+                .unwrap_or_else(|| panic!("no {mode:?} colored rounded corner\n{screen}"));
+            assert_eq!(buffer[(x, y)].fg, color);
+        }
+    }
+
+    #[test]
+    fn a_folded_reply_sits_above_the_status_bar_in_a_rounded_note() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.set_screen_size(80, 24);
+        app.snackbar = Some(crate::app::Snackbar {
+            text: "Sorted the list.".into(),
+            error: false,
+            until: std::time::Instant::now() + std::time::Duration::from_secs(6),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("Sorted the list."), "{screen}");
+        assert!(screen.contains("F6"), "{screen}");
+        let corner = (0..24u16)
+            .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                buffer[(x, y)].symbol() == "╭" && buffer[(x, y)].fg == app.styles().diagnostic_info
+            })
+            .expect("rounded note");
+        assert!(corner.0 > 40, "the note sits on the right, at {corner:?}");
+        assert!(corner.1 < 23, "the note sits above the status bar, at {corner:?}");
+        assert!(screen.lines().last().is_some_and(|row| !row.contains("Sorted")));
     }
 
     #[test]

@@ -12,7 +12,7 @@ mod paste;
 mod wrap;
 
 pub use disk::{DiskTask, MAX_BYTES, check_file_size, create_parent_plan, perform as perform_disk};
-pub use edit::{FileEdit, apply_to_buffer, read_lines, read_lines_rope};
+pub use edit::{EditOutcome, FileEdit, apply_to_buffer, read_lines, read_lines_rope};
 pub use mention::{
     ATTACH_BUDGET, ATTACH_FILE_CAP, ActiveMention, MentionSpan, active_mention, format_mention_token,
     insert_mention, mention_trigger_at, parse_mentions, suggest_files,
@@ -42,6 +42,128 @@ pub fn provider_seed_detected(detected: &crate::settings::Detected) {
 pub struct TranscriptLine {
     pub user: bool,
     pub text: String,
+}
+
+/// How the assistant may act. Only the assistant panel has modes; the editor never does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentMode {
+    /// Reads and edits files (edits ask first unless auto-approve is on).
+    #[default]
+    Agent,
+    /// Reads code and answers with a step-by-step plan. Never edits.
+    Plan,
+    /// Reads code and answers questions. Never edits.
+    Ask,
+}
+
+impl AgentMode {
+    /// Word shown after the status in the panel title (`ready : plan`). Empty for Agent.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Agent => "",
+            Self::Plan => "plan",
+            Self::Ask => "ask",
+        }
+    }
+
+    /// Tools that change files are not offered and are refused.
+    pub fn read_only(self) -> bool {
+        !matches!(self, Self::Agent)
+    }
+
+    /// Added to the system prompt for this mode.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            Self::Agent => "",
+            Self::Plan => PLAN_PROMPT,
+            Self::Ask => ASK_PROMPT,
+        }
+    }
+}
+
+/// What the model last saw of a file, so a line-range edit on changed text is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadMark {
+    /// Read from an open buffer at this revision.
+    Buffer(u64),
+    /// Read from disk; the fingerprint of that text.
+    Disk(u64),
+}
+
+/// One edit or new file the assistant made in this chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentChange {
+    pub path: std::path::PathBuf,
+    /// 1-based line the change starts at.
+    pub line: usize,
+    pub summary: String,
+}
+
+/// A tool whose answer arrives later: a file loading, the language server, or the
+/// diagnostics that follow an edit. Only one tool runs at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolWait {
+    pub turn: u64,
+    pub call_id: String,
+    pub deadline: std::time::Instant,
+    pub kind: WaitKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitKind {
+    /// A tab is loading `path` in the background; `then` runs when it lands.
+    Load {
+        tab: crate::layout::TabId,
+        path: std::path::PathBuf,
+        then: AfterLoad,
+    },
+    /// Fresh diagnostics for `path` after an edit. `report` is the edit's own result.
+    /// `version` is the document version the server knew before the edit.
+    Diagnostics {
+        path: std::path::PathBuf,
+        version: u64,
+        report: String,
+    },
+    /// A language server query with this token.
+    Lsp {
+        token: u64,
+        op: LspOp,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterLoad {
+    Edit(FileEdit),
+    Lsp(LspQuery),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspOp {
+    Definition,
+    References,
+    Hover,
+}
+
+impl LspOp {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "definition" | "goto_definition" | "go_to_definition" | "def" => {
+                Some(Self::Definition)
+            }
+            "references" | "find_references" | "refs" => Some(Self::References),
+            "hover" | "type" | "docs" => Some(Self::Hover),
+            _ => None,
+        }
+    }
+}
+
+/// Where an `lsp` call points: a 1-based line, and a symbol on it or a 1-based column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspQuery {
+    pub op: LspOp,
+    pub line: usize,
+    pub column: Option<usize>,
+    pub symbol: Option<String>,
 }
 
 /// A mutating tool waiting for Allow / Deny in the assistant panel.
@@ -105,6 +227,22 @@ pub enum ApprovalChoice {
 /// Tools that change files need Allow / Deny unless auto-approve is on.
 pub fn needs_approval(name: &str) -> bool {
     matches!(name, "apply_edit" | "create_file" | "save")
+}
+
+/// Tools that never change a file. Plan and Ask mode offer only these.
+pub fn is_read_only_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file"
+            | "list_dir"
+            | "list_files"
+            | "editor_state"
+            | "diagnostics"
+            | "search"
+            | "lsp"
+            | "open_file"
+            | "goto"
+    )
 }
 
 /// Shell-like tools: never session-allowlisted, always asked.
@@ -184,6 +322,14 @@ pub struct Panel {
     /// Context tokens in use: `(tokens, true)` when the server reported them,
     /// `(estimate, false)` otherwise. `None` before the first turn.
     pub context_used: Option<(u32, bool)>,
+    /// Agent, Plan, or Ask. Kept across `/new`.
+    pub mode: AgentMode,
+    /// What the model last read of each file; cleared with the chat.
+    pub reads: std::collections::HashMap<std::path::PathBuf, ReadMark>,
+    /// Edits and new files made in this chat, oldest first (`/changes`).
+    pub changes: Vec<AgentChange>,
+    /// A tool still waiting for a file load, the language server, or diagnostics.
+    pub wait: Option<ToolWait>,
 }
 
 impl Default for Panel {
@@ -213,6 +359,10 @@ impl Default for Panel {
             summary: None,
             compacting: None,
             context_used: None,
+            mode: AgentMode::Agent,
+            reads: std::collections::HashMap::new(),
+            changes: Vec::new(),
+            wait: None,
         }
     }
 }
@@ -244,6 +394,10 @@ pub enum AgentCommand {
         /// Older messages to fold into a new summary before this turn is sent.
         /// `App` has already dropped them from its memory.
         compact: Option<Vec<serde_json::Value>>,
+        /// Plan and Ask add their own instructions to the system prompt.
+        mode: AgentMode,
+        /// Workspace root. Its `AGENTS.md` is read here, off the UI thread.
+        workspace: Option<std::path::PathBuf>,
     },
     /// `/compact`: fold `older` (and the current summary) into a new summary now.
     Compact {
@@ -320,6 +474,24 @@ pub enum AgentEvent {
 }
 
 pub fn tool_specs() -> Vec<Value> {
+    tool_specs_for(false)
+}
+
+/// The tool list sent to the model. `read_only` (Plan and Ask) keeps only tools
+/// that never change a file.
+pub fn tool_specs_for(read_only: bool) -> Vec<Value> {
+    let mut specs = all_tool_specs();
+    if read_only {
+        specs.retain(|spec| {
+            spec.pointer("/function/name")
+                .and_then(Value::as_str)
+                .is_some_and(is_read_only_tool)
+        });
+    }
+    specs
+}
+
+fn all_tool_specs() -> Vec<Value> {
     vec![
         tool(
             "read_file",
@@ -357,8 +529,35 @@ pub fn tool_specs() -> Vec<Value> {
             }),
         ),
         tool(
+            "search",
+            "Find literal text in workspace files. Lowercase ignores case. glob narrows files, like *.rs or src/**. Returns path:line: text.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "glob": { "type": "string" }
+                },
+                "required": ["query"]
+            }),
+        ),
+        tool(
+            "lsp",
+            "Ask the language server about a symbol. op is definition, references, or hover. Give the 1-based line and the symbol name on that line (or a 1-based column).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "op": { "type": "string", "enum": ["definition", "references", "hover"] },
+                    "path": { "type": "string" },
+                    "line": { "type": "integer" },
+                    "symbol": { "type": "string" },
+                    "column": { "type": "integer" }
+                },
+                "required": ["op", "path", "line"]
+            }),
+        ),
+        tool(
             "apply_edit",
-            "Replace a 1-based inclusive line range, or one unique snippet. An open file is one undo step.",
+            "Replace a 1-based inclusive line range you have read, or a snippet (find/replace). find must be unique unless replace_all is true. One undo step; the file stays unsaved.",
             json!({
                 "type": "object",
                 "properties": {
@@ -367,7 +566,8 @@ pub fn tool_specs() -> Vec<Value> {
                     "end_line": { "type": "integer" },
                     "text": { "type": "string" },
                     "find": { "type": "string" },
-                    "replace": { "type": "string" }
+                    "replace": { "type": "string" },
+                    "replace_all": { "type": "boolean" }
                 },
                 "required": ["path"]
             }),
@@ -481,26 +681,40 @@ fn tool(name: &str, description: &str, parameters: Value) -> Value {
 }
 
 pub const SYSTEM: &str = "\
-You are the duckx-code assistant. Act with tools. Never tell the user to run steps you can do yourself. \
+You are the duckx-code assistant inside a code editor. The user may be typing in the editor while you work. Act with tools. Never tell the user to run steps you can do yourself. \
 Greetings and short chat: plain text, no tools. Each user message already ends with editor_state — do not call editor_state to greet. \
-Rules: paths stay in the workspace; no bash/shell; do not invent paths. \
-create_file / write_file: write a new file and open it (one new parent folder max; refuse if path exists). \
-apply_edit / search_replace: change an existing file (line range or unique snippet; open file = one undo). Edit at the cursor unless another path/line is named. \
-save: save an open file. Approval for apply_edit/create_file/save is handled by the app — call the tool; do not hesitate. \
+Rules: paths stay in the workspace; no bash/shell; do not invent paths. Use search to find code and lsp for definitions, references, and types. \
+create_file / write_file: write a new file (one new parent folder max; refuse if path exists). \
+apply_edit / search_replace: change an existing file in the editor (one undo step; it stays unsaved until saved). Prefer find/replace with a few unique lines. A line range needs a read_file of those lines first; if the file changed since, read it again. Edit at the cursor unless another path/line is named. \
+save: save an open file, only when the user asks. Approval for apply_edit/create_file/save is handled by the app — call the tool; do not hesitate. \
 Tool call format examples (emit a real tool call, not these as prose): \
 {\"name\":\"create_file\",\"arguments\":{\"path\":\"src/hi.rs\",\"text\":\"fn main() {}\"}} \
 {\"name\":\"apply_edit\",\"arguments\":{\"path\":\"a.rs\",\"find\":\"old\",\"replace\":\"new\"}} \
 When done, reply in short plain text.";
 
+/// Plan mode, added after [`SYSTEM`].
+pub const PLAN_PROMPT: &str = "\
+PLAN MODE. Do not change files: apply_edit, create_file, and save are not available. \
+Read the code you need (read_file, search, lsp, diagnostics), then reply with a short numbered plan: \
+each step names the file, the place, and the change. End by asking the user to switch to /agent to carry it out.";
+
+/// Ask mode, added after [`SYSTEM`].
+pub const ASK_PROMPT: &str = "\
+ASK MODE. Do not change files: apply_edit, create_file, and save are not available. \
+Answer the user's question. Read the code you need (read_file, search, lsp, diagnostics) and name files and lines in the answer.";
+
 /// Maps names and argument keys local models already emit onto the tools the editor runs.
 pub fn normalize_call(name: &str, arguments: &str) -> (String, String) {
-    let name = match name.trim() {
+    let original = name.trim();
+    let name = match original {
         "write" | "write_file" | "save_file" | "create" => "create_file",
         "read" | "read_text" | "read_text_file" => "read_file",
         "list" | "list_files" | "ls" | "dir" => "list_dir",
         "edit" | "edit_file" | "search_replace" | "str_replace" | "replace_in_file" => "apply_edit",
         "open" => "open_file",
         "goto_line" => "goto",
+        "grep" | "rg" | "find" | "search_files" | "find_in_files" | "search_code" => "search",
+        "definition" | "goto_definition" | "references" | "hover" => "lsp",
         "bash" | "shell" | "run_command" | "run_terminal_cmd" | "execute" | "powershell"
         | "cmd" => "shell",
         other => other,
@@ -521,6 +735,27 @@ pub fn normalize_call(name: &str, arguments: &str) -> (String, String) {
     move_alias(obj, &["new_string", "new_str", "new_text"], "replace");
     move_alias(obj, &["start", "offset"], "start_line");
     move_alias(obj, &["end"], "end_line");
+    move_alias(obj, &["replaceAll", "all"], "replace_all");
+    if name == "search" {
+        move_alias(obj, &["pattern", "regex", "q", "text"], "query");
+        move_alias(obj, &["include", "glob_pattern", "files"], "glob");
+    }
+    if name == "lsp" {
+        move_alias(obj, &["operation", "kind", "action"], "op");
+        move_alias(obj, &["name", "identifier", "word"], "symbol");
+        move_alias(obj, &["character", "col"], "column");
+        if !obj.contains_key("op") {
+            let op = match original {
+                "definition" | "goto_definition" => Some("definition"),
+                "references" => Some("references"),
+                "hover" => Some("hover"),
+                _ => None,
+            };
+            if let Some(op) = op {
+                obj.insert("op".into(), json!(op));
+            }
+        }
+    }
     if name == "read_file" && !obj.contains_key("end_line") {
         if let Some(limit) = obj.remove("limit").and_then(|value| value.as_u64()) {
             let start = obj
@@ -554,8 +789,46 @@ fn move_alias(obj: &mut serde_json::Map<String, Value>, from: &[&str], to: &str)
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_call;
+    use super::{AgentMode, normalize_call, tool_specs_for};
     use serde_json::Value;
+
+    #[test]
+    fn grep_like_calls_become_search() {
+        let (name, arguments) = normalize_call("grep", r#"{"pattern":"fn main","include":"*.rs"}"#);
+        assert_eq!(name, "search");
+        let value: Value = serde_json::from_str(&arguments).unwrap();
+        assert_eq!(value["query"], "fn main");
+        assert_eq!(value["glob"], "*.rs");
+    }
+
+    #[test]
+    fn lsp_aliases_keep_the_operation() {
+        let (name, arguments) =
+            normalize_call("goto_definition", r#"{"path":"a.rs","line":3,"name":"foo"}"#);
+        assert_eq!(name, "lsp");
+        let value: Value = serde_json::from_str(&arguments).unwrap();
+        assert_eq!(value["op"], "definition");
+        assert_eq!(value["symbol"], "foo");
+        let (_, arguments) = normalize_call("apply_edit", r#"{"path":"a","find":"x","replaceAll":true}"#);
+        let value: Value = serde_json::from_str(&arguments).unwrap();
+        assert_eq!(value["replace_all"], true);
+    }
+
+    #[test]
+    fn read_only_modes_send_no_editing_tools() {
+        assert!(AgentMode::Plan.read_only() && AgentMode::Ask.read_only());
+        assert!(!AgentMode::Agent.read_only());
+        let names: Vec<String> = tool_specs_for(true)
+            .iter()
+            .filter_map(|spec| spec.pointer("/function/name")?.as_str().map(str::to_string))
+            .collect();
+        for name in ["read_file", "search", "lsp", "diagnostics"] {
+            assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+        }
+        for name in ["apply_edit", "create_file", "save"] {
+            assert!(!names.iter().any(|n| n == name), "{name} in {names:?}");
+        }
+    }
 
     #[test]
     fn write_file_content_is_create_file_text() {

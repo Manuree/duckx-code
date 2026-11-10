@@ -477,6 +477,14 @@ enum Pending {
     },
 }
 
+/// A short notice floating above the status bar.
+pub struct Snackbar {
+    pub text: String,
+    /// A failed turn, drawn in the error color.
+    pub error: bool,
+    pub until: std::time::Instant,
+}
+
 pub struct App {
     /// Delete provider was pressed once for this named provider; the next `Enter` removes it.
     provider_delete_armed: Option<String>,
@@ -492,6 +500,9 @@ pub struct App {
     recent_explorer: Option<CommandId>,
     /// One-shot status message, cleared by the next action.
     pub message: Option<String>,
+    /// A reply that arrived while the assistant panel was hidden. Drawn above
+    /// the status bar until it expires or the panel opens.
+    pub snackbar: Option<Snackbar>,
     pub clipboard: Clipboard,
     pub branch: Option<String>,
     pub explorer: Explorer,
@@ -502,6 +513,8 @@ pub struct App {
     reveal_created: Option<PathBuf>,
     /// Preferred explorer column width. Drawing clamps it to half the terminal.
     sidebar_width: u16,
+    /// Rows the user chose for the assistant panel. `None` keeps the automatic height.
+    agent_height: Option<u16>,
     /// File picker modal. `None` while it is closed.
     pub file_picker: Option<FilePicker>,
     /// Last workspace walk, reused so the next picker opens before the refresh finishes.
@@ -635,12 +648,14 @@ impl App {
             recent_command: None,
             recent_explorer: None,
             message: None,
+            snackbar: None,
             clipboard: Clipboard::in_memory(),
             branch: None,
             explorer: Explorer::new(PathBuf::from(".")),
             reveal_file: None,
             reveal_created: None,
             sidebar_width: layout::SIDEBAR_WIDTH,
+            agent_height: None,
             file_picker: None,
             file_index: None,
             index_generation: 0,
@@ -1115,6 +1130,10 @@ impl App {
         if height < 10 {
             return 0;
         }
+        let limit = height.saturating_sub(6).max(4);
+        if let Some(chosen) = self.agent_height {
+            return chosen.clamp(4, limit);
+        }
         let base = 8.min(height / 3).max(4);
         let width = self.screen_width.saturating_sub(2).saturating_sub(3).max(1) as usize;
         let prompt_lines = crate::agent::wrap_rows(&self.agent.prompt, width)
@@ -1330,10 +1349,21 @@ impl App {
                 call_id,
                 result,
                 open,
+                read,
             } => {
                 if turn == self.agent.turn && self.agent.busy {
+                    if let Some((path, fingerprint)) = read {
+                        self.agent
+                            .reads
+                            .insert(path, crate::agent::ReadMark::Disk(fingerprint));
+                    }
                     if let Some(path) = open {
-                        self.open_path(path);
+                        self.agent_opened_new_file(&path);
+                        if self.agent_may_move_view() {
+                            self.open_path(path);
+                        } else {
+                            self.open_in_background(path);
+                        }
                     }
                 }
                 self.reply_tool(turn, call_id, result);
@@ -1822,6 +1852,35 @@ impl App {
             return;
         }
         self.sidebar_width = next;
+        self.message = None;
+    }
+
+    /// Grow or shrink the assistant panel by one row. Only while its prompt is focused.
+    /// At either limit the status line says so. The choice lasts until duckx-code quits.
+    fn resize_agent(&mut self, taller: bool) {
+        if self.focus() != Focus::Agent {
+            return;
+        }
+        let current = self.agent_rows();
+        let limit = self.screen_height.saturating_sub(6).max(4);
+        let next = if taller {
+            current.saturating_add(1)
+        } else {
+            current.saturating_sub(1)
+        };
+        let next = next.clamp(4, limit);
+        if next == current {
+            self.message = Some(
+                if taller {
+                    "Assistant is at its tallest"
+                } else {
+                    "Assistant is at its shortest"
+                }
+                .to_string(),
+            );
+            return;
+        }
+        self.agent_height = Some(next);
         self.message = None;
     }
 
@@ -2474,6 +2533,7 @@ impl App {
             SemanticAction::CommandBar(action) => self.handle_command_bar(action),
             SemanticAction::ToggleSidebar => self.toggle_sidebar(),
             SemanticAction::ResizeSidebar { wider } => self.resize_sidebar(wider),
+            SemanticAction::ResizeAgent { taller } => self.resize_agent(taller),
             SemanticAction::Sidebar(action) => self.handle_sidebar(action),
             SemanticAction::FocusAdjacent(direction) => self.focus_adjacent(direction),
             SemanticAction::FocusPrefix => self.start_pane_select(),
@@ -5727,6 +5787,7 @@ impl App {
         }
         self.agent = crate::agent::Panel::default();
         self.agent.turn = turn.wrapping_add(1);
+        self.snackbar = None;
     }
 
     fn install_empty_workspace(&mut self, path: &Path) {
@@ -6212,6 +6273,19 @@ impl App {
         if let Some(tab) = self.find_tab_mut(tab_id) {
             tab.loading = false;
         }
+        let failure = result.as_ref().err().map(|error| error.clone().message(&path));
+        self.finish_load_inner(tab_id, path, kind, result, baseline);
+        self.agent_tab_loaded(tab_id, failure);
+    }
+
+    fn finish_load_inner(
+        &mut self,
+        tab_id: TabId,
+        path: PathBuf,
+        kind: LoadKind,
+        result: Result<Decoded, OpenError>,
+        baseline: u64,
+    ) {
         let reloading = matches!(kind, LoadKind::Reload { .. });
         let place = match &kind {
             LoadKind::Reload { line, col, .. } => Some((*line, *col)),
@@ -7410,10 +7484,9 @@ mod tests {
         app.ai.model = "qwen".into();
         app.agent.busy = true;
         app.agent.turn = 1;
-        let args = format!(
-            r#"{{"path":"{}","find":"hello","replace":"hi"}}"#,
-            file.display()
-        );
+        app.agent.open = true;
+        app.agent.focused = true;
+        let args = serde_json::json!({"path": file, "find": "hello", "replace": "hi"}).to_string();
         app.handle_agent(crate::agent::AgentEvent::Tool {
             id: 1,
             call_id: "c1".into(),
@@ -7455,10 +7528,8 @@ mod tests {
             id: 1,
             call_id: "c3".into(),
             name: "apply_edit".into(),
-            arguments: format!(
-                r#"{{"path":"{}","find":"hi","replace":"hey"}}"#,
-                file.display()
-            ),
+            arguments: serde_json::json!({"path": file, "find": "hi", "replace": "hey"})
+                .to_string(),
         });
         assert!(app.agent.pending.is_none());
         assert_eq!(app.buffer().rope().to_string(), "hey\n");
@@ -7485,10 +7556,9 @@ mod tests {
         app.ai.model = "qwen".into();
         app.agent.busy = true;
         app.agent.turn = 1;
-        let args = format!(
-            r#"{{"path":"{}","find":"hello","replace":"hi"}}"#,
-            file.display()
-        );
+        app.agent.open = true;
+        app.agent.focused = true;
+        let args = serde_json::json!({"path": file, "find": "hello", "replace": "hi"}).to_string();
         app.handle_agent(crate::agent::AgentEvent::Tool {
             id: 1,
             call_id: "c1".into(),
@@ -7600,7 +7670,8 @@ mod tests {
         let screen_status = app.agent.session_allow.iter().cloned().collect::<Vec<_>>();
         assert_eq!(screen_status, vec!["create_file".to_string()]);
 
-        // /new clears the allowlist.
+        // /new clears the allowlist once the turn is done.
+        app.agent.busy = false;
         app.clear_agent_chat();
         assert!(app.agent.session_allow.is_empty());
         app.agent.busy = true;
@@ -7617,6 +7688,7 @@ mod tests {
         app.handle(SemanticAction::Agent(crate::action::AgentAction::Move { right: true, extend: false }));
         app.handle(SemanticAction::Agent(crate::action::AgentAction::Submit));
         assert!(app.agent.session_allow.contains("create_file"));
+        app.agent.busy = false;
         app.handle(SemanticAction::Agent(crate::action::AgentAction::NewChat));
         assert!(app.agent.session_allow.is_empty(), "Ctrl+L clears");
         let _ = std::fs::remove_dir_all(&root);
@@ -7846,6 +7918,33 @@ mod tests {
         assert_eq!(app.sidebar_width(), 16);
         app.handle(SemanticAction::ResizeSidebar { wider: false });
         assert_eq!(app.message.as_deref(), Some("Sidebar is at its narrowest"));
+    }
+
+    #[test]
+    fn alt_up_grows_the_agent_panel_and_alt_down_shrinks_it() {
+        let mut app = App::new(Buffer::from_text(""), None);
+        app.set_screen_size(80, 40);
+        app.agent.open = true;
+        app.agent.focused = true;
+        let start = app.agent_rows();
+        assert!(start > 4 && start < 34, "{start}");
+        app.handle(SemanticAction::ResizeAgent { taller: true });
+        assert_eq!(app.agent_rows(), start + 1);
+        app.handle(SemanticAction::ResizeAgent { taller: false });
+        assert_eq!(app.agent_rows(), start);
+        for _ in 0..80 {
+            app.handle(SemanticAction::ResizeAgent { taller: false });
+        }
+        assert_eq!(app.agent_rows(), 4);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Assistant is at its shortest")
+        );
+        for _ in 0..80 {
+            app.handle(SemanticAction::ResizeAgent { taller: true });
+        }
+        assert_eq!(app.agent_rows(), 34);
+        assert_eq!(app.message.as_deref(), Some("Assistant is at its tallest"));
     }
 
     #[test]

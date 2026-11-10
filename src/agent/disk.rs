@@ -1,10 +1,14 @@
-//! File reads and writes the assistant runs off the UI thread.
+//! File reads, searches, and new files the assistant runs off the UI thread.
+//! Edits to existing files never happen here: they go through an editor buffer,
+//! so each one is an undo step and stays unsaved until someone saves it.
 
 use std::path::{Path, PathBuf};
 
-use crate::services::fs;
+use ropey::Rope;
 
-use super::edit::{self, FileEdit};
+use crate::services::{encoding, fs};
+
+use super::edit;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiskTask {
@@ -16,13 +20,17 @@ pub enum DiskTask {
     List {
         path: PathBuf,
     },
-    Edit {
-        path: PathBuf,
-        edit: FileEdit,
-    },
     Create {
         path: PathBuf,
         text: String,
+    },
+    /// Literal text in workspace files. `open` holds the text of open buffers, which
+    /// wins over the bytes on disk. `glob` narrows the files, like `*.rs` or `src/**`.
+    Search {
+        root: PathBuf,
+        query: String,
+        glob: Option<String>,
+        open: Vec<(PathBuf, Rope)>,
     },
 }
 
@@ -30,40 +38,42 @@ pub enum DiskTask {
 pub struct DiskReport {
     pub message: String,
     pub open: Option<PathBuf>,
+    /// A successful read: the file and the fingerprint of the text the model saw.
+    pub read: Option<(PathBuf, u64)>,
 }
 
 const MAX_NAMES: usize = 200;
 pub const MAX_BYTES: usize = 2_000_000;
+/// Matching lines a search returns.
+const MAX_HITS: usize = 60;
+/// Files a search opens before it stops.
+const MAX_SEARCH_FILES: usize = 5_000;
 
 /// The message is what the model reads, including a failure.
 pub fn perform(task: DiskTask) -> DiskReport {
     match task {
-        DiskTask::Read { path, start, end } => report(match read_text_capped(&path) {
-            Ok(text) => edit::read_lines(&text, start, end).unwrap_or_else(|err| err),
-            Err(err) => err,
-        }),
-        DiskTask::List { path } => report(match list_dir(&path) {
-            Ok(text) => text,
-            Err(err) => format!("Cannot list {}: {err}", path.display()),
-        }),
-        DiskTask::Create { path, text } => create_file(path, text),
-        DiskTask::Edit { path, edit } => match read_text_capped(&path) {
-            Ok(text) => match edit::apply_str(&text, &edit) {
-                Ok(new_text) => match fs::write_atomic(&path, &new_text) {
-                    Ok(()) => report(match &edit {
-                        FileEdit::Lines { start, end, .. } => {
-                            format!("Replaced lines {start}-{end} in {}", path.display())
-                        }
-                        FileEdit::Snippet { .. } => {
-                            format!("Replaced one snippet in {}", path.display())
-                        }
-                    }),
-                    Err(err) => report(err),
+        DiskTask::Read { path, start, end } => match read_decoded(&path) {
+            Ok(text) => match edit::read_lines(&text, start, end) {
+                Ok(lines) => DiskReport {
+                    message: lines,
+                    open: None,
+                    read: Some((path, crate::buffer::fingerprint_bytes(text.as_bytes()))),
                 },
                 Err(err) => report(err),
             },
             Err(err) => report(err),
         },
+        DiskTask::List { path } => report(match list_dir(&path) {
+            Ok(text) => text,
+            Err(err) => format!("Cannot list {}: {err}", path.display()),
+        }),
+        DiskTask::Create { path, text } => create_file(path, text),
+        DiskTask::Search {
+            root,
+            query,
+            glob,
+            open,
+        } => report(search(&root, &query, glob.as_deref(), &open)),
     }
 }
 
@@ -71,7 +81,105 @@ fn report(message: String) -> DiskReport {
     DiskReport {
         message,
         open: None,
+        read: None,
     }
+}
+
+/// The text the editor would load, so its fingerprint matches the buffer's.
+fn read_decoded(path: &Path) -> Result<String, String> {
+    check_file_size(path)?;
+    encoding::read_auto(path)
+        .map(|decoded| decoded.text)
+        .map_err(|err| err.message(path))
+}
+
+/// `path:line: text` for each line holding `query`. Lowercase queries ignore case.
+fn search(root: &Path, query: &str, glob: Option<&str>, open: &[(PathBuf, Rope)]) -> String {
+    let query = query.trim_end_matches(['\r', '\n']);
+    if query.trim().is_empty() {
+        return "query is empty".to_string();
+    }
+    let fold = !query.chars().any(char::is_uppercase);
+    let needle = if fold { query.to_lowercase() } else { query.to_string() };
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder.hidden(true).git_ignore(true).require_git(false);
+    if let Some(glob) = glob.map(str::trim).filter(|glob| !glob.is_empty()) {
+        let mut overrides = ignore::overrides::OverrideBuilder::new(root);
+        let pattern = if glob.contains('/') {
+            glob.to_string()
+        } else {
+            format!("**/{glob}")
+        };
+        if let Err(err) = overrides.add(&pattern) {
+            return format!("Bad glob {glob}: {err}");
+        }
+        match overrides.build() {
+            Ok(built) => {
+                builder.overrides(built);
+            }
+            Err(err) => return format!("Bad glob {glob}: {err}"),
+        }
+    }
+    let mut hits = Vec::new();
+    let mut files = 0usize;
+    let mut more = false;
+    for entry in builder.build().flatten() {
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        files += 1;
+        if files > MAX_SEARCH_FILES {
+            more = true;
+            break;
+        }
+        let path = entry.path();
+        let text = match open
+            .iter()
+            .find(|(open_path, _)| crate::session::same_directory(open_path, path))
+        {
+            Some((_, rope)) => rope.to_string(),
+            None => {
+                if check_file_size(path).is_err() {
+                    continue;
+                }
+                match std::fs::read(path) {
+                    Ok(bytes) if !bytes.contains(&0) => String::from_utf8_lossy(&bytes).into_owned(),
+                    _ => continue,
+                }
+            }
+        };
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (index, line) in text.lines().enumerate() {
+            let found = if fold {
+                line.to_lowercase().contains(&needle)
+            } else {
+                line.contains(&needle)
+            };
+            if !found {
+                continue;
+            }
+            if hits.len() >= MAX_HITS {
+                more = true;
+                break;
+            }
+            let line: String = line.trim().chars().take(160).collect();
+            hits.push(format!("{relative}:{}: {line}", index + 1));
+        }
+        if more {
+            break;
+        }
+    }
+    if hits.is_empty() {
+        return format!("No matches for {query}");
+    }
+    if more {
+        hits.push(format!("… (stopped at {MAX_HITS} matches; narrow the query or glob)"));
+    }
+    hits.join("\n")
 }
 
 /// Refuse oversized files before loading them into memory.
@@ -87,11 +195,6 @@ pub fn check_file_size(path: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn read_text_capped(path: &Path) -> Result<String, String> {
-    check_file_size(path)?;
-    std::fs::read_to_string(path).map_err(|err| format!("Cannot read {}: {err}", path.display()))
 }
 
 /// How many directory components may be created for a new file (parent must mostly exist).
@@ -159,6 +262,7 @@ fn create_file(path: PathBuf, text: String) -> DiskReport {
         Ok(()) => DiskReport {
             message: format!("Created {}", path.display()),
             open: Some(path),
+            read: None,
         },
         Err(err) => report(err),
     }
@@ -289,4 +393,60 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn a_read_reports_the_fingerprint_of_the_text_it_returned() {
+        let path = temp_file("read.txt");
+        fs::write(&path, "one\ntwo\n").unwrap();
+        let report = perform(DiskTask::Read {
+            path: path.clone(),
+            start: 1,
+            end: 0,
+        });
+        assert!(report.message.contains("2|two"), "{}", report.message);
+        let (seen, hash) = report.read.expect("read mark");
+        assert_eq!(seen, path);
+        assert_eq!(hash, crate::buffer::Buffer::from_text("one\ntwo\n").fingerprint());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn search_finds_lines_prefers_open_text_and_honors_the_glob() {
+        let root = temp_file("search-root");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("a.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
+        fs::write(root.join("notes.md"), "Alpha notes\n").unwrap();
+        let found = perform(DiskTask::Search {
+            root: root.clone(),
+            query: "alpha".into(),
+            glob: None,
+            open: Vec::new(),
+        })
+        .message;
+        assert!(found.contains("src/a.rs:1: fn alpha() {}"), "{found}");
+        assert!(found.contains("notes.md:1: Alpha notes"), "lowercase ignores case: {found}");
+
+        let only_rs = perform(DiskTask::Search {
+            root: root.clone(),
+            query: "alpha".into(),
+            glob: Some("*.rs".into()),
+            open: Vec::new(),
+        })
+        .message;
+        assert!(!only_rs.contains("notes.md"), "{only_rs}");
+
+        let open = vec![(
+            root.join("src").join("a.rs"),
+            ropey::Rope::from_str("fn gamma() {}\n"),
+        )];
+        let edited = perform(DiskTask::Search {
+            root: root.clone(),
+            query: "gamma".into(),
+            glob: None,
+            open,
+        })
+        .message;
+        assert!(edited.contains("src/a.rs:1: fn gamma() {}"), "{edited}");
+        let _ = fs::remove_dir_all(&root);
+    }
 }

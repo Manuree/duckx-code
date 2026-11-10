@@ -652,7 +652,62 @@ impl App {
         });
     }
 
+    /// One query for the assistant at byte `at` in an open file. The reply comes
+    /// back through `handle_hover` / `handle_definition` / `handle_references`.
+    pub(super) fn agent_lsp_query(
+        &mut self,
+        path: &Path,
+        at: usize,
+        kind: QueryKind,
+    ) -> Result<u64, String> {
+        let Some(language) = Language::detect(path) else {
+            return Err("This file has no language server. Use search instead.".to_string());
+        };
+        let Some(server) = lsp::registry::servers_for(language).first() else {
+            return Err("This file has no language server. Use search instead.".to_string());
+        };
+        if !self.appearance.lsp.enabled {
+            return Err("Language servers are off in Settings. Use search instead.".to_string());
+        }
+        if let Some(features) = self.nav.features.get(server.name) {
+            let (supported, name) = match kind {
+                QueryKind::Hover => (features.hover, "hover"),
+                QueryKind::Definition => (features.definition, "go to definition"),
+                QueryKind::References => (features.references, "find references"),
+                _ => (true, ""),
+            };
+            if !supported {
+                return Err(format!("The language server does not support {name}"));
+            }
+        }
+        self.nav.next_token = self.nav.next_token.wrapping_add(1);
+        let token = self.nav.next_token;
+        self.lsp_nav_requests.push(LspRequest::Query {
+            token,
+            path: path.to_path_buf(),
+            at,
+            kind,
+        });
+        Ok(token)
+    }
+
+    /// `path:line:column  code` for the assistant.
+    pub(super) fn target_label(&self, target: &JumpTarget) -> String {
+        let path = super::relative_to(&self.explorer.root, &target.path)
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| target.path.display().to_string());
+        let place = format!("{path}:{}:{}", target.line + 1, target.character + 1);
+        match self.open_line(&target.path, target.line) {
+            Some(text) if !text.is_empty() => format!("{place}  {}", clip(&text, 120)),
+            _ => place,
+        }
+    }
+
     pub(super) fn handle_hover(&mut self, token: u64, text: Option<String>) {
+        if self.agent_waits_lsp(token) {
+            self.agent_lsp_answer(token, super::agent::AgentLspAnswer::Hover(text));
+            return;
+        }
         if self.nav.hover_token != Some(token) {
             return;
         }
@@ -664,6 +719,10 @@ impl App {
     }
 
     pub(super) fn handle_definition(&mut self, token: u64, locations: Vec<JumpTarget>) {
+        if self.agent_waits_lsp(token) {
+            self.agent_lsp_answer(token, super::agent::AgentLspAnswer::Locations(locations));
+            return;
+        }
         if self.nav.definition_token != Some(token) {
             return;
         }
@@ -684,6 +743,10 @@ impl App {
     }
 
     pub(super) fn handle_references(&mut self, token: u64, locations: Vec<JumpTarget>) {
+        if self.agent_waits_lsp(token) {
+            self.agent_lsp_answer(token, super::agent::AgentLspAnswer::Locations(locations));
+            return;
+        }
         if self.nav.references_token != Some(token) {
             return;
         }

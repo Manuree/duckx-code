@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::provider::{self, CompleteOptions, Reply};
-use super::{AgentCommand, AgentEvent, SYSTEM};
+use super::{AgentCommand, AgentEvent, AgentMode, SYSTEM};
 
 /// Same tool and the same arguments, this many times in a row, ends the turn.
 const REPEAT: usize = 3;
@@ -69,7 +69,22 @@ async fn run(
                 prompt,
                 summary,
                 compact,
+                mode,
+                workspace,
             } => {
+                let rules = match &workspace {
+                    Some(root) => project_rules(root).await,
+                    None => None,
+                };
+                let system = SystemParts {
+                    mode,
+                    rules,
+                    summary,
+                };
+                let tuning = provider::Tuning {
+                    read_only: tuning.read_only || mode.read_only(),
+                    ..tuning
+                };
                 // Catch panics so a bug in parsing/streaming does not kill the agent task
                 // (and leave the TUI unable to start another turn).
                 let result = AssertUnwindSafe(run_turn(
@@ -87,7 +102,7 @@ async fn run(
                     &tuning,
                     history,
                     prompt,
-                    summary,
+                    system,
                     compact,
                 ))
                 .catch_unwind()
@@ -218,14 +233,50 @@ pub(crate) fn compact_transcript(
     format!("(older part cut)\n{tail}")
 }
 
-/// The system prompt, with the summary of folded turns after it.
-fn system_with_summary(summary: Option<&str>) -> String {
-    match summary.filter(|text| !text.trim().is_empty()) {
-        Some(summary) => format!(
-            "{SYSTEM}\n\nSummary of the earlier conversation (older turns were compacted):\n{summary}"
-        ),
-        None => SYSTEM.to_string(),
+/// Characters of `AGENTS.md` sent with each turn.
+pub(crate) const RULES_BUDGET: usize = 6_000;
+
+/// Everything after the base prompt: the mode, the project's `AGENTS.md`, and the
+/// summary of folded turns.
+struct SystemParts {
+    mode: AgentMode,
+    rules: Option<String>,
+    summary: Option<String>,
+}
+
+/// The workspace's `AGENTS.md`, cut to [`RULES_BUDGET`]. `None` when there is none.
+async fn project_rules(root: &std::path::Path) -> Option<String> {
+    let text = tokio::fs::read_to_string(root.join("AGENTS.md")).await.ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
     }
+    if text.chars().count() <= RULES_BUDGET {
+        return Some(text.to_string());
+    }
+    let cut: String = text.chars().take(RULES_BUDGET).collect();
+    Some(format!("{cut}\n… (AGENTS.md is longer; read_file it for the rest)"))
+}
+
+/// The system prompt: base rules, mode, project rules, then the summary of folded turns.
+fn system_prompt(parts: &SystemParts) -> String {
+    let mut text = SYSTEM.to_string();
+    let mode = parts.mode.prompt();
+    if !mode.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(mode);
+    }
+    if let Some(rules) = parts.rules.as_deref().filter(|text| !text.trim().is_empty()) {
+        text.push_str("\n\nProject instructions from AGENTS.md (follow them):\n");
+        text.push_str(rules);
+    }
+    if let Some(summary) = parts.summary.as_deref().filter(|text| !text.trim().is_empty()) {
+        text.push_str(
+            "\n\nSummary of the earlier conversation (older turns were compacted):\n",
+        );
+        text.push_str(summary);
+    }
+    text
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -244,13 +295,13 @@ async fn run_turn(
     tuning: &provider::Tuning,
     history: Vec<Value>,
     prompt: String,
-    summary: Option<String>,
+    system: SystemParts,
     compact: Option<Vec<Value>>,
 ) -> Result<(), String> {
-    let mut summary = summary;
+    let mut system = system;
     if let Some(older) = compact.filter(|older| !older.is_empty()) {
         let dropped = older.len();
-        let transcript = compact_transcript(summary.as_deref(), &older, num_ctx);
+        let transcript = compact_transcript(system.summary.as_deref(), &older, num_ctx);
         let options = CompleteOptions {
             api_key,
             stream: false,
@@ -275,7 +326,7 @@ async fn run_turn(
         };
         // On failure the older turns stay dropped and the turn goes on: plain truncation.
         if let Ok(text) = &result {
-            summary = Some(text.clone());
+            system.summary = Some(text.clone());
         }
         let _ = events.send(AgentEvent::Compacted {
             id,
@@ -283,9 +334,9 @@ async fn run_turn(
             dropped,
         });
     }
+    let read_only = system.mode.read_only();
     let mut messages = Vec::new();
-    let system = system_with_summary(summary.as_deref());
-    messages.push(json!({"role": "system", "content": system}));
+    messages.push(json!({"role": "system", "content": system_prompt(&system)}));
     messages.extend(history);
     messages.push(json!({"role": "user", "content": prompt}));
 
@@ -319,7 +370,11 @@ async fn run_turn(
             let _ = events.send(AgentEvent::ResetMemory { id });
         }
         if reply.calls.is_empty() {
-            if !nudged && wants_file_action(&prompt) && looks_like_manual_steps(&reply.content) {
+            if !read_only
+                && !nudged
+                && wants_file_action(&prompt)
+                && looks_like_manual_steps(&reply.content)
+            {
                 nudged = true;
                 messages.push(json!({"role": "assistant", "content": reply.content}));
                 messages.push(json!({
@@ -338,10 +393,12 @@ async fn run_turn(
                     "role": "assistant",
                     "content": ""
                 }));
-                messages.push(json!({
-                    "role": "user",
-                    "content": "Your previous reply had reasoning but no tool call and no visible answer (the tool call may have been cut off). Call create_file or apply_edit now with complete JSON arguments. Do not put the file body only inside thinking."
-                }));
+                let nudge = if read_only {
+                    "Your previous reply had reasoning but no visible answer. Write the answer now as plain text."
+                } else {
+                    "Your previous reply had reasoning but no tool call and no visible answer (the tool call may have been cut off). Call create_file or apply_edit now with complete JSON arguments. Do not put the file body only inside thinking."
+                };
+                messages.push(json!({ "role": "user", "content": nudge }));
                 continue;
             }
             let text = if reply.content.trim().is_empty() {
@@ -674,7 +731,77 @@ mod tests {
             prompt: "next".into(),
             summary: None,
             compact: Some(compact),
+            mode: crate::agent::AgentMode::Agent,
+            workspace: None,
         }
+    }
+
+    #[tokio::test]
+    async fn plan_mode_sends_only_read_only_tools_and_the_agents_md_rules() {
+        let root = std::env::temp_dir().join(format!(
+            "duckx-worker-rules-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "Always use tabs.\n").unwrap();
+        let (url, server) = serve(vec![answer("200 OK", &content("1. Change a.rs"))]);
+        let (tx, mut rx) = super::spawn();
+        let crate::agent::AgentCommand::Turn {
+            id,
+            server: url_field,
+            model,
+            api_key,
+            stream,
+            num_ctx,
+            ollama_native,
+            think,
+            tuning,
+            history,
+            prompt,
+            summary,
+            ..
+        } = turn(url, Vec::new())
+        else {
+            unreachable!()
+        };
+        tx.send(crate::agent::AgentCommand::Turn {
+            id,
+            server: url_field,
+            model,
+            api_key,
+            stream,
+            num_ctx,
+            ollama_native,
+            think,
+            tuning,
+            history,
+            prompt,
+            summary,
+            compact: None,
+            mode: crate::agent::AgentMode::Plan,
+            workspace: Some(root.clone()),
+        })
+        .unwrap();
+        let events = events_until_done(&mut rx).await;
+        assert!(matches!(events.last(), Some(crate::agent::AgentEvent::Reply { .. })));
+        let seen = server.join().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&seen[0]).unwrap();
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("PLAN MODE"), "{system}");
+        assert!(system.contains("Always use tabs."), "{system}");
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.pointer("/function/name").and_then(|name| name.as_str()))
+            .collect();
+        assert!(names.contains(&"read_file") && names.contains(&"search"), "{names:?}");
+        assert!(!names.contains(&"apply_edit") && !names.contains(&"create_file"), "{names:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     async fn events_until_done(

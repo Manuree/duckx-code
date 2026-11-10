@@ -268,6 +268,8 @@ pub enum AppEvent {
         result: String,
         /// A file the assistant just created. The core opens it.
         open: Option<PathBuf>,
+        /// A read from disk: the file and the fingerprint of the text the model saw.
+        read: Option<(PathBuf, u64)>,
     },
     SessionSaved {
         result: Result<(), String>,
@@ -422,19 +424,21 @@ pub fn run(job: Job) -> AppEvent {
             let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::agent::perform_disk(task)
             }));
-            let (result, open) = match caught {
-                Ok(report) => (report.message, report.open),
+            let (result, open, read) = match caught {
+                Ok(report) => (report.message, report.open, report.read),
                 Err(payload) => (
                     format!(
                         "Disk task panicked: {}",
                         crate::utf8::panic_message(payload)
                     ),
                     None,
+                    None,
                 ),
             };
             AppEvent::AgentDisk {
                 result,
                 open,
+                read,
                 turn,
                 call_id,
             }

@@ -120,6 +120,10 @@ pub enum SemanticAction {
     ResizeSidebar {
         wider: bool,
     },
+    /// Grow or shrink the assistant panel by one row. The editor keeps six rows.
+    ResizeAgent {
+        taller: bool,
+    },
     Sidebar(SidebarAction),
     /// Move focus to the neighboring surface. Does not move the text cursor.
     FocusAdjacent(PaneDirection),
