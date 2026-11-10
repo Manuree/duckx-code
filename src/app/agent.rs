@@ -34,6 +34,7 @@ impl App {
                 self.agent.thinking_draft = None;
                 self.remember_assistant(&text);
                 self.push_line(false, text);
+                self.remember_working_target();
                 self.agent.busy = false;
                 self.agent.busy_started = None;
                 self.agent.status = "ready".to_string();
@@ -321,7 +322,7 @@ impl App {
         self.focus_agent();
     }
 
-    fn submit_agent(&mut self) {
+    pub(crate) fn submit_agent(&mut self) {
         let prompt = self.agent.prompt.to_string();
         if prompt.trim().is_empty() || self.agent.busy {
             return;
@@ -376,6 +377,11 @@ impl App {
         self.agent.status = "waiting".to_string();
         let ollama_native = self.ai.provider == crate::settings::AiProvider::Ollama;
         let (api_key, _) = self.ai.resolved_api_key();
+        self.agent_target = Some((
+            self.ai.provider,
+            self.ai.endpoint(),
+            self.ai.model.trim().to_string(),
+        ));
         let _ = tx.send(AgentCommand::Turn {
             id,
             server: self.ai.endpoint(),
@@ -1193,6 +1199,7 @@ impl App {
         let name = args.trim();
         if !name.is_empty() {
             self.ai.model = name.to_string();
+            self.ai.remember_current();
             self.persist_ai_prefs();
             self.push_line(false, format!("model set to {name}"));
             return;
@@ -1248,6 +1255,23 @@ impl App {
 
     fn persist_ai_prefs(&mut self) {
         self.queue_settings_save();
+    }
+
+    /// A turn answered: its server and model go to the front of the recent lists,
+    /// unless the provider, server, or model changed while it ran.
+    fn remember_working_target(&mut self) {
+        let Some((provider, server, model)) = self.agent_target.take() else {
+            return;
+        };
+        if self.ai.provider != provider
+            || self.ai.endpoint() != server
+            || self.ai.model.trim() != model
+        {
+            return;
+        }
+        if self.ai.remember_current() {
+            self.queue_settings_save();
+        }
     }
 
     fn attach_mentions(&self, prompt: &str) -> String {

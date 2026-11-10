@@ -45,7 +45,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         .flatten();
     let binding = matches!(row_id, Some(SettingId::Binding(_)));
     let text_row = row_id.is_some_and(crate::settings::AiPrefs::is_text);
-    let footer = if page.text.is_some() {
+    let has_picks = page.text.is_some() && !app.draft_picks().is_empty();
+    let footer = if has_picks {
+        " type    ↑↓ recent    del forget    enter save    esc cancel"
+    } else if page.text.is_some() {
         " type    ←→ move    enter save    esc cancel"
     } else if page.capture {
         " press a key    esc cancel"
@@ -94,6 +97,7 @@ fn render_columns(
                 frame, inner, app, page, canvas, 0, width, 0, slots, footer_row,
             );
             paint_menu(frame, inner, app, page, 0, width, anchor, footer_row);
+            paint_picks(frame, inner, app, 0, width, anchor, footer_row);
         } else {
             render_sections(
                 frame, inner, app, page, canvas, 0, width, 0, slots, footer_row,
@@ -146,6 +150,7 @@ fn render_columns(
         paint_menu(
             frame, inner, app, page, left, body_width, anchor, footer_row,
         );
+        paint_picks(frame, inner, app, left, body_width, anchor, footer_row);
     }
 }
 
@@ -260,7 +265,7 @@ fn render_items(
         if let Some(column) = draft_column {
             place_draft_cursor(inner, x, row, column, width);
         }
-        if open {
+        if open || draft.is_some() {
             anchor = Some(row);
         }
     }
@@ -376,6 +381,10 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         },
         SettingId::AiTimeout => format!("{} s", app.ai.resolved_timeout()),
         SettingId::AiRetries => app.ai.resolved_retries().to_string(),
+        SettingId::AiClearRecent => match app.ai.recent.len() {
+            0 => "(empty)".to_string(),
+            n => format!("{n} saved · enter clears"),
+        },
         SettingId::AiAppName => text_or_none(&app.ai.openrouter_app_name),
         SettingId::AiReferer => text_or_none(&app.ai.openrouter_referer),
     }
@@ -390,6 +399,77 @@ fn text_or_none(value: &str) -> String {
 }
 
 const MENU_KEYS: &str = "↑↓  enter  esc ";
+
+/// Most entries the recent list under a text row shows at once.
+const PICK_ROWS: usize = 8;
+
+/// The list under the Server or Model row being typed: recent values first, then
+/// (for Model) the server's models. The highlighted entry is the one in the row.
+fn paint_picks(
+    frame: &mut Frame,
+    inner: Rect,
+    app: &App,
+    left: usize,
+    width: usize,
+    anchor: Option<u16>,
+    footer_row: u16,
+) {
+    let Some(anchor) = anchor else {
+        return;
+    };
+    let Some(draft) = app.settings.as_ref().and_then(|page| page.text.as_ref()) else {
+        return;
+    };
+    let picks = app.draft_picks();
+    if picks.is_empty() || width < 8 || footer_row == 0 {
+        return;
+    }
+    let want = picks.len().min(PICK_ROWS) as u16;
+    let room_below = footer_row.saturating_sub(anchor.saturating_add(1));
+    let room_above = anchor;
+    let (top, height) = if room_below >= 1 && (room_below >= want || room_below >= room_above) {
+        (anchor + 1, want.min(room_below))
+    } else if room_above >= 1 {
+        let height = want.min(room_above);
+        (anchor - height, height)
+    } else {
+        return;
+    };
+    let theme = *app.styles();
+    let slots = height as usize;
+    let selected = draft.pick;
+    let start = window_start(selected.unwrap_or(0), picks.len(), slots);
+    for (offset, (value, source)) in picks.iter().enumerate().skip(start).take(slots) {
+        let on = selected == Some(offset);
+        let tag = match source {
+            crate::settings::PickSource::Recent => "recent ",
+            crate::settings::PickSource::Server => "server ",
+        };
+        let base = if on { theme.hint_active } else { theme.hint };
+        let name_style = if on {
+            theme.hint_active_name
+        } else {
+            theme.hint_dim
+        };
+        let head = clip(&format!(" {value}"), width.saturating_sub(tag.width() + 1));
+        let gap = width.saturating_sub(head.width() + tag.width());
+        let line = Line::from(vec![
+            Span::styled(head, name_style),
+            Span::styled(" ".repeat(gap), base),
+            Span::styled(tag.to_string(), theme.hint_active_dim),
+        ]);
+        let y = inner.y + top + (offset - start) as u16;
+        let x = inner.x.saturating_add(left as u16);
+        if x >= inner.right() || y >= inner.bottom() {
+            return;
+        }
+        let rect_width = (width as u16).min(inner.right() - x);
+        frame.render_widget(
+            Paragraph::new(line).style(base),
+            Rect::new(x, y, rect_width, 1),
+        );
+    }
+}
 
 /// Theme names in the same rows as the command list: full width, no border,
 /// the highlighted name in the accent color, and the keys on that row.
@@ -439,6 +519,7 @@ fn paint_menu(
         | SettingId::AiRetries
         | SettingId::AiAppName
         | SettingId::AiReferer
+        | SettingId::AiClearRecent
         | SettingId::Binding(_) => return,
     };
     if names.is_empty() || width < 8 || footer_row == 0 {
