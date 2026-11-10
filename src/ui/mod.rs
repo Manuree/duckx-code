@@ -20,8 +20,8 @@ use std::path::Path;
 use ratatui::{
     Frame, Terminal,
     backend::Backend,
-    layout::{Position, Rect},
-    style::Style,
+    layout::Rect,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Paragraph},
 };
@@ -418,17 +418,11 @@ fn gutter_width(line_count: usize, diff_column: bool) -> usize {
     line_count.to_string().len().max(3) + 2 + usize::from(diff_column)
 }
 
-/// Paint one frame, then show the block cursor on the recorded cell.
-///
-/// The cursor stays hidden while changed cells are written, so a spinning
-/// title does not catch the block.
+/// Paint one frame. The block cursor is a reversed cell, so the terminal
+/// cursor stays hidden and a changed cell cannot catch it.
 pub fn draw<B: Backend>(terminal: &mut Terminal<B>, app: &App) -> io::Result<()> {
     terminal.hide_cursor()?;
     terminal.draw(|frame| render(frame, app))?;
-    if let Some((x, y)) = cursor::position() {
-        terminal.set_cursor_position(Position::new(x, y))?;
-        terminal.show_cursor()?;
-    }
     Ok(())
 }
 
@@ -521,6 +515,30 @@ pub fn render(frame: &mut Frame, app: &App) {
         area.bottom()
     };
     snackbar::render(frame, app, area, floor);
+    paint_block_cursor(frame);
+}
+
+/// Reverse the recorded cell. A wide character keeps its glyph in the previous
+/// cell, and an empty cell gets a space so the block is visible past the text.
+fn paint_block_cursor(frame: &mut Frame) {
+    let Some((x, y)) = cursor::position() else {
+        return;
+    };
+    let buf = frame.buffer_mut();
+    let area = buf.area;
+    if x < area.x || y < area.y || x >= area.right() || y >= area.bottom() {
+        return;
+    }
+    let x = if buf[(x, y)].skip && x > area.x {
+        x - 1
+    } else {
+        x
+    };
+    let cell = &mut buf[(x, y)];
+    if cell.symbol().is_empty() {
+        cell.set_symbol(" ");
+    }
+    cell.set_style(Style::new().add_modifier(Modifier::REVERSED));
 }
 
 #[cfg(test)]
@@ -814,16 +832,29 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         super::draw(&mut terminal, &app).unwrap();
         let (x, y) = cursor::position().expect("prompt cursor");
-        let pos = terminal.get_cursor_position().unwrap();
-        assert_eq!((pos.x, pos.y), (x, y));
-        let cursor_cell = terminal.backend().buffer()[(x, y)].symbol();
-        assert_ne!(cursor_cell, "⠋");
+        let cursor_cell = &terminal.backend().buffer()[(x, y)];
+        assert_ne!(cursor_cell.symbol(), "⠋");
+        assert!(
+            cursor_cell.modifier.contains(Modifier::REVERSED),
+            "prompt cursor is a reversed cell"
+        );
         let spinner = (0..24).find_map(|row| {
             (0..80).find_map(|col| {
                 (terminal.backend().buffer()[(col, row)].symbol() == "⠋").then_some((col, row))
             })
         });
         assert_ne!(spinner, Some((x, y)));
+    }
+
+    #[test]
+    fn the_editor_cursor_is_a_reversed_cell() {
+        let app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        super::draw(&mut terminal, &app).unwrap();
+        let (x, y) = cursor::position().expect("editor cursor");
+        let cell = &terminal.backend().buffer()[(x, y)];
+        assert_eq!(cell.symbol(), "f");
+        assert!(cell.modifier.contains(Modifier::REVERSED));
     }
 
     #[test]

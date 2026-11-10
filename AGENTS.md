@@ -32,7 +32,7 @@ Before making structural, UX, or architectural changes, always consult:
    * `UI & Viewport` (`ratatui`) must remain a pure, read-only projection of `Application Core` state—never mutate editor state inside rendering functions.
 5. **UI Requirements ([`DESIGN.md` §5](./DESIGN.md#5-ui-requirements)):**
    * **R1 Rounded Borders:** every bordered element must be built with `ui::panel(title)` (rounded `╭╮╰╯` corners). Never construct `Block::bordered()` or set another `BorderType` directly. Any new bordered widget needs a render test asserting rounded corners.
-   * **R2 Block Cursor:** the cursor is set to `SetCursorStyle::SteadyBlock` at startup; never switch it to a bar or underline.
+   * **R2 Block Cursor:** the visible cursor is a reversed cell in the frame. The terminal cursor stays hidden. Never switch it to a bar or underline. `SetCursorStyle::SteadyBlock` is set at startup and restored on exit.
 
 ---
 

@@ -1,9 +1,8 @@
 //! Screen cell for the block cursor.
 //!
-//! The frame flush writes a changed cell by moving the terminal cursor onto
-//! it. The wait spinner is that cell on most frames, so the block blinks on
-//! the icon. Rendering only records the cell. The main loop places the cursor
-//! after the flush, while it is still hidden.
+//! The block is a reversed cell in the frame, the same idea as ratatui-textarea.
+//! Rendering only records the cell. The frame paints it after every widget, and
+//! the terminal cursor stays hidden so a changed cell cannot catch the block.
 
 use std::cell::Cell;
 
