@@ -431,7 +431,7 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         },
         SettingId::AiTimeout => format!("{} s", app.ai.resolved_timeout()),
         SettingId::AiRetries => app.ai.resolved_retries().to_string(),
-        SettingId::AiDetected => match (app.ai.model_tools_key(), app.ai.detected_now()) {
+        SettingId::AiDetected => match (app.ai.model_key(), app.ai.detected_now()) {
             (None, _) => "(set a model first)".to_string(),
             (Some(_), (false, false)) => "none".to_string(),
             (Some(_), (tools, think)) => {

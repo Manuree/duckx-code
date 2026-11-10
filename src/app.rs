@@ -1494,7 +1494,7 @@ impl App {
     fn forget_detected(&mut self) {
         let keys = self.ai.detected_keys();
         if keys.is_empty() {
-            self.message = Some(if self.ai.model_tools_key().is_none() {
+            self.message = Some(if self.ai.model_key().is_none() {
                 "Set a model first".to_string()
             } else {
                 "Nothing detected for this model".to_string()
@@ -2594,7 +2594,7 @@ impl App {
             return;
         }
         if let Some(crate::settings::SettingId::AiModelTools) = opens_menu
-            && self.ai.model_tools_key().is_none()
+            && self.ai.model_key().is_none()
         {
             self.message = Some("Set a model first".to_string());
             return;
@@ -10975,31 +10975,31 @@ mod tests {
             [
                 "Assistant",
                 "Provider",
-                "Add provider",
                 "Server",
                 "Model",
+                "API key",
                 "Model context",
                 "Model max output",
-                "API key",
-                "Provider name",
-                "Provider kind",
-                "API key variable",
-                "Saved models",
-                "Delete provider",
+                "Model tools",
+                "Detected limits",
                 "Max tokens",
                 "Request timeout",
                 "Retries",
                 "Streaming",
                 "Auto-approve tools",
                 "Thinking",
-                "Model tools",
-                "Detected limits",
                 "Context size",
                 "Auto compact",
                 "Keep tokens",
                 "Compact buffer",
                 "OpenRouter app name",
                 "OpenRouter referer",
+                "Add provider",
+                "Provider name",
+                "Provider kind",
+                "API key variable",
+                "Saved models",
+                "Delete provider",
                 "Clear recent history",
             ]
         );

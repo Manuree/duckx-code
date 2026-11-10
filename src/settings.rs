@@ -1027,7 +1027,9 @@ impl AiPrefs {
         }
     }
 
-    /// `"<provider> <model>"`, the key of this model's limits. `None` without a model.
+    /// `"<provider> <model>"`: the one key for everything kept per model
+    /// (`model_limits`, `model_tools`). `provider` is the kind, so a named
+    /// provider shares entries with the built-in of its kind. `None` without a model.
     pub fn model_key(&self) -> Option<String> {
         let model = self.model.trim();
         (!model.is_empty()).then(|| format!("{} {model}", self.provider.as_str()))
@@ -1301,22 +1303,16 @@ impl AiPrefs {
         }
     }
 
-    /// `"<provider> <model>"`, the key of this model's tools mode. `None` without a model.
-    pub fn model_tools_key(&self) -> Option<String> {
-        let model = self.model.trim();
-        (!model.is_empty()).then(|| format!("{} {model}", self.provider.as_str()))
-    }
-
     /// Native tools for the current model. `Auto` without an entry.
     pub fn model_tools_mode(&self) -> ToolsMode {
-        self.model_tools_key()
+        self.model_key()
             .and_then(|key| self.model_tools.get(&key).copied())
             .unwrap_or_default()
     }
 
     /// Sets the current model's tools mode. `Auto` removes the entry.
     pub fn set_model_tools(&mut self, mode: ToolsMode) {
-        let Some(key) = self.model_tools_key() else {
+        let Some(key) = self.model_key() else {
             return;
         };
         if mode == ToolsMode::Auto {
@@ -1931,11 +1927,6 @@ pub fn sections() -> &'static [Section] {
                             id: SettingId::AiProvider,
                         },
                         Item {
-                            label: "Add provider",
-                            detail: "Type a name to add your own provider, starting from the selected one's kind and server.",
-                            id: SettingId::AiProviderAdd,
-                        },
-                        Item {
                             label: "Server",
                             detail: "Base URL for this provider, including /v1. Empty uses the default.",
                             id: SettingId::AiServer,
@@ -1944,6 +1935,11 @@ pub fn sections() -> &'static [Section] {
                             label: "Model",
                             detail: "Model name for this provider, e.g. qwen3:8b or anthropic/claude-sonnet-4.",
                             id: SettingId::AiModel,
+                        },
+                        Item {
+                            label: "API key",
+                            detail: "Bearer token for this provider. OPENROUTER_API_KEY or OPENAI_API_KEY wins when set.",
+                            id: SettingId::AiApiKey,
                         },
                         Item {
                             label: "Model context",
@@ -1956,34 +1952,14 @@ pub fn sections() -> &'static [Section] {
                             id: SettingId::AiModelMaxOutput,
                         },
                         Item {
-                            label: "API key",
-                            detail: "Bearer token for this provider. OPENROUTER_API_KEY or OPENAI_API_KEY wins when set.",
-                            id: SettingId::AiApiKey,
+                            label: "Model tools",
+                            detail: "Native tools for this model. Auto detects; On always sends them; Off uses the text tool prompt.",
+                            id: SettingId::AiModelTools,
                         },
                         Item {
-                            label: "Provider name",
-                            detail: "Name of this named provider, shown in the Provider list and /provider.",
-                            id: SettingId::AiProviderName,
-                        },
-                        Item {
-                            label: "Provider kind",
-                            detail: "How this named provider is talked to: Ollama, LM Studio, OpenAI-compatible, or OpenRouter.",
-                            id: SettingId::AiProviderKind,
-                        },
-                        Item {
-                            label: "API key variable",
-                            detail: "Environment variable whose value wins over the saved key, e.g. WORK_OPENAI_KEY. Empty: none.",
-                            id: SettingId::AiProviderKeyEnv,
-                        },
-                        Item {
-                            label: "Saved models",
-                            detail: "Models offered in the Model list for this provider, separated by commas.",
-                            id: SettingId::AiProviderModels,
-                        },
-                        Item {
-                            label: "Delete provider",
-                            detail: "Remove this named provider. Enter twice. Its server, model, and key are forgotten.",
-                            id: SettingId::AiProviderDelete,
+                            label: "Detected limits",
+                            detail: "What the server said this model cannot do, kept across restarts. Enter forgets it.",
+                            id: SettingId::AiDetected,
                         },
                         Item {
                             label: "Max tokens",
@@ -2016,16 +1992,6 @@ pub fn sections() -> &'static [Section] {
                             id: SettingId::AiThink,
                         },
                         Item {
-                            label: "Model tools",
-                            detail: "Native tools for this model. Auto detects; On always sends them; Off uses the text tool prompt.",
-                            id: SettingId::AiModelTools,
-                        },
-                        Item {
-                            label: "Detected limits",
-                            detail: "What the server said this model cannot do, kept across restarts. Enter forgets it.",
-                            id: SettingId::AiDetected,
-                        },
-                        Item {
                             label: "Context size",
                             detail: "Token window. Sent to Ollama as num_ctx; for every provider the budget auto compact works to. auto = 16384.",
                             id: SettingId::AiContextSize,
@@ -2054,6 +2020,36 @@ pub fn sections() -> &'static [Section] {
                             label: "OpenRouter referer",
                             detail: "OpenRouter only: sent as HTTP-Referer. Empty sends none.",
                             id: SettingId::AiReferer,
+                        },
+                        Item {
+                            label: "Add provider",
+                            detail: "Type a name to add your own provider, starting from the selected one's kind and server.",
+                            id: SettingId::AiProviderAdd,
+                        },
+                        Item {
+                            label: "Provider name",
+                            detail: "Name of this named provider, shown in the Provider list and /provider.",
+                            id: SettingId::AiProviderName,
+                        },
+                        Item {
+                            label: "Provider kind",
+                            detail: "How this named provider is talked to: Ollama, LM Studio, OpenAI-compatible, or OpenRouter.",
+                            id: SettingId::AiProviderKind,
+                        },
+                        Item {
+                            label: "API key variable",
+                            detail: "Environment variable whose value wins over the saved key, e.g. WORK_OPENAI_KEY. Empty: none.",
+                            id: SettingId::AiProviderKeyEnv,
+                        },
+                        Item {
+                            label: "Saved models",
+                            detail: "Models offered in the Model list for this provider, separated by commas.",
+                            id: SettingId::AiProviderModels,
+                        },
+                        Item {
+                            label: "Delete provider",
+                            detail: "Remove this named provider. Enter twice. Its server, model, and key are forgotten.",
+                            id: SettingId::AiProviderDelete,
                         },
                         Item {
                             label: "Clear recent history",
