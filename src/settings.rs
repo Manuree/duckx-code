@@ -623,6 +623,28 @@ impl AiPrefs {
         removed
     }
 
+    /// Entries the Server or Model list shows even with nothing remembered: the
+    /// saved value, and for Server the provider's default. Never the API key.
+    pub fn seeds_for(&self, id: SettingId) -> Vec<(String, PickSource)> {
+        match id {
+            SettingId::AiServer => {
+                let mut seeds = Vec::new();
+                if !self.server.trim().is_empty() {
+                    seeds.push((self.endpoint(), PickSource::Current));
+                }
+                seeds.push((
+                    self.provider.default_server().to_string(),
+                    PickSource::Default,
+                ));
+                seeds
+            }
+            SettingId::AiModel if !self.model.trim().is_empty() => {
+                vec![(self.model.trim().to_string(), PickSource::Current)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Recent values for a text row. Only Server and Model keep a list.
     pub fn recent_for(&self, id: SettingId) -> &[String] {
         match id {
@@ -1196,22 +1218,46 @@ pub enum PickSource {
     Recent,
     /// Listed by the server's `/models`.
     Server,
+    /// The value saved now, shown even before anything was remembered.
+    Current,
+    /// The provider's built-in server.
+    Default,
 }
 
-/// Recent values first, then the server's models, without repeats, keeping the
-/// ones that contain `filter` (any case). An empty filter keeps everything.
-pub fn pick_list(recent: &[String], listed: &[String], filter: &str) -> Vec<(String, PickSource)> {
-    let needle = filter.trim().to_lowercase();
-    let keep = |value: &String| needle.is_empty() || value.to_lowercase().contains(&needle);
-    let mut out: Vec<(String, PickSource)> = recent
-        .iter()
-        .filter(|value| keep(value))
-        .map(|value| (value.clone(), PickSource::Recent))
-        .collect();
-    for value in listed.iter().filter(|value| keep(value)) {
-        if !recent.contains(value) {
-            out.push((value.clone(), PickSource::Server));
+impl PickSource {
+    /// The tag drawn at the right of the entry.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Recent => "recent",
+            Self::Server => "server",
+            Self::Current => "current",
+            Self::Default => "default",
         }
+    }
+}
+
+/// Recent values first, then `seeds` (the saved value and the default), then the
+/// server's models, without repeats, keeping the ones that contain `filter` (any
+/// case). An empty filter keeps everything.
+pub fn pick_list(
+    recent: &[String],
+    seeds: &[(String, PickSource)],
+    listed: &[String],
+    filter: &str,
+) -> Vec<(String, PickSource)> {
+    let needle = filter.trim().to_lowercase();
+    let keep = |value: &str| needle.is_empty() || value.to_lowercase().contains(&needle);
+    let mut out: Vec<(String, PickSource)> = Vec::new();
+    let candidates = recent
+        .iter()
+        .map(|value| (value, PickSource::Recent))
+        .chain(seeds.iter().map(|(value, source)| (value, *source)))
+        .chain(listed.iter().map(|value| (value, PickSource::Server)));
+    for (value, source) in candidates {
+        if value.trim().is_empty() || !keep(value) || out.iter().any(|(have, _)| have == value) {
+            continue;
+        }
+        out.push((value.clone(), source));
     }
     out
 }
@@ -1670,6 +1716,60 @@ mod tests {
         ai.retries = 99;
         assert_eq!(ai.resolved_timeout(), DEFAULT_TIMEOUT_SECS);
         assert_eq!(ai.resolved_retries(), MAX_RETRIES);
+    }
+
+    #[test]
+    fn the_saved_value_and_default_seed_the_lists_but_never_the_key() {
+        let mut ai = AiPrefs::default();
+        ai.switch_provider(AiProvider::LmStudio);
+        assert_eq!(
+            ai.seeds_for(SettingId::AiServer),
+            [("http://127.0.0.1:1234/v1".to_string(), PickSource::Default)]
+        );
+        assert!(ai.seeds_for(SettingId::AiModel).is_empty());
+        ai.server = "http://10.0.0.9:1234/v1".into();
+        ai.model = " prism-ml/bonsai-27b ".into();
+        ai.api_key = "sk-secret".into();
+        assert_eq!(
+            ai.seeds_for(SettingId::AiServer),
+            [
+                ("http://10.0.0.9:1234/v1".to_string(), PickSource::Current),
+                ("http://127.0.0.1:1234/v1".to_string(), PickSource::Default),
+            ]
+        );
+        assert_eq!(
+            ai.seeds_for(SettingId::AiModel),
+            [("prism-ml/bonsai-27b".to_string(), PickSource::Current)]
+        );
+        assert!(ai.seeds_for(SettingId::AiApiKey).is_empty());
+        assert!(ai.seeds_for(SettingId::AiReferer).is_empty());
+    }
+
+    #[test]
+    fn pick_list_puts_recent_then_seeds_then_server_without_repeats() {
+        let recent = vec!["b".to_string(), "a".to_string()];
+        let seeds = vec![
+            ("a".to_string(), PickSource::Current),
+            ("c".to_string(), PickSource::Default),
+            (" ".to_string(), PickSource::Current),
+        ];
+        let listed = vec!["c".to_string(), "d".to_string(), "b".to_string()];
+        assert_eq!(
+            pick_list(&recent, &seeds, &listed, ""),
+            [
+                ("b".to_string(), PickSource::Recent),
+                ("a".to_string(), PickSource::Recent),
+                ("c".to_string(), PickSource::Default),
+                ("d".to_string(), PickSource::Server),
+            ]
+        );
+        assert_eq!(
+            pick_list(&recent, &seeds, &listed, "D"),
+            [("d".to_string(), PickSource::Server)]
+        );
+        assert!(pick_list(&[], &[], &[], "").is_empty());
+        assert_eq!(PickSource::Default.tag(), "default");
+        assert_eq!(PickSource::Current.tag(), "current");
     }
 
     #[test]

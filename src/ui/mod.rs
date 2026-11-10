@@ -1010,6 +1010,60 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_recent_list_still_opens_with_a_hint() {
+        use crate::settings::{AiProvider, SettingId};
+        let mut app = ai_settings_app(SettingId::AiModel);
+        app.ai.switch_provider(AiProvider::OpenaiCompatible);
+        let screen = draw(&app, 100, 40);
+        assert!(screen.contains("enter edit · recent list"), "{screen}");
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
+        let screen = draw(&app, 100, 40);
+        let lines: Vec<&str> = screen.lines().collect();
+        let row = lines
+            .iter()
+            .position(|line| line.contains("│ Model"))
+            .unwrap();
+        assert!(lines[row + 1].contains("╭ Recent"), "{screen}");
+        assert!(
+            lines[row + 2].contains("no recent values yet · saved when you press enter"),
+            "{screen}"
+        );
+        assert!(lines[row + 3].contains("loading models from"), "{screen}");
+        assert!(lines[row + 4].contains("╰"), "{screen}");
+        assert!(screen.contains("↑↓ recent    del forget"), "{screen}");
+        // A filter with no hit says so.
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Insert("zzz".into()),
+        ));
+        assert!(draw(&app, 100, 40).contains("no match · enter saves what you typed"));
+    }
+
+    #[test]
+    fn the_server_row_offers_its_default_and_counts_recent_values() {
+        use crate::settings::{AiProvider, SettingId};
+        let mut app = ai_settings_app(SettingId::AiServer);
+        app.ai.switch_provider(AiProvider::LmStudio);
+        app.ai.server = "http://10.0.0.9:1234/v1".into();
+        app.ai.remember_current();
+        app.ai.server = "http://10.0.0.8:1234/v1".into();
+        app.ai.remember_current();
+        assert!(draw(&app, 100, 40).contains("enter edit · 2 recent"));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
+        let screen = draw(&app, 100, 40);
+        assert!(screen.contains("http://10.0.0.8:1234/v1"), "{screen}");
+        assert!(screen.contains("http://10.0.0.9:1234/v1"), "{screen}");
+        let default = screen
+            .lines()
+            .find(|line| line.contains("http://127.0.0.1:1234/v1"))
+            .expect("default offered");
+        assert!(default.contains("default │"), "{default}");
+    }
+
+    #[test]
     fn the_recent_list_opens_under_the_model_row_with_its_sources() {
         use crate::settings::{SettingId, TextDraft};
         let mut app = ai_settings_app(SettingId::AiModel);

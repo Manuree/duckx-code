@@ -45,7 +45,14 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         .flatten();
     let binding = matches!(row_id, Some(SettingId::Binding(_)));
     let text_row = row_id.is_some_and(crate::settings::AiPrefs::is_text);
-    let has_picks = page.text.is_some() && !app.draft_picks().is_empty();
+    let has_picks = page.text.is_some() && app.draft_row().is_some();
+    let recent_row = matches!(row_id, Some(SettingId::AiServer | SettingId::AiModel));
+    let recent_hint = row_id
+        .filter(|_| recent_row)
+        .map(|id| match app.ai.recent_for(id).len() {
+            0 => " ↑↓ move    enter edit · recent list    del reset    esc back ← back".to_string(),
+            n => format!(" ↑↓ move    enter edit · {n} recent    del reset    esc back ← back"),
+        });
     let footer = if has_picks {
         " type    ↑↓ recent    del forget    enter save    esc cancel"
     } else if page.text.is_some() {
@@ -58,6 +65,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         " ↑↓ move    enter → open    del reset    esc back ← close"
     } else if binding {
         " ↑↓ move    enter bind    del reset    esc back ← back"
+    } else if let Some(hint) = recent_hint.as_deref() {
+        hint
     } else if text_row {
         " ↑↓ move    enter edit    del reset    esc back ← back"
     } else if row_id.is_some() {
@@ -431,7 +440,7 @@ fn list_rect(
         x,
         list_width,
         inner.y + anchor,
-        super::dropdown::frame_height(list.rows.len(), max_rows),
+        super::dropdown::frame_height(list.rows.len(), max_rows) + u16::from(!list.note.is_empty()),
     )
 }
 
@@ -452,20 +461,26 @@ fn paint_picks(
     let Some(draft) = app.settings.as_ref().and_then(|page| page.text.as_ref()) else {
         return;
     };
-    let picks = app.draft_picks();
-    if picks.is_empty() {
+    if app.draft_row().is_none() {
         return;
     }
+    // The list opens as soon as Server or Model is being typed, even with
+    // nothing remembered yet, so it is clear where recent values will show.
+    let picks = app.draft_picks();
     let rows: Vec<super::dropdown::Row> = picks
         .iter()
-        .map(|(value, source)| {
-            super::dropdown::Row::new(value.clone()).tag(match source {
-                crate::settings::PickSource::Recent => "recent",
-                crate::settings::PickSource::Server => "server",
-            })
-        })
+        .map(|(value, source)| super::dropdown::Row::new(value.clone()).tag(source.tag()))
         .collect();
-    let list = super::dropdown::List::new(" Recent ", PICK_KEYS, &rows).selected(draft.pick);
+    let empty = if draft.filter.trim().is_empty() {
+        "no recent values yet · saved when you press enter"
+    } else {
+        "no match · enter saves what you typed"
+    };
+    let note = app.draft_note();
+    let list = super::dropdown::List::new(" Recent ", PICK_KEYS, &rows)
+        .selected(draft.pick)
+        .empty(empty)
+        .note(&note);
     let Some(rect) = list_rect(inner, left, width, anchor, footer_row, &list, PICK_ROWS) else {
         return;
     };
