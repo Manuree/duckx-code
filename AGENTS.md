@@ -34,6 +34,7 @@ Before making structural, UX, or architectural changes, always consult:
    * **R1 Rounded Borders:** every bordered element must be built with `ui::panel(title)` (rounded `╭╮╰╯` corners). Never construct `Block::bordered()` or set another `BorderType` directly. Any new bordered widget needs a render test asserting rounded corners.
    * **R2 Block Cursor:** the visible cursor is a reversed cell in the frame. The terminal cursor stays hidden. Never switch it to a bar or underline. `SetCursorStyle::SteadyBlock` is set at startup and restored on exit.
    * **R3 Notices:** report results, errors, and warnings by setting `App::message`; they appear as snackbar notices. Only state of the moment (progress ending in `…`, FIND/REPLACE position, prompts waiting for a key) stays on the status line, decided by `app::notice::placement`. Do not draw transient text in the status bar directly.
+   * **R4 Floating panels:** the Commands list and the assistant panel are drawn over the bottom of the windows (`EditorLayout::command` / `agent`), never by shrinking the editor tree. Clear the area first, use `ui::panel`, and size editor scrolling with `EditorLayout::pane_sizes`. Only the status line, the diagnostic bar, and the FIND/REPLACE hint row reserve rows.
 
 ---
 

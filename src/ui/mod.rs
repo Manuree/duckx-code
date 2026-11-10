@@ -50,11 +50,14 @@ pub struct EditorLayout {
     pub sidebar: Rect,
     pub panes: Vec<EditorPane>,
     pub dividers: Vec<Divider>,
+    /// The FIND/REPLACE hint row above the status line, or the floating Commands
+    /// list drawn over the bottom of the windows. Zero height when neither is open.
     pub command: Rect,
     /// The diagnostic message row. Zero height when the cursor line has none.
     pub diagnostic: Rect,
     pub status: Rect,
-    /// Zero height while the assistant panel is closed.
+    /// The floating assistant panel over the bottom of the windows. Zero height
+    /// while it is closed.
     pub agent: Rect,
 }
 
@@ -75,7 +78,8 @@ pub fn frame_layout(app: &App, area: Rect) -> EditorLayout {
         app.sidebar_width(),
         if focus { &sole } else { app.layout() },
         |id| app.editor(id).tab().buffer.len_lines(),
-        command_rows(app, area.width, area.height),
+        command_bar::mode_hint_rows(app, area.width, area.height),
+        command_bar::reserved_height(app, area.width, area.height),
         if focus { 0 } else { diagnostic_rows(app) },
         app.show_diff(),
         !focus,
@@ -96,6 +100,24 @@ pub fn frame_layout(app: &App, area: Rect) -> EditorLayout {
         }
     }
     placed
+}
+
+impl EditorLayout {
+    /// Each window's text size for scrolling: the rows above a floating panel
+    /// that covers it, so the cursor line scrolls into view above the panel.
+    pub fn pane_sizes(&self) -> Vec<(EditorId, u16, u16)> {
+        self.panes
+            .iter()
+            .map(|pane| {
+                let height = [self.command, self.agent]
+                    .iter()
+                    .filter(|panel| panel.height > 0 && panel.intersects(pane.text))
+                    .map(|panel| panel.y.saturating_sub(pane.text.y).max(1))
+                    .fold(pane.text.height, u16::min);
+                (pane.id, pane.text.width, height)
+            })
+            .collect()
+    }
 }
 
 /// A read-only Markdown window: a rounded panel titled with the file name, and the
@@ -158,13 +180,19 @@ fn render_preview(
     }
 }
 
+/// Places the windows over the whole screen above the bottom rows. The status
+/// line, the diagnostic row, and the FIND/REPLACE hint row take rows of their
+/// own. The Commands list (`list_rows`) and the assistant panel (`agent_rows`)
+/// float: they are drawn over the bottom of the windows, just above those rows,
+/// and the windows keep their full height.
 pub fn layout(
     area: Rect,
     sidebar_open: bool,
     sidebar_width: u16,
     tree: &Layout,
     line_count: impl Fn(EditorId) -> usize,
-    command_rows: u16,
+    hint_rows: u16,
+    list_rows: u16,
     diagnostic_rows: u16,
     diff_column: bool,
     show_title: bool,
@@ -172,13 +200,16 @@ pub fn layout(
     agent_rows: u16,
 ) -> EditorLayout {
     let status_rows = if show_status { area.height.min(1) } else { 0 };
-    let command_rows = command_rows.min(area.height.saturating_sub(status_rows));
-    let diagnostic_rows =
-        diagnostic_rows.min(area.height.saturating_sub(status_rows + command_rows));
-    let used = status_rows + command_rows + diagnostic_rows;
-    let agent_rows = agent_rows.min(area.height.saturating_sub(used.saturating_add(3)));
-    let (sidebar, editor_area) =
-        layout::split_above(area, sidebar_open, used + agent_rows, sidebar_width);
+    let hint_rows = hint_rows.min(area.height.saturating_sub(status_rows));
+    let diagnostic_rows = diagnostic_rows.min(area.height.saturating_sub(status_rows + hint_rows));
+    let used = status_rows + hint_rows + diagnostic_rows;
+    let (sidebar, editor_area) = layout::split_above(area, sidebar_open, used, sidebar_width);
+    let body = area.height.saturating_sub(used);
+    let floor = area.y + body;
+    let list_rows = list_rows.min(body);
+    // At least three rows of the windows stay in sight above the panels.
+    let agent_rows = agent_rows.min(body.saturating_sub(list_rows.saturating_add(3)));
+    let floating = floating_columns(area);
     let placed = tree.place(editor_area);
     let panes = placed
         .panes
@@ -198,40 +229,40 @@ pub fn layout(
         sidebar,
         panes,
         dividers: placed.dividers,
-        agent: Rect::new(area.x, area.y + sidebar.height, area.width, agent_rows),
-        command: Rect::new(
-            area.x,
-            area.y + sidebar.height + agent_rows,
-            area.width,
-            command_rows,
+        agent: Rect::new(
+            floating.x,
+            floor - list_rows - agent_rows,
+            floating.width,
+            agent_rows,
         ),
-        diagnostic: Rect::new(
-            area.x,
-            area.y + sidebar.height + agent_rows + command_rows,
-            area.width,
-            diagnostic_rows,
-        ),
+        command: if hint_rows > 0 {
+            Rect::new(area.x, floor, area.width, hint_rows)
+        } else {
+            Rect::new(floating.x, floor - list_rows, floating.width, list_rows)
+        },
+        diagnostic: Rect::new(area.x, floor + hint_rows, area.width, diagnostic_rows),
         status: Rect::new(
             area.x,
-            area.y + sidebar.height + agent_rows + command_rows + diagnostic_rows,
+            floor + hint_rows + diagnostic_rows,
             area.width,
             status_rows,
         ),
     }
 }
 
+/// Columns a floating panel spans: the screen width less one column on each
+/// side, so the windows' edges show around it. Narrow screens use every column.
+fn floating_columns(area: Rect) -> Rect {
+    if area.width >= 40 {
+        Rect::new(area.x + 1, area.y, area.width - 2, area.height)
+    } else {
+        area
+    }
+}
+
 /// One row when the cursor line has a diagnostic to show above the status bar.
 pub fn diagnostic_rows(app: &App) -> u16 {
     u16::from(app.cursor_diagnostic().is_some())
-}
-
-/// Rows the command composer takes above the status line. Zero when it is closed.
-pub fn command_rows(app: &App, width: u16, height: u16) -> u16 {
-    let find = command_bar::mode_hint_rows(app, width, height);
-    if find > 0 {
-        return find;
-    }
-    command_bar::reserved_height(app, width, height)
 }
 
 fn split_title(area: Rect, show_title: bool) -> (Rect, Rect) {
@@ -444,6 +475,7 @@ pub fn render(frame: &mut Frame, app: &App) {
                 .layout_menu_view()
                 .is_some_and(|menu| menu.target == crate::app::ConvertTarget::Editor));
     let mut active_text = None;
+    let mut editor_cursor = None;
     for pane in &layout.panes {
         let editor = app.editor(pane.id);
         let focused = editor_focused && editor.id == app.active_id();
@@ -479,6 +511,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         if editor.id == app.active_id() {
             active_text = Some(pane.text);
         }
+        editor_cursor = editor_cursor.or(cursor::position());
     }
     popup::render(frame, app, active_text, &theme);
     for divider in &layout.dividers {
@@ -496,6 +529,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     if layout.agent.height > 0 {
         agent::render(frame, app, layout.agent);
     }
+    hide_covered_cursor(editor_cursor, &[layout.command, layout.agent]);
     popup::render_layout_menu(frame, app, active_text, layout.agent, &theme);
     if layout.diagnostic.height > 0 {
         status_bar::render_diagnostic(frame, app, layout.diagnostic);
@@ -512,9 +546,12 @@ pub fn render(frame: &mut Frame, app: &App) {
     picker::render(frame, app, above_status);
     preview_side::render(frame, app, above_status);
     prompt::render(frame, app, above_status);
-    // Above the assistant panel when it is open, so its ctx counter stays visible.
+    // Above a floating panel when one is open, so the assistant's ctx counter
+    // and the Commands list stay visible.
     let floor = if layout.agent.height > 0 {
         layout.agent.y
+    } else if layout.command.height > 0 {
+        layout.command.y
     } else if layout.diagnostic.height > 0 {
         layout.diagnostic.y
     } else if layout.status.height > 0 {
@@ -524,6 +561,20 @@ pub fn render(frame: &mut Frame, app: &App) {
     };
     snackbar::render(frame, app, area, floor);
     paint_block_cursor(frame);
+}
+
+/// The editor's cursor is not painted through a floating panel drawn over it.
+/// A cursor the panel placed itself (its prompt) has moved, so it stays.
+fn hide_covered_cursor(editor_cursor: Option<(u16, u16)>, panels: &[Rect]) {
+    let Some((x, y)) = editor_cursor else {
+        return;
+    };
+    let covered = panels.iter().any(|panel| {
+        panel.height > 0 && x >= panel.x && x < panel.right() && y >= panel.y && y < panel.bottom()
+    });
+    if covered && cursor::position() == Some((x, y)) {
+        cursor::clear();
+    }
 }
 
 /// Reverse the recorded cell. A wide character keeps its glyph in the previous
@@ -597,6 +648,191 @@ mod tests {
             "{screen}"
         );
         assert!(lines[top + 2].contains("╯"), "{screen}");
+    }
+
+    fn numbered(lines: usize) -> App {
+        let text: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
+        let mut app = App::new(Buffer::from_text(&text), None);
+        app.set_screen_size(80, 24);
+        app
+    }
+
+    fn open_agent(app: &mut App) {
+        app.agent.open = true;
+        app.agent.focused = true;
+    }
+
+    #[test]
+    fn the_windows_keep_their_height_under_the_floating_panels() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut app = numbered(40);
+        let closed = frame_layout(&app, area).panes[0].text;
+
+        app.handle(SemanticAction::OpenCommandBar);
+        let placed = frame_layout(&app, area);
+        assert_eq!(placed.panes[0].text, closed, "the Commands list floats");
+        assert!(placed.command.height > 2);
+        assert_eq!(
+            placed.command.bottom(),
+            placed.status.y,
+            "just above the status bar"
+        );
+        assert!(placed.command.y < closed.bottom(), "it covers the buffer");
+        assert_eq!((placed.command.x, placed.command.width), (1, 78));
+        app.handle(SemanticAction::CommandBar(CommandBarAction::Close));
+
+        open_agent(&mut app);
+        let placed = frame_layout(&app, area);
+        assert_eq!(placed.panes[0].text, closed, "the assistant floats");
+        assert!(placed.agent.height >= 4);
+        assert_eq!(placed.agent.bottom(), placed.status.y);
+        assert!(placed.agent.y < closed.bottom());
+        assert_eq!((placed.agent.x, placed.agent.width), (1, 78));
+    }
+
+    #[test]
+    fn the_floating_assistant_is_drawn_over_the_buffer_with_rounded_corners() {
+        let mut app = numbered(40);
+        open_agent(&mut app);
+        let placed = frame_layout(&app, Rect::new(0, 0, 80, 24));
+        let screen = draw(&app, 80, 24);
+        let lines = rows(&screen);
+        let top = lines[placed.agent.y as usize];
+        let bottom = lines[placed.agent.bottom() as usize - 1];
+        assert!(
+            top.starts_with(" ╭") && top.trim_end().ends_with('╮'),
+            "{screen}"
+        );
+        assert!(
+            bottom.starts_with(" ╰") && bottom.trim_end().ends_with('╯'),
+            "{screen}"
+        );
+        let covered = placed.agent.y as usize - 1;
+        assert!(
+            lines[covered].contains("line "),
+            "rows above stay: {screen}"
+        );
+        for row in &lines[placed.agent.y as usize..placed.agent.bottom() as usize] {
+            assert!(
+                !row.contains("line "),
+                "the buffer is cleared under it: {screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_floating_commands_list_is_drawn_over_the_buffer() {
+        let mut app = numbered(40);
+        app.handle(SemanticAction::OpenCommandBar);
+        let placed = frame_layout(&app, Rect::new(0, 0, 80, 24));
+        let screen = draw(&app, 80, 24);
+        let lines = rows(&screen);
+        assert!(
+            lines[placed.command.y as usize].starts_with(" ╭ Commands"),
+            "{screen}"
+        );
+        assert!(
+            lines[placed.command.y as usize - 1].contains("line "),
+            "{screen}"
+        );
+        assert!(
+            rows(&screen).last().unwrap().contains("COMMAND"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn the_editor_cursor_is_not_painted_through_a_floating_panel() {
+        cursor::place(10, 20);
+        hide_covered_cursor(Some((10, 20)), &[Rect::new(1, 16, 78, 7)]);
+        assert_eq!(cursor::position(), None, "covered: hidden");
+
+        cursor::place(10, 5);
+        hide_covered_cursor(Some((10, 5)), &[Rect::new(1, 16, 78, 7)]);
+        assert_eq!(cursor::position(), Some((10, 5)), "above the panel: kept");
+
+        cursor::place(4, 21);
+        hide_covered_cursor(Some((10, 20)), &[Rect::new(1, 16, 78, 7)]);
+        assert_eq!(
+            cursor::position(),
+            Some((4, 21)),
+            "the panel's own cursor wins"
+        );
+
+        // The assistant prompt owns the only block cursor on screen.
+        let mut app = numbered(40);
+        open_agent(&mut app);
+        let placed = frame_layout(&app, Rect::new(0, 0, 80, 24));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let reversed: Vec<(u16, u16)> = (0..24u16)
+            .flat_map(|y| (0..80u16).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].modifier.contains(Modifier::REVERSED))
+            .collect();
+        assert_eq!(reversed.len(), 1, "{reversed:?}");
+        let (x, y) = reversed[0];
+        assert!(placed.agent.contains(ratatui::layout::Position::new(x, y)));
+    }
+
+    #[test]
+    fn the_cursor_line_scrolls_above_an_open_panel() {
+        let mut app = numbered(60);
+        for _ in 0..19 {
+            app.handle(SemanticAction::Move {
+                movement: crate::buffer::Movement::Down,
+                extend: false,
+            });
+        }
+        let area = Rect::new(0, 0, 80, 24);
+        app.resize_panes(&frame_layout(&app, area).pane_sizes());
+        let before = app.editor(app.active_id()).tab().view.scroll_y;
+
+        open_agent(&mut app);
+        let placed = frame_layout(&app, area);
+        let sizes = placed.pane_sizes();
+        let text = placed.panes[0].text;
+        assert_eq!(
+            sizes[0].2,
+            placed.agent.y - text.y,
+            "only the rows above the panel"
+        );
+        app.resize_panes(&sizes);
+        let tab = app.editor(app.active_id()).tab();
+        assert!(
+            tab.view.scroll_y > before,
+            "the view scrolled for the panel"
+        );
+        let row = tab.buffer.cursor_line_col().0 - tab.view.scroll_y;
+        assert!(
+            text.y + (row as u16) < placed.agent.y,
+            "cursor row {row} is above the panel"
+        );
+
+        app.agent.focused = false;
+        let placed = frame_layout(&app, area);
+        assert_eq!(placed.agent.height, 0, "the panel only shows while focused");
+        assert_eq!(placed.pane_sizes()[0].2, text.height);
+    }
+
+    #[test]
+    fn a_notice_sits_above_the_floating_commands_list() {
+        let mut app = numbered(5);
+        app.handle(SemanticAction::OpenCommandBar);
+        app.snackbar = Some(crate::app::Snackbar {
+            text: "Saved".into(),
+            kind: crate::app::NoticeKind::Success,
+            title: crate::app::NoticeKind::Success.title(),
+            assistant: false,
+            until: std::time::Instant::now() + std::time::Duration::from_secs(4),
+        });
+        let placed = frame_layout(&app, Rect::new(0, 0, 80, 24));
+        let screen = draw(&app, 80, 24);
+        let note = rows(&screen)
+            .iter()
+            .rposition(|row| row.contains("╰") && !row.contains("esc"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!((note as u16) < placed.command.y, "{screen}");
     }
 
     #[test]
@@ -1424,7 +1660,7 @@ mod tests {
         assert!(screen.contains("Go to line number"), "{screen}");
         assert!(hint.contains("› goto <line>"), "{hint}");
         let keys = lines[lines.len() - 2];
-        assert!(keys.starts_with("╰"), "{keys}");
+        assert!(keys.starts_with(" ╰"), "floats one column in: {keys}");
         assert!(keys.contains("↑↓"), "{keys}");
         assert!(keys.contains("tab"), "{keys}");
         assert!(keys.contains("esc"), "{keys}");
@@ -1696,13 +1932,16 @@ mod tests {
         (app, screen.lines().map(str::to_string).collect())
     }
 
-    /// The panel's bottom border: the last row that starts with `╰`.
+    /// The floating panel's bottom border, `╰` to `╯`: the last row that has one.
     fn agent_bottom(rows: &[String]) -> (usize, String) {
         rows.iter()
             .enumerate()
             .rev()
-            .find(|(_, row)| row.starts_with('╰'))
-            .map(|(y, row)| (y, row.clone()))
+            .find_map(|(y, row)| {
+                let start = row.find('╰')?;
+                let end = row.rfind('╯')? + '╯'.len_utf8();
+                Some((y, row[start..end].to_string()))
+            })
             .expect("assistant panel bottom border")
     }
 
@@ -1723,8 +1962,9 @@ mod tests {
     fn context_use_turns_warning_then_error_colored() {
         let color = |used: u32| {
             let (app, rows) = agent_with_context(110, used, "10000");
-            let (y, bottom) = agent_bottom(&rows);
-            let x = bottom[..bottom.find("ctx").unwrap()].chars().count() as u16;
+            let (y, _) = agent_bottom(&rows);
+            let row = &rows[y];
+            let x = row[..row.find("ctx").unwrap()].chars().count() as u16;
             let mut terminal = Terminal::new(TestBackend::new(110, 16)).unwrap();
             terminal.draw(|frame| render(frame, &app)).unwrap();
             let buffer = terminal.backend().buffer().clone();

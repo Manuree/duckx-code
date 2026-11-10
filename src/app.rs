@@ -2025,7 +2025,9 @@ impl App {
         dirty && self.explorer.open
     }
 
-    /// Open windows, placed the way the screen draws them. A closed sidebar is absent.
+    /// Open windows for PANE mode and `Ctrl+W` arrows. A closed sidebar is absent.
+    /// The assistant panel floats over the bottom of the windows on screen; here it
+    /// counts as a strip under them, so Up from it and Down to it line up as before.
     fn focus_surfaces(&self) -> Vec<(Surface, ratatui::layout::Rect)> {
         let area = ratatui::layout::Rect::new(0, 0, self.screen_width, self.screen_height);
         let agent = self.agent_rows();
