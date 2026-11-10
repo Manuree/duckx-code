@@ -1,14 +1,16 @@
-//! A short notice above the status bar. The corners are rounded, like every panel.
+//! A short notice above the status bar: a transient message or a hidden
+//! assistant reply. The corners are rounded, like every panel, and the border
+//! and title take the notice's color (error, warning, success, info).
 
 use ratatui::{Frame, layout::Rect, style::Style, text::Line, widgets::Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::App;
+use crate::app::{App, NoticeKind};
 
 use super::panel;
 
 const MIN_WIDTH: u16 = 24;
-const MAX_WIDTH: u16 = 56;
+const MAX_WIDTH: u16 = 72;
 
 /// Draws the notice at the bottom-right, sitting on `floor` (the status bar's top).
 pub fn render(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
@@ -28,12 +30,13 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
     let y = floor - height;
     let rect = Rect::new(x, y, width, height);
     let theme = *app.styles();
-    let color = if bar.error {
-        theme.diagnostic_error
-    } else {
-        theme.diagnostic_info
+    let color = match bar.kind {
+        NoticeKind::Error => theme.diagnostic_error,
+        NoticeKind::Warning => theme.diagnostic_warning,
+        NoticeKind::Success => theme.git_added,
+        NoticeKind::Info => theme.diagnostic_info,
     };
-    let block = panel(" Assistant · F6 ")
+    let block = panel(bar.title)
         .border_style(Style::new().fg(color))
         .title_style(Style::new().fg(color))
         .style(Style::new().fg(theme.editor_fg).bg(theme.editor_bg))

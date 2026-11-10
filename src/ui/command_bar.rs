@@ -59,8 +59,7 @@ pub fn render_mode_hint(frame: &mut Frame, app: &App, area: Rect) {
     }
     let theme = *app.styles();
     let label = app
-        .message
-        .as_deref()
+        .status_message()
         .map(|message| format!(" {message}"))
         .unwrap_or_default();
     let rect = Rect::new(area.x, area.y + area.height - 1, area.width, 1);

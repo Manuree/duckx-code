@@ -33,6 +33,7 @@ Before making structural, UX, or architectural changes, always consult:
 5. **UI Requirements ([`DESIGN.md` §5](./DESIGN.md#5-ui-requirements)):**
    * **R1 Rounded Borders:** every bordered element must be built with `ui::panel(title)` (rounded `╭╮╰╯` corners). Never construct `Block::bordered()` or set another `BorderType` directly. Any new bordered widget needs a render test asserting rounded corners.
    * **R2 Block Cursor:** the visible cursor is a reversed cell in the frame. The terminal cursor stays hidden. Never switch it to a bar or underline. `SetCursorStyle::SteadyBlock` is set at startup and restored on exit.
+   * **R3 Notices:** report results, errors, and warnings by setting `App::message`; they appear as snackbar notices. Only state of the moment (progress ending in `…`, FIND/REPLACE position, prompts waiting for a key) stays on the status line, decided by `app::notice::placement`. Do not draw transient text in the status bar directly.
 
 ---
 

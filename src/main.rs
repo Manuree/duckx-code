@@ -321,6 +321,9 @@ async fn drive(
         for request in app.take_lsp_requests() {
             lsp.send(request);
         }
+        if app.flush_notice() {
+            needs_draw = true;
+        }
 
         if needs_draw {
             let size = terminal.size()?;
