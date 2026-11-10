@@ -28,6 +28,33 @@ pub struct Reply {
     pub message: Value,
     /// True when this completion retried after flattening poisoned tool history.
     pub history_flattened: bool,
+    /// Tokens the server says the request and answer used (`usage`, or Ollama's
+    /// `prompt_eval_count` + `eval_count`). `None` when it did not say.
+    pub usage: Option<u32>,
+}
+
+/// Context tokens a response reports: OpenAI `usage.total_tokens` (or prompt +
+/// completion), or Ollama `prompt_eval_count` + `eval_count`.
+pub fn usage_of(value: &Value) -> Option<u32> {
+    let number = |pointer: &str| value.pointer(pointer).and_then(Value::as_u64);
+    let total = number("/usage/total_tokens").or_else(|| {
+        let prompt = number("/usage/prompt_tokens")?;
+        Some(prompt + number("/usage/completion_tokens").unwrap_or(0))
+    });
+    let total = total.or_else(|| {
+        let prompt = number("/prompt_eval_count")?;
+        Some(prompt + number("/eval_count").unwrap_or(0))
+    })?;
+    u32::try_from(total).ok().filter(|tokens| *tokens > 0)
+}
+
+/// `usage_of` for one SSE line, parsed only when it mentions usage.
+fn sse_usage(line: &str) -> Option<u32> {
+    if !line.contains("\"usage\"") {
+        return None;
+    }
+    let data = line.trim().strip_prefix("data:")?.trim();
+    usage_of(&serde_json::from_str(data).ok()?)
 }
 
 /// Streamed piece: visible answer text, or reasoning for the title only.
@@ -50,6 +77,32 @@ pub struct Tuning {
     pub retries: u32,
     /// Wait before the first retry. Doubles each time, capped at [`MAX_BACKOFF`].
     pub backoff: Duration,
+    /// Native tools: detect per model (default), always, or never.
+    pub tools: ToolsMode,
+}
+
+/// Whether a request carries native `tools`. `Auto` sends them until the server
+/// says the model cannot use them, then switches that model to the text tool prompt.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolsMode {
+    #[default]
+    Auto,
+    /// Always send native tools; a rejection is reported, not worked around.
+    On,
+    /// Never send native tools; describe them in the prompt instead.
+    Off,
 }
 
 /// The longest wait between two attempts, including a server's `Retry-After`.
@@ -63,6 +116,7 @@ pub static DEFAULT_TUNING: Tuning = Tuning {
     timeout: None,
     retries: 0,
     backoff: Duration::from_millis(1000),
+    tools: ToolsMode::Auto,
 };
 
 impl Default for Tuning {
@@ -265,7 +319,57 @@ fn models_without_tools() -> &'static Mutex<HashSet<String>> {
 /// One model on one server. The same model name on another provider is a different
 /// deployment, so what one rejected says nothing about the other.
 fn capability_key(server: &str, model: &str) -> String {
-    format!("{}\n{model}", server.trim().trim_end_matches('/'))
+    format!("{} {model}", server.trim().trim_end_matches('/'))
+}
+
+/// Whether this request sends native tools, given the mode and what was learned.
+fn tools_wanted(mode: ToolsMode, key: &str) -> bool {
+    match mode {
+        ToolsMode::Auto => !model_skips_tools(key),
+        ToolsMode::On => true,
+        ToolsMode::Off => false,
+    }
+}
+
+/// The key [`detected_for`] and the saved list use: the chat URL this model is
+/// asked at, a space, and the model.
+pub fn capability_key_for(server: &str, model: &str, ollama_native: bool) -> String {
+    let url = if ollama_native {
+        ollama_chat_url(server)
+    } else {
+        completions_url(server)
+    };
+    capability_key(&url, model)
+}
+
+/// `(no tools, no think)` learned so far for this model on this server.
+pub fn detected_for(server: &str, model: &str, ollama_native: bool) -> (bool, bool) {
+    let key = capability_key_for(server, model, ollama_native);
+    (model_skips_tools(&key), model_skips_think(&key))
+}
+
+/// Loads what earlier sessions learned (keys from [`capability_key_for`]).
+pub fn seed_detected<'a>(
+    no_tools: impl IntoIterator<Item = &'a String>,
+    no_think: impl IntoIterator<Item = &'a String>,
+) {
+    for key in no_tools {
+        remember_model_without_tools(key);
+    }
+    for key in no_think {
+        remember_model_without_think(key);
+    }
+}
+
+/// Forgets what was learned for these keys, so the next request tries again.
+pub fn forget_detected(keys: &[String]) {
+    for set in [models_without_tools(), models_without_think()] {
+        if let Ok(mut set) = set.lock() {
+            for key in keys {
+                set.remove(key);
+            }
+        }
+    }
 }
 
 fn model_skips_tools(model: &str) -> bool {
@@ -599,6 +703,7 @@ fn reply_from_parts(content: String, thinking: String, calls: Vec<ToolCall>) -> 
         calls,
         message,
         history_flattened: false,
+        usage: None,
     }
 }
 
@@ -1816,6 +1921,81 @@ fn fatal_stream_status(status: reqwest::StatusCode) -> bool {
     !capability_status(status) && !status.is_success()
 }
 
+/// Asks for a summary of the conversation in `transcript` and returns its text.
+/// One plain request: no tools, no streaming, no thinking. Ollama native gets
+/// `num_ctx`; everything else gets the usual OpenAI body. Used by auto compact.
+pub async fn summarize(
+    client: &reqwest::Client,
+    server: &str,
+    model: &str,
+    transcript: &str,
+    options: CompleteOptions<'_>,
+) -> Result<String, String> {
+    let messages = vec![
+        json!({"role": "system", "content": SUMMARY_PROMPT}),
+        json!({"role": "user", "content": transcript}),
+    ];
+    let native = options.ollama_native;
+    let url = if native {
+        ollama_chat_url(server)
+    } else {
+        completions_url(server)
+    };
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": false,
+        "temperature": 0.2,
+    });
+    if native {
+        let mut extra = serde_json::Map::new();
+        if let Some(num_ctx) = options.num_ctx {
+            extra.insert("num_ctx".into(), json!(num_ctx));
+        }
+        extra.insert("temperature".into(), json!(0.2));
+        body["options"] = Value::Object(extra);
+        body.as_object_mut()
+            .map(|object| object.remove("temperature"));
+        body["think"] = json!(false);
+    } else if let Some(max) = options.tuning.max_tokens {
+        body["max_tokens"] = json!(max.min(SUMMARY_MAX_TOKENS));
+    }
+    let tuning = options.tuning;
+    let api_key = options.api_key;
+    let response = send_with_retry(
+        || prepare(client.post(&url).json(&body), api_key, tuning),
+        &url,
+        tuning,
+    )
+    .await?;
+    let status = response.status();
+    let text = response.text().await.map_err(|err| http_err(&url, err))?;
+    if !status.is_success() {
+        return Err(status_error(status, &text));
+    }
+    let value: Value =
+        serde_json::from_str(&text).map_err(|err| format!("Bad summary reply: {err}"))?;
+    if let Some(problem) = stream_error(&value) {
+        return Err(problem);
+    }
+    let content = value
+        .pointer("/choices/0/message/content")
+        .or_else(|| value.pointer("/message/content"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let (content, _) = split_think_tags(content);
+    if content.trim().is_empty() {
+        return Err("The summary came back empty".to_string());
+    }
+    Ok(content.trim().to_string())
+}
+
+/// What the model is asked to keep when older turns are folded into a summary.
+pub const SUMMARY_PROMPT: &str = "You compact a coding assistant's conversation so it can continue with less context. Write a short summary of the conversation below: the user's goals and constraints, decisions made, files read or changed (with paths), tool results that still matter, errors seen, and what was about to happen next. Plain text or short bullets, no preamble, at most 400 words. Do not call tools.";
+
+/// Upper bound for a summary answer on providers that take `max_tokens`.
+const SUMMARY_MAX_TOKENS: u32 = 2048;
+
 pub async fn complete(
     client: &reqwest::Client,
     server: &str,
@@ -1881,7 +2061,7 @@ async fn complete_once(
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     loop {
-        let use_tools = allow_tools && !model_skips_tools(&key);
+        let use_tools = allow_tools && tools_wanted(tuning.tools, &key);
         let use_think = allow_think && !model_skips_think(&key);
         let tools = if use_tools {
             tool_specs()
@@ -1927,7 +2107,7 @@ async fn complete_once(
                 allow_think = false;
                 continue;
             }
-            if use_tools && tools_not_supported(status, &text) {
+            if use_tools && tuning.tools == ToolsMode::Auto && tools_not_supported(status, &text) {
                 remember_model_without_tools(&key);
                 allow_tools = false;
                 continue;
@@ -1950,6 +2130,9 @@ async fn complete_once(
             parse_reply(&text)?
         };
         reply.history_flattened = flattened;
+        reply.usage = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|value| usage_of(&value));
         return Ok(reply);
     }
 }
@@ -1976,7 +2159,7 @@ where
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     let response = loop {
-        let use_tools = allow_tools && !model_skips_tools(&key);
+        let use_tools = allow_tools && tools_wanted(tuning.tools, &key);
         let tools = if use_tools {
             tool_specs()
         } else {
@@ -2005,7 +2188,7 @@ where
             break response;
         }
         let text = response.text().await.unwrap_or_default();
-        if use_tools && tools_not_supported(status, &text) {
+        if use_tools && tuning.tools == ToolsMode::Auto && tools_not_supported(status, &text) {
             remember_model_without_tools(&key);
             allow_tools = false;
             continue;
@@ -2024,6 +2207,7 @@ where
     };
     // Stash flattened flag for after assembly.
     let history_flattened = flattened;
+    let mut usage: Option<u32> = None;
     let mut assembler = StreamAssembler::default();
     let mut think_split = ContentThinkSplit::default();
     // Byte buffer so a multi-byte UTF-8 char split across TCP chunks is not lossy-decoded.
@@ -2084,6 +2268,9 @@ where
             if line.ends_with('\r') {
                 line.pop();
             }
+            if let Some(tokens) = sse_usage(&line) {
+                usage = Some(tokens);
+            }
             let Some(delta) = sse_event(&line)? else {
                 continue;
             };
@@ -2131,6 +2318,7 @@ where
     }
     let mut reply = assembler.into_reply()?;
     reply.history_flattened = history_flattened;
+    reply.usage = usage;
     if hold_deltas {
         if reply.calls.is_empty() {
             if !held.is_empty() {
@@ -2162,7 +2350,7 @@ where
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     let response = loop {
-        let use_tools = allow_tools && !model_skips_tools(&key);
+        let use_tools = allow_tools && tools_wanted(tuning.tools, &key);
         let use_think = allow_think && !model_skips_think(&key);
         let tools = if use_tools {
             tool_specs()
@@ -2202,7 +2390,7 @@ where
             allow_think = false;
             continue;
         }
-        if use_tools && tools_not_supported(status, &text) {
+        if use_tools && tuning.tools == ToolsMode::Auto && tools_not_supported(status, &text) {
             remember_model_without_tools(&key);
             allow_tools = false;
             continue;
@@ -2220,6 +2408,7 @@ where
         });
     };
     let history_flattened = flattened;
+    let mut usage: Option<u32> = None;
     let mut content = String::new();
     let mut thinking = String::new();
     let mut tool_calls = Value::Null;
@@ -2257,6 +2446,9 @@ where
                 return Err(StreamFailure::Fatal(error));
             }
             saw_event = true;
+            if let Some(tokens) = usage_of(&value) {
+                usage = Some(tokens);
+            }
             if let Some(message) = value.get("message") {
                 for key in ["thinking", "reasoning", "reasoning_content"] {
                     if let Some(piece) = message.get(key).and_then(|v| v.as_str()) {
@@ -2328,6 +2520,7 @@ where
     }
     let mut reply = reply_from_parts(content, thinking, calls);
     reply.history_flattened = history_flattened;
+    reply.usage = usage;
     if hold_deltas {
         if reply.calls.is_empty() {
             if !held.is_empty() {
@@ -3876,5 +4069,201 @@ mod tests {
 
     fn ok_json_raw(body: &str) -> String {
         http("200 OK", "application/json", "", body)
+    }
+
+    fn no_tools_answer() -> String {
+        http(
+            "400 Bad Request",
+            "application/json",
+            "",
+            r#"{"error":{"message":"model does not support tools"}}"#,
+        )
+    }
+
+    #[tokio::test]
+    async fn tools_off_never_sends_native_tools() {
+        let (url, server) = spawn_rounds(1, |_, _| ok_json("ok"));
+        let client = reqwest::Client::new();
+        let tuning = Tuning {
+            tools: ToolsMode::Off,
+            ..quick(0)
+        };
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        complete(&client, &url, "tools-off-model", &messages, options)
+            .await
+            .unwrap();
+        let body = body_of(&server.join().unwrap()[0]);
+        assert!(body.get("tools").is_none(), "{body}");
+        let system = body["messages"][0]["content"].as_str().unwrap_or("");
+        assert!(
+            system.contains("read_file"),
+            "tools are described in text: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_on_reports_a_rejection_instead_of_dropping_tools() {
+        let (url, server) = spawn_rounds(1, |_, _| no_tools_answer());
+        let client = reqwest::Client::new();
+        let tuning = Tuning {
+            tools: ToolsMode::On,
+            ..quick(0)
+        };
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        let err = complete(&client, &url, "tools-on-model", &messages, options)
+            .await
+            .unwrap_err();
+        assert!(err.contains("does not support tools"), "{err}");
+        assert_eq!(server.join().unwrap().len(), 1, "no retry without tools");
+        assert_eq!(detected_for(&url, "tools-on-model", false), (false, false));
+    }
+
+    #[tokio::test]
+    async fn tools_on_still_sends_tools_to_a_model_auto_marked_without_them() {
+        let (url, server) = spawn_rounds(1, |_, _| ok_json("ok"));
+        let key = capability_key_for(&url, "forced-model", false);
+        seed_detected([&key], []);
+        let client = reqwest::Client::new();
+        let tuning = Tuning {
+            tools: ToolsMode::On,
+            ..quick(0)
+        };
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        complete(&client, &url, "forced-model", &messages, options)
+            .await
+            .unwrap();
+        let body = body_of(&server.join().unwrap()[0]);
+        assert!(body.get("tools").is_some(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn auto_learns_no_tools_and_forgetting_asks_again() {
+        let (url, server) = spawn_rounds(3, |round, _| match round {
+            0 => no_tools_answer(),
+            _ => ok_json("ok"),
+        });
+        let client = reqwest::Client::new();
+        let tuning = quick(0);
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        let model = "auto-learn-model";
+        complete(&client, &url, model, &messages, options)
+            .await
+            .unwrap();
+        assert_eq!(detected_for(&url, model, false), (true, false));
+        let key = capability_key_for(&url, model, false);
+        assert!(
+            key.ends_with(" auto-learn-model") && key.contains("/chat/completions"),
+            "{key}"
+        );
+        forget_detected(std::slice::from_ref(&key));
+        assert_eq!(detected_for(&url, model, false), (false, false));
+        complete(&client, &url, model, &messages, options)
+            .await
+            .unwrap();
+        let seen = server.join().unwrap();
+        assert!(body_of(&seen[0]).get("tools").is_some());
+        assert!(body_of(&seen[1]).get("tools").is_none());
+        assert!(
+            body_of(&seen[2]).get("tools").is_some(),
+            "asked again after forget"
+        );
+    }
+
+    #[test]
+    fn usage_reads_openai_and_ollama_counts() {
+        assert_eq!(
+            usage_of(&json!({"usage": {"prompt_tokens": 900, "completion_tokens": 100}})),
+            Some(1000)
+        );
+        assert_eq!(usage_of(&json!({"usage": {"total_tokens": 42}})), Some(42));
+        assert_eq!(
+            usage_of(&json!({"prompt_eval_count": 300, "eval_count": 20, "done": true})),
+            Some(320)
+        );
+        assert_eq!(usage_of(&json!({"choices": []})), None);
+        assert_eq!(
+            sse_usage(r#"data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#),
+            Some(10)
+        );
+        assert_eq!(sse_usage(r#"data: {"choices":[{"delta":{}}]}"#), None);
+    }
+
+    #[tokio::test]
+    async fn a_completion_carries_the_usage_the_server_reported() {
+        let (url, server) = spawn_rounds(1, |_, _| {
+            ok_json_raw(
+                r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":120,"completion_tokens":5}}"#,
+            )
+        });
+        let client = reqwest::Client::new();
+        let messages = [json!({"role":"user","content":"hi"})];
+        let reply = complete(&client, &url, "m", &messages, CompleteOptions::default())
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply.usage, Some(125));
+    }
+
+    #[tokio::test]
+    async fn summarize_sends_one_plain_request_and_returns_the_text() {
+        let (url, server) = spawn_rounds(1, |_, _| {
+            ok_json("<think>hm</think>User is fixing the parser.")
+        });
+        let client = reqwest::Client::new();
+        let summary = summarize(
+            &client,
+            &url,
+            "m",
+            "user: fix the parser",
+            CompleteOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary, "User is fixing the parser.");
+        let seen = server.join().unwrap();
+        let body = body_of(&seen[0]);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["content"], "user: fix the parser");
+        assert!(body.get("tools").is_none(), "{body}");
+        assert_ne!(body["stream"], json!(true), "{body}");
+    }
+
+    #[tokio::test]
+    async fn summarize_reports_a_server_error_instead_of_an_empty_summary() {
+        let (url, server) = spawn_rounds(1, |_, _| {
+            http(
+                "400 Bad Request",
+                "application/json",
+                "",
+                r#"{"error":{"message":"context too long"}}"#,
+            )
+        });
+        let client = reqwest::Client::new();
+        let tuning = quick(0);
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let err = summarize(&client, &url, "m", "user: hi", options)
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(err.contains("context too long"), "{err}");
     }
 }

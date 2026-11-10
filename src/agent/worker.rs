@@ -67,6 +67,8 @@ async fn run(
                 tuning,
                 history,
                 prompt,
+                summary,
+                compact,
             } => {
                 // Catch panics so a bug in parsing/streaming does not kill the agent task
                 // (and leave the TUI unable to start another turn).
@@ -85,6 +87,8 @@ async fn run(
                     &tuning,
                     history,
                     prompt,
+                    summary,
+                    compact,
                 ))
                 .catch_unwind()
                 .await;
@@ -104,9 +108,123 @@ async fn run(
                         });
                     }
                 }
+                // Tell App what the server taught us, so it outlives this session.
+                let (no_tools, no_think) = provider::detected_for(&server, &model, ollama_native);
+                if no_tools || no_think {
+                    let _ = events.send(AgentEvent::Detected {
+                        key: provider::capability_key_for(&server, &model, ollama_native),
+                        no_tools,
+                        no_think,
+                    });
+                }
+            }
+            AgentCommand::Compact {
+                id,
+                server,
+                model,
+                api_key,
+                num_ctx,
+                ollama_native,
+                tuning,
+                summary,
+                older,
+            } => {
+                let options = CompleteOptions {
+                    api_key: &api_key,
+                    stream: false,
+                    num_ctx,
+                    ollama_native,
+                    think: false,
+                    tuning: &tuning,
+                };
+                let dropped = older.len();
+                let transcript = compact_transcript(summary.as_deref(), &older, num_ctx);
+                let request = provider::summarize(&client, &server, &model, &transcript, options);
+                tokio::pin!(request);
+                let result = loop {
+                    tokio::select! {
+                        biased;
+                        command = commands.recv() => match command {
+                            Some(AgentCommand::Cancel { id: cancel }) if cancel == id => {
+                                break Err("cancelled".to_string());
+                            }
+                            None => return,
+                            Some(_) => {}
+                        },
+                        result = &mut request => break result,
+                    }
+                };
+                let _ = events.send(AgentEvent::Compacted {
+                    id,
+                    summary: result,
+                    dropped,
+                });
             }
             AgentCommand::Cancel { .. } | AgentCommand::ToolResult { .. } => {}
         }
+    }
+}
+
+/// Characters a summary request may carry: about 60% of the window, at 3.5
+/// characters per token, so the request itself always fits.
+fn transcript_budget(num_ctx: Option<u32>) -> usize {
+    let window = num_ctx.unwrap_or(16384).max(2048) as usize;
+    window * 6 / 10 * 7 / 2
+}
+
+/// The text a summary is written from: the previous summary, then each message
+/// as `role: content` (tool calls by name and arguments). When it is too long the
+/// oldest part is cut, since the newest turns matter most.
+pub(crate) fn compact_transcript(
+    summary: Option<&str>,
+    older: &[Value],
+    num_ctx: Option<u32>,
+) -> String {
+    let mut lines = Vec::new();
+    if let Some(summary) = summary.filter(|text| !text.trim().is_empty()) {
+        lines.push(format!("Earlier summary:\n{summary}"));
+    }
+    for message in older {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("?");
+        let content = message.get("content").and_then(Value::as_str).unwrap_or("");
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                let name = call
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let args = call
+                    .pointer("/function/arguments")
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map_or_else(|| value.to_string(), str::to_string)
+                    })
+                    .unwrap_or_default();
+                lines.push(format!("assistant called {name} {args}"));
+            }
+        }
+        if !content.trim().is_empty() {
+            lines.push(format!("{role}: {content}"));
+        }
+    }
+    let text = lines.join("\n\n");
+    let budget = transcript_budget(num_ctx);
+    let count = text.chars().count();
+    if count <= budget {
+        return text;
+    }
+    let tail: String = text.chars().skip(count - budget).collect();
+    format!("(older part cut)\n{tail}")
+}
+
+/// The system prompt, with the summary of folded turns after it.
+fn system_with_summary(summary: Option<&str>) -> String {
+    match summary.filter(|text| !text.trim().is_empty()) {
+        Some(summary) => format!(
+            "{SYSTEM}\n\nSummary of the earlier conversation (older turns were compacted):\n{summary}"
+        ),
+        None => SYSTEM.to_string(),
     }
 }
 
@@ -126,9 +244,48 @@ async fn run_turn(
     tuning: &provider::Tuning,
     history: Vec<Value>,
     prompt: String,
+    summary: Option<String>,
+    compact: Option<Vec<Value>>,
 ) -> Result<(), String> {
+    let mut summary = summary;
+    if let Some(older) = compact.filter(|older| !older.is_empty()) {
+        let dropped = older.len();
+        let transcript = compact_transcript(summary.as_deref(), &older, num_ctx);
+        let options = CompleteOptions {
+            api_key,
+            stream: false,
+            num_ctx,
+            ollama_native,
+            think: false,
+            tuning,
+        };
+        let request = provider::summarize(client, server, model, &transcript, options);
+        tokio::pin!(request);
+        let result = loop {
+            tokio::select! {
+                biased;
+                command = commands.recv() => match command {
+                    Some(AgentCommand::Cancel { id: cancel }) if cancel == id => return Ok(()),
+                    Some(AgentCommand::Cancel { .. }) => {}
+                    None => return Ok(()),
+                    Some(_) => return Err("The assistant turn was interrupted".to_string()),
+                },
+                result = &mut request => break result,
+            }
+        };
+        // On failure the older turns stay dropped and the turn goes on: plain truncation.
+        if let Ok(text) = &result {
+            summary = Some(text.clone());
+        }
+        let _ = events.send(AgentEvent::Compacted {
+            id,
+            summary: result,
+            dropped,
+        });
+    }
     let mut messages = Vec::new();
-    messages.push(json!({"role": "system", "content": SYSTEM}));
+    let system = system_with_summary(summary.as_deref());
+    messages.push(json!({"role": "system", "content": system}));
     messages.extend(history);
     messages.push(json!({"role": "user", "content": prompt}));
 
@@ -155,6 +312,9 @@ async fn run_turn(
         else {
             return Ok(());
         };
+        if let Some(tokens) = reply.usage {
+            let _ = events.send(AgentEvent::Usage { id, tokens });
+        }
         if reply.history_flattened {
             let _ = events.send(AgentEvent::ResetMemory { id });
         }
@@ -407,7 +567,7 @@ async fn wait_result(
             } if result_id == id && result_call == call_id => return Some(content),
             AgentCommand::Cancel { id: cancel } if cancel == id => return None,
             AgentCommand::Cancel { .. } | AgentCommand::ToolResult { .. } => {}
-            AgentCommand::Turn { .. } => return None,
+            AgentCommand::Turn { .. } | AgentCommand::Compact { .. } => return None,
         }
     }
 }
@@ -443,5 +603,164 @@ mod tests {
         }
         let stop = trail.note("read_file", "{\"path\":\"last\"}").unwrap();
         assert!(stop.contains("32"), "{stop}");
+    }
+
+    fn serve(answers: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for answer in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut bytes = Vec::new();
+                let mut buf = [0u8; 16384];
+                loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    bytes.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= end + 4 + length {
+                            seen.push(text[end + 4..].to_string());
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                stream.write_all(answer.as_bytes()).unwrap();
+            }
+            seen
+        });
+        (format!("http://{addr}/v1"), handle)
+    }
+
+    fn answer(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn content(text: &str) -> String {
+        serde_json::json!({"choices":[{"message":{"role":"assistant","content":text}}]}).to_string()
+    }
+
+    fn turn(server: String, compact: Vec<serde_json::Value>) -> crate::agent::AgentCommand {
+        crate::agent::AgentCommand::Turn {
+            id: 7,
+            server,
+            model: "m".into(),
+            api_key: String::new(),
+            stream: false,
+            num_ctx: Some(8192),
+            ollama_native: false,
+            think: false,
+            tuning: crate::agent::provider::Tuning {
+                retries: 0,
+                ..Default::default()
+            },
+            history: Vec::new(),
+            prompt: "next".into(),
+            summary: None,
+            compact: Some(compact),
+        }
+    }
+
+    async fn events_until_done(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::agent::AgentEvent>,
+    ) -> Vec<crate::agent::AgentEvent> {
+        use crate::agent::AgentEvent;
+        let mut out = Vec::new();
+        while let Some(event) = rx.recv().await {
+            let done = matches!(event, AgentEvent::Reply { .. } | AgentEvent::Failed { .. });
+            out.push(event);
+            if done {
+                break;
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_older_messages_summarizes_them_then_sends_the_summary() {
+        use crate::agent::AgentEvent;
+        let (url, server) = serve(vec![
+            answer("200 OK", &content("They renamed foo to bar.")),
+            answer("200 OK", &content("Done.")),
+        ]);
+        let (tx, mut rx) = super::spawn();
+        let older = vec![
+            serde_json::json!({"role":"user","content":"rename foo"}),
+            serde_json::json!({"role":"assistant","content":"renamed"}),
+        ];
+        tx.send(turn(url, older)).unwrap();
+        let events = events_until_done(&mut rx).await;
+        assert!(events.contains(&AgentEvent::Compacted {
+            id: 7,
+            summary: Ok("They renamed foo to bar.".into()),
+            dropped: 2,
+        }));
+        assert!(matches!(events.last(), Some(AgentEvent::Reply { text, .. }) if text == "Done."));
+        let seen = server.join().unwrap();
+        assert!(seen[0].contains("rename foo"), "{}", seen[0]);
+        let body: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("They renamed foo to bar."), "{system}");
+        assert!(
+            !seen[1].contains("rename foo"),
+            "older turns are not resent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_summary_still_runs_the_turn_with_the_messages_dropped() {
+        use crate::agent::AgentEvent;
+        let (url, server) = serve(vec![
+            answer("400 Bad Request", r#"{"error":{"message":"nope"}}"#),
+            answer("200 OK", &content("Done.")),
+        ]);
+        let (tx, mut rx) = super::spawn();
+        tx.send(turn(
+            url,
+            vec![serde_json::json!({"role":"user","content":"old"})],
+        ))
+        .unwrap();
+        let events = events_until_done(&mut rx).await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Compacted {
+                summary: Err(_),
+                dropped: 1,
+                ..
+            }
+        )));
+        assert!(matches!(events.last(), Some(AgentEvent::Reply { .. })));
+        let seen = server.join().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        assert_eq!(body["messages"][0]["content"], crate::agent::SYSTEM);
+    }
+
+    #[test]
+    fn the_transcript_keeps_the_newest_part_when_it_is_too_long() {
+        let older: Vec<_> = (0..4000)
+            .map(|n| serde_json::json!({"role":"user","content":format!("message {n}")}))
+            .collect();
+        let text = super::compact_transcript(Some("before"), &older, Some(2048));
+        assert!(text.starts_with("(older part cut)"), "{}", &text[..40]);
+        assert!(text.ends_with("user: message 3999"));
+        assert!(text.chars().count() <= super::transcript_budget(Some(2048)) + 20);
+        let short = super::compact_transcript(Some("before"), &older[..1], None);
+        assert_eq!(short, "Earlier summary:\nbefore\n\nuser: message 0");
     }
 }

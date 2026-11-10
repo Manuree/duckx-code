@@ -285,6 +285,11 @@ fn render_items(
 fn only_for(id: SettingId) -> &'static str {
     match id {
         SettingId::AiAppName | SettingId::AiReferer => "OpenRouter only",
+        SettingId::AiProviderName
+        | SettingId::AiProviderKind
+        | SettingId::AiProviderKeyEnv
+        | SettingId::AiProviderModels
+        | SettingId::AiProviderDelete => "named only",
         _ => "Ollama only",
     }
 }
@@ -349,7 +354,10 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         | SettingId::AiAutoApprove
         | SettingId::AiStreaming
         | SettingId::AiProvider
-        | SettingId::AiThink) => {
+        | SettingId::AiThink
+        | SettingId::AiAutoCompact
+        | SettingId::AiModelTools
+        | SettingId::AiProviderKind) => {
             format!("{} {mark}", app.ai.choice_label(id))
         }
         SettingId::AiServer => {
@@ -369,20 +377,53 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         SettingId::AiApiKey => match app.ai.resolved_api_key().1 {
             crate::settings::KeySource::Env(name) => format!("•••••••• (from {name})"),
             crate::settings::KeySource::Saved => "••••••••".to_string(),
-            crate::settings::KeySource::None => match app.ai.provider.key_env() {
+            crate::settings::KeySource::None => match app.ai.key_env_name() {
                 Some(name) => format!("(not set · or set {name})"),
                 None => "(not set)".to_string(),
             },
         },
+        SettingId::AiProviderAdd => "enter, then type a name".to_string(),
+        SettingId::AiProviderName => match app.ai.active_named() {
+            Some(index) => app.ai.named[index].name.clone(),
+            None => "(built-in)".to_string(),
+        },
+        SettingId::AiProviderKeyEnv => match app.ai.active_named() {
+            Some(index) => text_or_none(&app.ai.named[index].api_key_env),
+            None => "(built-in)".to_string(),
+        },
+        SettingId::AiProviderModels => match app.ai.active_named() {
+            Some(index) if app.ai.named[index].models.is_empty() => "(none)".to_string(),
+            Some(index) => app.ai.named[index].models.join(", "),
+            None => "(built-in)".to_string(),
+        },
+        SettingId::AiProviderDelete => match app.ai.active_named() {
+            Some(index) => format!("enter twice removes {}", app.ai.named[index].name),
+            None => "(built-in)".to_string(),
+        },
         SettingId::AiContextSize => {
             let raw = app.ai.context_size.trim();
             if raw.is_empty() {
-                format!("{} (default)", app.ai.resolved_context_size())
+                format!("{} (default)", app.ai.global_context_size())
             } else {
                 app.ai.context_size.clone()
             }
         }
-        SettingId::AiMaxTokens => match (app.ai.max_tokens.trim(), app.ai.resolved_max_tokens()) {
+        SettingId::AiModelContext => match (app.ai.model_key(), app.ai.model_limits().context) {
+            (None, _) => "(set a model first)".to_string(),
+            (Some(_), Some(n)) => n.to_string(),
+            (Some(_), None) => format!("{} (Context size)", app.ai.global_context_size()),
+        },
+        SettingId::AiModelMaxOutput => {
+            match (app.ai.model_key(), app.ai.model_limits().max_output) {
+                (None, _) => "(set a model first)".to_string(),
+                (Some(_), Some(n)) => n.to_string(),
+                (Some(_), None) => match app.ai.global_max_tokens() {
+                    Some(n) => format!("{n} (Max tokens)"),
+                    None => "(omit · Max tokens)".to_string(),
+                },
+            }
+        }
+        SettingId::AiMaxTokens => match (app.ai.max_tokens.trim(), app.ai.global_max_tokens()) {
             ("", Some(n)) => format!("{n} (default)"),
             ("", None) => "(omit)".to_string(),
             (_, Some(n)) => n.to_string(),
@@ -390,12 +431,26 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         },
         SettingId::AiTimeout => format!("{} s", app.ai.resolved_timeout()),
         SettingId::AiRetries => app.ai.resolved_retries().to_string(),
+        SettingId::AiDetected => match (app.ai.model_key(), app.ai.detected_now()) {
+            (None, _) => "(set a model first)".to_string(),
+            (Some(_), (false, false)) => "none".to_string(),
+            (Some(_), (tools, think)) => {
+                let what = match (tools, think) {
+                    (true, true) => "no tools, no think",
+                    (true, false) => "no tools",
+                    _ => "no think",
+                };
+                format!("{what} · enter forgets")
+            }
+        },
         SettingId::AiClearRecent => match app.ai.recent.len() {
             0 => "(empty)".to_string(),
             n => format!("{n} saved · enter clears"),
         },
         SettingId::AiAppName => text_or_none(&app.ai.openrouter_app_name),
         SettingId::AiReferer => text_or_none(&app.ai.openrouter_referer),
+        SettingId::AiCompactKeep => format!("{} tokens", app.ai.resolved_compact_keep()),
+        SettingId::AiCompactBuffer => format!("{} %", app.ai.resolved_compact_buffer()),
     }
 }
 
@@ -526,17 +581,30 @@ fn paint_menu(
         | SettingId::AiAutoApprove
         | SettingId::AiStreaming
         | SettingId::AiProvider
-        | SettingId::AiThink) => crate::settings::AiPrefs::choice_names(id),
+        | SettingId::AiThink
+        | SettingId::AiAutoCompact
+        | SettingId::AiModelTools
+        | SettingId::AiProviderKind) => app.ai.choice_names_with(id),
         SettingId::AiServer
         | SettingId::AiModel
         | SettingId::AiApiKey
         | SettingId::AiContextSize
         | SettingId::AiMaxTokens
+        | SettingId::AiModelContext
+        | SettingId::AiModelMaxOutput
         | SettingId::AiTimeout
         | SettingId::AiRetries
         | SettingId::AiAppName
         | SettingId::AiReferer
+        | SettingId::AiProviderAdd
+        | SettingId::AiProviderName
+        | SettingId::AiProviderKeyEnv
+        | SettingId::AiProviderModels
+        | SettingId::AiProviderDelete
         | SettingId::AiClearRecent
+        | SettingId::AiCompactKeep
+        | SettingId::AiCompactBuffer
+        | SettingId::AiDetected
         | SettingId::Binding(_) => return,
     };
     if names.is_empty() {

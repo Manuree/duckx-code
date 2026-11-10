@@ -832,6 +832,81 @@ mod tests {
     }
 
     #[test]
+    fn a_named_provider_shows_in_the_rows_and_the_provider_list() {
+        use crate::settings::SettingId;
+        let mut app = ai_settings_app(SettingId::AiProvider);
+        let screen = draw(&app, 110, 44);
+        assert!(screen.contains("(built-in) · named only"), "{screen}");
+        app.ai.add_named("Lab").unwrap();
+        app.ai.named[0].models = vec!["qwen3:32b".into()];
+        let screen = draw(&app, 110, 44);
+        assert!(screen.contains("Lab · Ollama ▾"), "{screen}");
+        assert!(screen.contains("enter twice removes Lab"), "{screen}");
+        assert!(screen.contains("qwen3:32b"), "{screen}");
+        app.handle(crate::action::SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
+        let screen = draw(&app, 110, 44);
+        assert!(screen.contains("OpenRouter"), "{screen}");
+        assert!(screen.contains("› Lab · Ollama"), "{screen}");
+    }
+
+    #[test]
+    fn model_tools_and_detected_limits_read_for_the_current_model() {
+        use crate::settings::SettingId;
+        let mut app = ai_settings_app(SettingId::AiModelTools);
+        let screen = draw(&app, 110, 40);
+        assert!(screen.contains("(set a model first)"), "{screen}");
+        app.ai.model = "gemma3".into();
+        app.ai.set_choice(SettingId::AiModelTools, 2);
+        let key = crate::agent::capability_key_for(&app.ai.endpoint(), "gemma3", true);
+        app.ai.detected.learn(&key, true, true);
+        let screen = draw(&app, 110, 40);
+        let row = |name: &str| {
+            screen
+                .lines()
+                .find(|line| line.contains(name))
+                .unwrap()
+                .to_string()
+        };
+        assert!(row("Model tools").contains("Off ▾"), "{screen}");
+        assert!(
+            row("Detected limits").contains("no tools, no think · enter forgets"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn model_limit_rows_show_the_value_they_fall_back_to() {
+        use crate::settings::{ModelLimits, SettingId};
+        let mut app = ai_settings_app(SettingId::AiModelContext);
+        let screen = draw(&app, 110, 40);
+        assert!(screen.contains("(set a model first)"), "{screen}");
+        app.ai.model = "qwen3:8b".into();
+        let screen = draw(&app, 110, 40);
+        assert!(screen.contains("16384 (Context size)"), "{screen}");
+        assert!(screen.contains("16384 (Max tokens)"), "{screen}");
+        app.ai.set_model_limits(ModelLimits {
+            context: Some(40_960),
+            max_output: None,
+        });
+        let screen = draw(&app, 110, 40);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("Model context"))
+            .unwrap();
+        assert!(
+            row.contains("40960") && !row.contains("(Context size)"),
+            "{row}"
+        );
+        app.ai
+            .switch_provider(crate::settings::AiProvider::OpenRouter);
+        app.ai.model = "anthropic/claude-sonnet-4".into();
+        let screen = draw(&app, 110, 40);
+        assert!(screen.contains("(omit · Max tokens)"), "{screen}");
+    }
+
+    #[test]
     fn rows_for_another_provider_are_greyed_and_say_which() {
         use crate::settings::{AiProvider, SettingId};
         let mut app = ai_settings_app(SettingId::AiProvider);
@@ -840,7 +915,7 @@ mod tests {
         assert!(screen.contains("duckx-code · OpenRouter only"), "{screen}");
         app.ai.switch_provider(AiProvider::OpenRouter);
         let screen = draw(&app, 110, 40);
-        assert!(screen.contains("16384 · Ollama only"), "{screen}");
+        assert!(!screen.contains("16384 · Ollama only"), "{screen}");
         assert!(screen.contains("On · Ollama only"), "{screen}");
         assert!(!screen.contains("· OpenRouter only"), "{screen}");
         assert!(screen.contains("OpenRouter ▾"), "{screen}");
@@ -1399,6 +1474,125 @@ mod tests {
         assert!(status.find("master") < status.find("DESIGN.md"));
         assert!(status.find("8%") < status.find("4 LF"));
         assert!(!status.contains("[+]"));
+    }
+
+    /// The assistant panel open with `used` tokens reported; the screen as rows.
+    fn agent_with_context(width: u16, used: u32, limit: &str) -> (App, Vec<String>) {
+        let mut app = App::new(Buffer::new(), None);
+        app.ai.context_size = limit.into();
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.agent.context_used = Some((used, true));
+        let screen = draw(&app, width, 16);
+        (app, screen.lines().map(str::to_string).collect())
+    }
+
+    /// The panel's bottom border: the last row that starts with `╰`.
+    fn agent_bottom(rows: &[String]) -> (usize, String) {
+        rows.iter()
+            .enumerate()
+            .rev()
+            .find(|(_, row)| row.starts_with('╰'))
+            .map(|(y, row)| (y, row.clone()))
+            .expect("assistant panel bottom border")
+    }
+
+    #[test]
+    fn the_agent_panel_shows_context_use_in_its_bottom_right_corner() {
+        let (_, rows) = agent_with_context(110, 12_400, "32768");
+        let (_, bottom) = agent_bottom(&rows);
+        assert!(bottom.ends_with("─ ctx 12.4k/32k 37% ─╯"), "{bottom:?}");
+        let status = rows.last().unwrap();
+        assert!(
+            !status.contains("ctx"),
+            "the status line is as before: {status:?}"
+        );
+        assert!(status.contains("AGENT"), "{status:?}");
+    }
+
+    #[test]
+    fn context_use_turns_warning_then_error_colored() {
+        let color = |used: u32| {
+            let (app, rows) = agent_with_context(110, used, "10000");
+            let (y, bottom) = agent_bottom(&rows);
+            let x = bottom[..bottom.find("ctx").unwrap()].chars().count() as u16;
+            let mut terminal = Terminal::new(TestBackend::new(110, 16)).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (buffer[(x, y as u16)].fg, *app.styles())
+        };
+        let (fg, theme) = color(5_000);
+        assert_eq!(Some(fg), theme.sidebar_dim.fg);
+        let (fg, theme) = color(7_500);
+        assert_eq!(fg, theme.diagnostic_warning);
+        let (fg, theme) = color(9_500);
+        assert_eq!(fg, theme.diagnostic_error);
+    }
+
+    #[test]
+    fn a_narrow_agent_panel_shortens_then_hides_context_use() {
+        let (_, rows) = agent_with_context(20, 900, "auto");
+        assert!(
+            agent_bottom(&rows).1.contains("─ ctx 900/16k 5% ─╯"),
+            "{rows:?}"
+        );
+        let (_, rows) = agent_with_context(16, 900, "auto");
+        let bottom = agent_bottom(&rows).1;
+        assert!(
+            bottom.contains("─ 900/16k ─╯") && !bottom.contains("ctx"),
+            "{bottom:?}"
+        );
+        let (_, rows) = agent_with_context(10, 900, "auto");
+        let bottom = agent_bottom(&rows).1;
+        assert!(!bottom.contains("900"), "{bottom:?}");
+        assert!(
+            bottom.starts_with('╰') && bottom.ends_with('╯'),
+            "{bottom:?}"
+        );
+    }
+
+    #[test]
+    fn the_slash_and_mention_lists_leave_the_context_corner_alone() {
+        for typed in ["/", "@"] {
+            let mut app = App::new(Buffer::new(), None);
+            app.ai.context_size = "32768".into();
+            app.agent.open = true;
+            app.agent.focused = true;
+            app.agent.context_used = Some((12_400, true));
+            app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+                typed.into(),
+            )));
+            assert!(app.agent.popup.is_some(), "{typed} opens its list");
+            let screen = draw(&app, 110, 24);
+            let rows: Vec<String> = screen.lines().map(str::to_string).collect();
+            let (y, bottom) = agent_bottom(&rows);
+            assert!(
+                bottom.ends_with("─ ctx 12.4k/32k 37% ─╯"),
+                "{typed}: {bottom:?}"
+            );
+            let list_bottom = rows
+                .iter()
+                .rposition(|row| row.contains("↑↓ tab enter esc"))
+                .expect("list keys row");
+            assert!(list_bottom < y, "{typed}: the list stays above the prompt");
+        }
+    }
+
+    #[test]
+    fn token_counts_read_short() {
+        use super::agent::{context_text, short_tokens};
+        assert_eq!(short_tokens(950), "950");
+        assert_eq!(short_tokens(12_400), "12.4k");
+        assert_eq!(short_tokens(32_768), "32k");
+        assert_eq!(short_tokens(131_072), "128k");
+        assert_eq!(short_tokens(150_400), "150k");
+        assert_eq!(short_tokens(2_000), "2k");
+        assert_eq!(
+            context_text(1_200, None, 40).as_deref(),
+            Some(" ctx 1.2k/? ")
+        );
+        assert_eq!(context_text(1_200, None, 9).as_deref(), Some(" 1.2k/? "));
+        assert_eq!(context_text(1_200, None, 3), None);
     }
 
     #[test]

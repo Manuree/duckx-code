@@ -1,5 +1,7 @@
 /// Settings page and the `settings.json` document.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub use crate::agent::ToolsMode;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -53,6 +55,10 @@ pub enum SettingId {
     AiThink,
     /// `max_tokens` cap. Blank keeps the provider's default.
     AiMaxTokens,
+    /// Context window for the current provider and model only.
+    AiModelContext,
+    /// Longest answer for the current provider and model only.
+    AiModelMaxOutput,
     /// Seconds one request may take.
     AiTimeout,
     /// Extra attempts after a 408, 429, or 5xx answer.
@@ -63,6 +69,28 @@ pub enum SettingId {
     AiReferer,
     /// Forget every remembered server and model.
     AiClearRecent,
+    /// Fold older turns into a summary when the prompt nears the context size.
+    AiAutoCompact,
+    /// Tokens of the newest turns auto compact keeps word for word.
+    AiCompactKeep,
+    /// Percent of the context size kept free before auto compact starts.
+    AiCompactBuffer,
+    /// Native tools for the current model: Auto, On, or Off.
+    AiModelTools,
+    /// What the server said the current model cannot do. `Enter` forgets it.
+    AiDetected,
+    /// Type a name to add a named provider, copied from the selected one.
+    AiProviderAdd,
+    /// The selected named provider's name.
+    AiProviderName,
+    /// The selected named provider's kind (how it is talked to).
+    AiProviderKind,
+    /// Environment variable whose value wins over the named provider's saved key.
+    AiProviderKeyEnv,
+    /// Models offered in the Model list for the named provider, comma separated.
+    AiProviderModels,
+    /// Removes the selected named provider (`Enter` twice).
+    AiProviderDelete,
 }
 
 /// How a new line is ended. `Auto` keeps the ending detected in the file.
@@ -430,13 +458,19 @@ pub enum KeySource {
     None,
     Saved,
     /// The provider's environment variable, which wins over the saved key.
-    Env(&'static str),
+    Env(String),
 }
 
 pub const DEFAULT_TIMEOUT_SECS: u32 = 1800;
 pub const TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 10..=7200;
 pub const DEFAULT_RETRIES: u32 = 3;
 pub const MAX_RETRIES: u32 = 10;
+/// Newest tokens auto compact keeps verbatim, unless the context is too small for that.
+pub const DEFAULT_COMPACT_KEEP: u32 = 15_000;
+pub const COMPACT_KEEP_RANGE: std::ops::RangeInclusive<u32> = 1_000..=200_000;
+/// Percent of the context size left free for the answer before compacting.
+pub const DEFAULT_COMPACT_BUFFER: u32 = 15;
+pub const COMPACT_BUFFER_RANGE: std::ops::RangeInclusive<u32> = 5..=50;
 /// Cap sent to Ollama and LM Studio when Max tokens is blank, as before this setting.
 pub const LOCAL_MAX_TOKENS: u32 = 16384;
 pub const MAX_TOKENS_LIMIT: u32 = 1_000_000;
@@ -495,7 +529,113 @@ pub struct AiPrefs {
     /// The last servers and models, for the list under the Server and Model rows.
     #[serde(default, skip_serializing_if = "AiRecent::is_empty")]
     pub recent: AiRecent,
+    /// Summarize older turns when the prompt would pass the context size minus the buffer.
+    #[serde(default = "enabled")]
+    pub auto_compact: bool,
+    /// Tokens of the newest turns kept word for word when compacting.
+    #[serde(default = "default_compact_keep")]
+    pub compact_keep: u32,
+    /// Percent of the context size kept free before compacting.
+    #[serde(default = "default_compact_buffer")]
+    pub compact_buffer: u32,
+    /// Limits for one model, keyed `"<provider> <model>"` (see [`AiPrefs::model_key`]).
+    /// A model without an entry uses Context size and Max tokens.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_limits: BTreeMap<String, ModelLimits>,
+    /// Native tools per model, keyed `"<provider> <model>"`. A model without an
+    /// entry is `Auto`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_tools: BTreeMap<String, ToolsMode>,
+    /// Models a server rejected `tools` or `think` for, so the next session does
+    /// not ask again.
+    #[serde(default, skip_serializing_if = "Detected::is_empty")]
+    pub detected: Detected,
+    /// Providers the user added and named. Each has its own kind, server, model,
+    /// key (or key variable), and models.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named: Vec<NamedProvider>,
+    /// Name of the selected named provider. Empty: the built-in `provider` is
+    /// selected. While a named one is selected, `provider` is its kind and
+    /// `server` / `model` / `api_key` are its values.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub active: String,
 }
+
+/// Keys are `"<chat url> <model>"`, the same ones the worker learns with.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Detected {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub no_tools: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub no_think: BTreeSet<String>,
+}
+
+impl Detected {
+    pub fn is_empty(&self) -> bool {
+        self.no_tools.is_empty() && self.no_think.is_empty()
+    }
+
+    /// Adds what was learned for `key`. Returns whether anything is new.
+    pub fn learn(&mut self, key: &str, no_tools: bool, no_think: bool) -> bool {
+        let tools = no_tools && self.no_tools.insert(key.to_string());
+        let think = no_think && self.no_think.insert(key.to_string());
+        tools || think
+    }
+}
+
+fn default_compact_keep() -> u32 {
+    DEFAULT_COMPACT_KEEP
+}
+
+fn default_compact_buffer() -> u32 {
+    DEFAULT_COMPACT_BUFFER
+}
+
+/// One model's own limits. `None` falls back to the global row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelLimits {
+    /// Context window in tokens: Ollama's `num_ctx`, and the history budget everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u32>,
+    /// Longest answer (`max_tokens`, or `num_predict` on Ollama).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u32>,
+}
+
+impl ModelLimits {
+    pub fn is_empty(&self) -> bool {
+        self.context.is_none() && self.max_output.is_none()
+    }
+}
+
+/// Context a model may be given on its own row: wider than Context size, for
+/// cloud models with very long windows.
+pub const MODEL_CONTEXT_RANGE: std::ops::RangeInclusive<u32> = 1024..=2_000_000;
+
+/// A provider the user added: `kind` says how it is talked to (Ollama native,
+/// LM Studio, OpenAI-compatible, or OpenRouter headers).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedProvider {
+    pub name: String,
+    #[serde(default)]
+    pub kind: AiProvider,
+    /// Empty uses the kind's default server.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub server: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key: String,
+    /// Environment variable that wins over `api_key` when it is set. Empty: none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key_env: String,
+    /// Extra models offered in the Model list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+}
+
+/// Longest name a named provider may have.
+pub const PROVIDER_NAME_MAX: usize = 40;
 
 fn default_context_size() -> String {
     "16384".to_string()
@@ -536,6 +676,14 @@ impl Default for AiPrefs {
             openrouter_referer: default_referer(),
             profiles: BTreeMap::new(),
             recent: AiRecent::default(),
+            auto_compact: true,
+            compact_keep: DEFAULT_COMPACT_KEEP,
+            compact_buffer: DEFAULT_COMPACT_BUFFER,
+            model_limits: BTreeMap::new(),
+            model_tools: BTreeMap::new(),
+            detected: Detected::default(),
+            named: Vec::new(),
+            active: String::new(),
         }
     }
 }
@@ -549,10 +697,18 @@ impl AiPrefs {
                 | SettingId::AiApiKey
                 | SettingId::AiContextSize
                 | SettingId::AiMaxTokens
+                | SettingId::AiModelContext
+                | SettingId::AiModelMaxOutput
                 | SettingId::AiTimeout
                 | SettingId::AiRetries
                 | SettingId::AiAppName
                 | SettingId::AiReferer
+                | SettingId::AiCompactKeep
+                | SettingId::AiCompactBuffer
+                | SettingId::AiProviderAdd
+                | SettingId::AiProviderName
+                | SettingId::AiProviderKeyEnv
+                | SettingId::AiProviderModels
         )
     }
 
@@ -638,8 +794,17 @@ impl AiPrefs {
                 ));
                 seeds
             }
-            SettingId::AiModel if !self.model.trim().is_empty() => {
-                vec![(self.model.trim().to_string(), PickSource::Current)]
+            SettingId::AiModel => {
+                let mut seeds = Vec::new();
+                if !self.model.trim().is_empty() {
+                    seeds.push((self.model.trim().to_string(), PickSource::Current));
+                }
+                if let Some(index) = self.active_named() {
+                    for model in &self.named[index].models {
+                        seeds.push((model.clone(), PickSource::Saved));
+                    }
+                }
+                seeds
             }
             _ => Vec::new(),
         }
@@ -656,25 +821,188 @@ impl AiPrefs {
 
     /// Selects `next` and swaps in the server, model, and key it had last time.
     /// The provider being left keeps its own in `profiles`.
+    /// Selects a built-in provider, keeping what the current one had.
     pub fn switch_provider(&mut self, next: AiProvider) {
-        if next == self.provider {
+        if next == self.provider && self.active_named().is_none() {
             return;
         }
-        let leaving = ProviderProfile {
-            server: std::mem::take(&mut self.server),
-            model: std::mem::take(&mut self.model),
-            api_key: std::mem::take(&mut self.api_key),
-        };
-        if leaving.is_empty() {
-            self.profiles.remove(&self.provider);
-        } else {
-            self.profiles.insert(self.provider, leaving);
-        }
+        self.stash();
         let arriving = self.profiles.remove(&next).unwrap_or_default();
         self.server = arriving.server;
         self.model = arriving.model;
         self.api_key = arriving.api_key;
         self.provider = next;
+    }
+
+    /// Puts the selected provider's server, model, and key back where they live:
+    /// its named entry, or `profiles` for a built-in. Leaves no provider active.
+    fn stash(&mut self) {
+        let server = std::mem::take(&mut self.server);
+        let model = std::mem::take(&mut self.model);
+        let api_key = std::mem::take(&mut self.api_key);
+        if let Some(index) = self.active_named() {
+            let entry = &mut self.named[index];
+            entry.kind = self.provider;
+            entry.server = server;
+            entry.model = model;
+            entry.api_key = api_key;
+        } else {
+            let leaving = ProviderProfile {
+                server,
+                model,
+                api_key,
+            };
+            if leaving.is_empty() {
+                self.profiles.remove(&self.provider);
+            } else {
+                self.profiles.insert(self.provider, leaving);
+            }
+        }
+        self.active.clear();
+    }
+
+    /// Index of the selected named provider in `named`.
+    pub fn active_named(&self) -> Option<usize> {
+        if self.active.is_empty() {
+            return None;
+        }
+        self.named
+            .iter()
+            .position(|entry| entry.name == self.active)
+    }
+
+    /// Index of the named provider called `name`, in any case.
+    pub fn find_named(&self, name: &str) -> Option<usize> {
+        let name = name.trim();
+        self.named
+            .iter()
+            .position(|entry| entry.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Selects the named provider called `name`. `false` when there is none.
+    pub fn switch_named(&mut self, name: &str) -> bool {
+        let Some(index) = self.find_named(name) else {
+            return false;
+        };
+        if self.active_named() == Some(index) {
+            return true;
+        }
+        self.stash();
+        let entry = self.named[index].clone();
+        self.server = entry.server;
+        self.model = entry.model;
+        self.api_key = entry.api_key;
+        self.provider = entry.kind;
+        self.active = entry.name;
+        true
+    }
+
+    /// Why `name` cannot name a provider, if it cannot. `except` is the entry being renamed.
+    fn name_problem(&self, name: &str, except: Option<usize>) -> Option<String> {
+        if name.is_empty() {
+            return Some("Type a name for the provider".to_string());
+        }
+        if name.chars().count() > PROVIDER_NAME_MAX {
+            return Some(format!(
+                "A provider name is at most {PROVIDER_NAME_MAX} characters"
+            ));
+        }
+        let builtin = AiProvider::ALL.iter().any(|provider| {
+            provider.label().eq_ignore_ascii_case(name)
+                || AiProvider::parse(name) == Some(*provider)
+        });
+        if builtin {
+            return Some(format!("{name} is a built-in provider name"));
+        }
+        if name.contains(':') {
+            return Some("A provider name cannot contain :".to_string());
+        }
+        if self
+            .find_named(name)
+            .is_some_and(|index| Some(index) != except)
+        {
+            return Some(format!("A provider named {name} already exists"));
+        }
+        None
+    }
+
+    /// Adds a named provider of the selected kind and server, and selects it.
+    pub fn add_named(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if let Some(problem) = self.name_problem(name, None) {
+            return Err(problem);
+        }
+        self.named.push(NamedProvider {
+            name: name.to_string(),
+            kind: self.provider,
+            server: self.server.trim().to_string(),
+            ..NamedProvider::default()
+        });
+        self.switch_named(name);
+        Ok(())
+    }
+
+    /// Renames the selected named provider.
+    pub fn rename_named(&mut self, name: &str) -> Result<bool, String> {
+        let name = name.trim();
+        let Some(index) = self.active_named() else {
+            return Ok(false);
+        };
+        if self.named[index].name == name {
+            return Ok(false);
+        }
+        if let Some(problem) = self.name_problem(name, Some(index)) {
+            return Err(problem);
+        }
+        self.named[index].name = name.to_string();
+        self.active = name.to_string();
+        Ok(true)
+    }
+
+    /// Removes the selected named provider and returns to the built-in of its
+    /// kind. Returns the removed name.
+    pub fn delete_named(&mut self) -> Option<String> {
+        let index = self.active_named()?;
+        let removed = self.named.remove(index);
+        self.active.clear();
+        let arriving = self.profiles.remove(&removed.kind).unwrap_or_default();
+        self.server = arriving.server;
+        self.model = arriving.model;
+        self.api_key = arriving.api_key;
+        self.provider = removed.kind;
+        Some(removed.name)
+    }
+
+    /// The selected provider's name: a named one's name, else the built-in label.
+    pub fn provider_name(&self) -> String {
+        match self.active_named() {
+            Some(index) => self.named[index].name.clone(),
+            None => self.provider.label().to_string(),
+        }
+    }
+
+    /// The environment variable whose value wins over the saved key.
+    pub fn key_env_name(&self) -> Option<String> {
+        match self.active_named() {
+            Some(index) => {
+                let name = self.named[index].api_key_env.trim();
+                (!name.is_empty()).then(|| name.to_string())
+            }
+            None => self.provider.key_env().map(str::to_string),
+        }
+    }
+
+    /// Choice names that depend on what is saved: the Provider list adds the named ones.
+    pub fn choice_names_with(&self, id: SettingId) -> Vec<String> {
+        let mut names = Self::choice_names(id);
+        if id == SettingId::AiProvider {
+            names.extend(
+                self.named
+                    .iter()
+                    .map(|entry| format!("{} · {}", entry.name, entry.kind.label())),
+            );
+        }
+        names
     }
 
     /// The key a request sends and where it came from. A set environment variable wins.
@@ -686,8 +1014,8 @@ impl AiPrefs {
         &self,
         env: impl Fn(&str) -> Option<String>,
     ) -> (String, KeySource) {
-        if let Some(name) = self.provider.key_env()
-            && let Some(value) = env(name).filter(|value| !value.trim().is_empty())
+        if let Some(name) = self.key_env_name()
+            && let Some(value) = env(&name).filter(|value| !value.trim().is_empty())
         {
             return (value.trim().to_string(), KeySource::Env(name));
         }
@@ -699,8 +1027,47 @@ impl AiPrefs {
         }
     }
 
-    /// `max_tokens` / `num_predict` for this provider. `None` leaves it out.
+    /// `"<provider> <model>"`: the one key for everything kept per model
+    /// (`model_limits`, `model_tools`). `provider` is the kind, so a named
+    /// provider shares entries with the built-in of its kind. `None` without a model.
+    pub fn model_key(&self) -> Option<String> {
+        let model = self.model.trim();
+        (!model.is_empty()).then(|| format!("{} {model}", self.provider.as_str()))
+    }
+
+    /// The current model's own limits (empty when it has none).
+    pub fn model_limits(&self) -> ModelLimits {
+        self.model_key()
+            .and_then(|key| self.model_limits.get(&key).copied())
+            .unwrap_or_default()
+    }
+
+    /// Changes the current model's limits; an entry with nothing set is removed.
+    /// Returns whether anything changed. Without a model nothing is stored.
+    pub fn set_model_limits(&mut self, limits: ModelLimits) -> bool {
+        let Some(key) = self.model_key() else {
+            return false;
+        };
+        let before = self.model_limits.get(&key).copied().unwrap_or_default();
+        if limits.is_empty() {
+            self.model_limits.remove(&key);
+        } else {
+            self.model_limits.insert(key, limits);
+        }
+        before != limits
+    }
+
+    /// `max_tokens` / `num_predict` for this model: its own Max output, else
+    /// [`Self::global_max_tokens`]. `None` leaves it out.
     pub fn resolved_max_tokens(&self) -> Option<u32> {
+        self.model_limits()
+            .max_output
+            .filter(|n| (1..=MAX_TOKENS_LIMIT).contains(n))
+            .or_else(|| self.global_max_tokens())
+    }
+
+    /// The Max tokens row alone, for every model without its own Max output.
+    pub fn global_max_tokens(&self) -> Option<u32> {
         let raw = self.max_tokens.trim();
         if raw.is_empty() {
             return self.provider.is_local().then_some(LOCAL_MAX_TOKENS);
@@ -726,6 +1093,16 @@ impl AiPrefs {
         self.retries.min(MAX_RETRIES)
     }
 
+    pub fn resolved_compact_keep(&self) -> u32 {
+        self.compact_keep
+            .clamp(*COMPACT_KEEP_RANGE.start(), *COMPACT_KEEP_RANGE.end())
+    }
+
+    pub fn resolved_compact_buffer(&self) -> u32 {
+        self.compact_buffer
+            .clamp(*COMPACT_BUFFER_RANGE.start(), *COMPACT_BUFFER_RANGE.end())
+    }
+
     /// OpenRouter's attribution headers. Other providers get none.
     pub fn extra_headers(&self) -> Vec<(String, String)> {
         if self.provider != AiProvider::OpenRouter {
@@ -746,8 +1123,13 @@ impl AiPrefs {
     /// Context size and Thinking only reach Ollama's native API.
     pub fn applies(&self, id: SettingId) -> bool {
         match id {
-            SettingId::AiContextSize | SettingId::AiThink => self.provider == AiProvider::Ollama,
+            SettingId::AiThink => self.provider == AiProvider::Ollama,
             SettingId::AiAppName | SettingId::AiReferer => self.provider == AiProvider::OpenRouter,
+            SettingId::AiProviderName
+            | SettingId::AiProviderKind
+            | SettingId::AiProviderKeyEnv
+            | SettingId::AiProviderModels
+            | SettingId::AiProviderDelete => self.active_named().is_some(),
             _ => true,
         }
     }
@@ -757,11 +1139,13 @@ impl AiPrefs {
             SettingId::AiEnabled
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
-            | SettingId::AiThink => vec!["On".into(), "Off".into()],
-            SettingId::AiProvider => AiProvider::ALL
+            | SettingId::AiThink
+            | SettingId::AiAutoCompact => vec!["On".into(), "Off".into()],
+            SettingId::AiProvider | SettingId::AiProviderKind => AiProvider::ALL
                 .iter()
                 .map(|provider| provider.label().to_string())
                 .collect(),
+            SettingId::AiModelTools => vec!["Auto".into(), "On".into(), "Off".into()],
             _ => Vec::new(),
         }
     }
@@ -772,7 +1156,13 @@ impl AiPrefs {
             SettingId::AiAutoApprove => usize::from(!self.auto_approve),
             SettingId::AiStreaming => usize::from(!self.streaming),
             SettingId::AiThink => usize::from(!self.think),
-            SettingId::AiProvider => self.provider.index(),
+            SettingId::AiAutoCompact => usize::from(!self.auto_compact),
+            SettingId::AiModelTools => self.model_tools_mode() as usize,
+            SettingId::AiProvider => match self.active_named() {
+                Some(index) => AiProvider::ALL.len() + index,
+                None => self.provider.index(),
+            },
+            SettingId::AiProviderKind => self.provider.index(),
             _ => 0,
         }
     }
@@ -783,13 +1173,19 @@ impl AiPrefs {
             SettingId::AiAutoApprove => on_off(self.auto_approve),
             SettingId::AiStreaming => on_off(self.streaming),
             SettingId::AiThink => on_off(self.think),
-            SettingId::AiProvider => self.provider.as_str().to_string(),
+            SettingId::AiAutoCompact => on_off(self.auto_compact),
+            SettingId::AiModelTools => tools_token(self.model_tools_mode()).to_string(),
+            SettingId::AiProvider => match self.active_named() {
+                Some(index) => format!("named:{}", self.named[index].name),
+                None => self.provider.as_str().to_string(),
+            },
+            SettingId::AiProviderKind => self.provider.as_str().to_string(),
             _ => String::new(),
         }
     }
 
     pub fn choice_label(&self, id: SettingId) -> String {
-        Self::choice_names(id)
+        self.choice_names_with(id)
             .get(self.choice_index(id))
             .cloned()
             .unwrap_or_default()
@@ -801,7 +1197,26 @@ impl AiPrefs {
             SettingId::AiAutoApprove => self.auto_approve = index == 0,
             SettingId::AiStreaming => self.streaming = index == 0,
             SettingId::AiThink => self.think = index == 0,
-            SettingId::AiProvider => self.switch_provider(AiProvider::from_index(index)),
+            SettingId::AiAutoCompact => self.auto_compact = index == 0,
+            SettingId::AiProvider => match index.checked_sub(AiProvider::ALL.len()) {
+                Some(named) => {
+                    if let Some(name) = self.named.get(named).map(|entry| entry.name.clone()) {
+                        self.switch_named(&name);
+                    }
+                }
+                None => self.switch_provider(AiProvider::from_index(index)),
+            },
+            SettingId::AiProviderKind if self.active_named().is_some() => {
+                self.provider = AiProvider::from_index(index);
+            }
+            SettingId::AiModelTools => {
+                let mode = match index {
+                    1 => ToolsMode::On,
+                    2 => ToolsMode::Off,
+                    _ => ToolsMode::Auto,
+                };
+                self.set_model_tools(mode);
+            }
             _ => {}
         }
     }
@@ -812,8 +1227,21 @@ impl AiPrefs {
             SettingId::AiAutoApprove => self.auto_approve = token != "off",
             SettingId::AiStreaming => self.streaming = token != "off",
             SettingId::AiThink => self.think = token != "off",
-            SettingId::AiProvider => {
-                self.switch_provider(AiProvider::parse(token).unwrap_or_default());
+            SettingId::AiAutoCompact => self.auto_compact = token != "off",
+            SettingId::AiProvider => match token.strip_prefix("named:") {
+                Some(name) if self.switch_named(name) => {}
+                _ => self.switch_provider(AiProvider::parse(token).unwrap_or_default()),
+            },
+            SettingId::AiProviderKind if self.active_named().is_some() => {
+                self.provider = AiProvider::parse(token).unwrap_or(self.provider);
+            }
+            SettingId::AiModelTools => {
+                let mode = match token {
+                    "on" => ToolsMode::On,
+                    "off" => ToolsMode::Off,
+                    _ => ToolsMode::Auto,
+                };
+                self.set_model_tools(mode);
             }
             _ => {}
         }
@@ -831,17 +1259,118 @@ impl AiPrefs {
             SettingId::AiApiKey => self.api_key.clear(),
             SettingId::AiContextSize => self.context_size = default_context_size(),
             SettingId::AiMaxTokens => self.max_tokens.clear(),
+            SettingId::AiModelContext => {
+                let limits = ModelLimits {
+                    context: None,
+                    ..self.model_limits()
+                };
+                self.set_model_limits(limits);
+            }
+            SettingId::AiModelMaxOutput => {
+                let limits = ModelLimits {
+                    max_output: None,
+                    ..self.model_limits()
+                };
+                self.set_model_limits(limits);
+            }
             SettingId::AiTimeout => self.request_timeout = DEFAULT_TIMEOUT_SECS,
             SettingId::AiRetries => self.retries = DEFAULT_RETRIES,
             SettingId::AiAppName => self.openrouter_app_name = default_app_name(),
             SettingId::AiReferer => self.openrouter_referer = default_referer(),
             SettingId::AiClearRecent => self.recent = AiRecent::default(),
+            SettingId::AiProviderKeyEnv | SettingId::AiProviderModels => {
+                if let Some(index) = self.active_named() {
+                    let entry = &mut self.named[index];
+                    if id == SettingId::AiProviderKeyEnv {
+                        entry.api_key_env.clear();
+                    } else {
+                        entry.models.clear();
+                    }
+                }
+            }
+            SettingId::AiAutoCompact => self.auto_compact = true,
+            SettingId::AiCompactKeep => self.compact_keep = DEFAULT_COMPACT_KEEP,
+            SettingId::AiCompactBuffer => self.compact_buffer = DEFAULT_COMPACT_BUFFER,
+            SettingId::AiModelTools => self.set_model_tools(ToolsMode::Auto),
+            SettingId::AiDetected => {
+                let keys = self.detected_keys();
+                for key in &keys {
+                    self.detected.no_tools.remove(key);
+                    self.detected.no_think.remove(key);
+                }
+            }
             _ => {}
         }
     }
 
-    /// Tokens for the prompt window. `auto` / empty / invalid → 16384.
+    /// Native tools for the current model. `Auto` without an entry.
+    pub fn model_tools_mode(&self) -> ToolsMode {
+        self.model_key()
+            .and_then(|key| self.model_tools.get(&key).copied())
+            .unwrap_or_default()
+    }
+
+    /// Sets the current model's tools mode. `Auto` removes the entry.
+    pub fn set_model_tools(&mut self, mode: ToolsMode) {
+        let Some(key) = self.model_key() else {
+            return;
+        };
+        if mode == ToolsMode::Auto {
+            self.model_tools.remove(&key);
+        } else {
+            self.model_tools.insert(key, mode);
+        }
+    }
+
+    /// Saved detection keys that belong to the current server and model (either
+    /// chat URL: Ollama native or `/v1`).
+    pub fn detected_keys(&self) -> Vec<String> {
+        let model = self.model.trim();
+        if model.is_empty() {
+            return Vec::new();
+        }
+        let server = self.endpoint();
+        let mine = [
+            crate::agent::capability_key_for(&server, model, true),
+            crate::agent::capability_key_for(&server, model, false),
+        ];
+        mine.into_iter()
+            .filter(|key| {
+                self.detected.no_tools.contains(key) || self.detected.no_think.contains(key)
+            })
+            .collect()
+    }
+
+    /// `(no tools, no think)` saved for the current server and model.
+    pub fn detected_now(&self) -> (bool, bool) {
+        let keys = self.detected_keys();
+        (
+            keys.iter().any(|key| self.detected.no_tools.contains(key)),
+            keys.iter().any(|key| self.detected.no_think.contains(key)),
+        )
+    }
+
+    /// True when the context window is a number the user set, or Ollama, which is
+    /// sent `num_ctx` and so really uses it. Otherwise the ctx counter shows `?`.
+    pub fn context_size_known(&self) -> bool {
+        let raw = self.context_size.trim();
+        self.provider == AiProvider::Ollama
+            || raw
+                .parse::<u32>()
+                .is_ok_and(|n| (1024..=262_144).contains(&n))
+    }
+
+    /// Context window for this model: its own Model context, else
+    /// [`Self::global_context_size`].
     pub fn resolved_context_size(&self) -> u32 {
+        self.model_limits()
+            .context
+            .filter(|n| MODEL_CONTEXT_RANGE.contains(n))
+            .unwrap_or_else(|| self.global_context_size())
+    }
+
+    /// The Context size row alone, for every model without its own context.
+    pub fn global_context_size(&self) -> u32 {
         let raw = self.context_size.trim();
         if raw.is_empty() || raw.eq_ignore_ascii_case("auto") {
             return 16384;
@@ -850,6 +1379,14 @@ impl AiPrefs {
             .ok()
             .filter(|n| (1024..=262_144).contains(n))
             .unwrap_or(16384)
+    }
+}
+
+fn tools_token(mode: ToolsMode) -> &'static str {
+    match mode {
+        ToolsMode::Auto => "auto",
+        ToolsMode::On => "on",
+        ToolsMode::Off => "off",
     }
 }
 
@@ -1222,6 +1759,8 @@ pub enum PickSource {
     Current,
     /// The provider's built-in server.
     Default,
+    /// Listed under the named provider's Saved models.
+    Saved,
 }
 
 impl PickSource {
@@ -1232,6 +1771,7 @@ impl PickSource {
             Self::Server => "server",
             Self::Current => "current",
             Self::Default => "default",
+            Self::Saved => "saved",
         }
     }
 }
@@ -1383,7 +1923,7 @@ pub fn sections() -> &'static [Section] {
                         },
                         Item {
                             label: "Provider",
-                            detail: "Ollama, LM Studio, OpenAI-compatible, or OpenRouter. Each keeps its own server, model, and key.",
+                            detail: "Ollama, LM Studio, OpenAI-compatible, OpenRouter, or one you added. Each keeps its own server, model, and key.",
                             id: SettingId::AiProvider,
                         },
                         Item {
@@ -1400,6 +1940,26 @@ pub fn sections() -> &'static [Section] {
                             label: "API key",
                             detail: "Bearer token for this provider. OPENROUTER_API_KEY or OPENAI_API_KEY wins when set.",
                             id: SettingId::AiApiKey,
+                        },
+                        Item {
+                            label: "Model context",
+                            detail: "Token window for this model only. Blank uses Context size. Ollama gets it as num_ctx.",
+                            id: SettingId::AiModelContext,
+                        },
+                        Item {
+                            label: "Model max output",
+                            detail: "Longest answer for this model only. Blank uses Max tokens.",
+                            id: SettingId::AiModelMaxOutput,
+                        },
+                        Item {
+                            label: "Model tools",
+                            detail: "Native tools for this model. Auto detects; On always sends them; Off uses the text tool prompt.",
+                            id: SettingId::AiModelTools,
+                        },
+                        Item {
+                            label: "Detected limits",
+                            detail: "What the server said this model cannot do, kept across restarts. Enter forgets it.",
+                            id: SettingId::AiDetected,
                         },
                         Item {
                             label: "Max tokens",
@@ -1433,8 +1993,23 @@ pub fn sections() -> &'static [Section] {
                         },
                         Item {
                             label: "Context size",
-                            detail: "Ollama only: token window (num_ctx). Default 16384. Type auto or a number.",
+                            detail: "Token window. Sent to Ollama as num_ctx; for every provider the budget auto compact works to. auto = 16384.",
                             id: SettingId::AiContextSize,
+                        },
+                        Item {
+                            label: "Auto compact",
+                            detail: "Near the context size, summarize older turns with the same model and keep the newest ones.",
+                            id: SettingId::AiAutoCompact,
+                        },
+                        Item {
+                            label: "Keep tokens",
+                            detail: "Newest tokens kept word for word when compacting (less on a small context). 1000 to 200000.",
+                            id: SettingId::AiCompactKeep,
+                        },
+                        Item {
+                            label: "Compact buffer",
+                            detail: "Percent of the context size left free for the answer before compacting. 5 to 50.",
+                            id: SettingId::AiCompactBuffer,
                         },
                         Item {
                             label: "OpenRouter app name",
@@ -1445,6 +2020,36 @@ pub fn sections() -> &'static [Section] {
                             label: "OpenRouter referer",
                             detail: "OpenRouter only: sent as HTTP-Referer. Empty sends none.",
                             id: SettingId::AiReferer,
+                        },
+                        Item {
+                            label: "Add provider",
+                            detail: "Type a name to add your own provider, starting from the selected one's kind and server.",
+                            id: SettingId::AiProviderAdd,
+                        },
+                        Item {
+                            label: "Provider name",
+                            detail: "Name of this named provider, shown in the Provider list and /provider.",
+                            id: SettingId::AiProviderName,
+                        },
+                        Item {
+                            label: "Provider kind",
+                            detail: "How this named provider is talked to: Ollama, LM Studio, OpenAI-compatible, or OpenRouter.",
+                            id: SettingId::AiProviderKind,
+                        },
+                        Item {
+                            label: "API key variable",
+                            detail: "Environment variable whose value wins over the saved key, e.g. WORK_OPENAI_KEY. Empty: none.",
+                            id: SettingId::AiProviderKeyEnv,
+                        },
+                        Item {
+                            label: "Saved models",
+                            detail: "Models offered in the Model list for this provider, separated by commas.",
+                            id: SettingId::AiProviderModels,
+                        },
+                        Item {
+                            label: "Delete provider",
+                            detail: "Remove this named provider. Enter twice. Its server, model, and key are forgotten.",
+                            id: SettingId::AiProviderDelete,
                         },
                         Item {
                             label: "Clear recent history",
@@ -1581,6 +2186,32 @@ mod tests {
     }
 
     #[test]
+    fn settings_without_compact_keys_load_with_auto_compact_on() {
+        let text = r#"{"ai":{"provider":"ollama","model":"qwen3:8b","context_size":"8192"}}"#;
+        let file: SettingsFile = serde_json::from_str(text).unwrap();
+        assert!(file.ai.auto_compact);
+        assert_eq!(file.ai.compact_keep, DEFAULT_COMPACT_KEEP);
+        assert_eq!(file.ai.compact_buffer, DEFAULT_COMPACT_BUFFER);
+        let mut ai = file.ai;
+        ai.auto_compact = false;
+        ai.compact_keep = 4_000;
+        ai.compact_buffer = 25;
+        let back: AiPrefs = serde_json::from_str(&serde_json::to_string(&ai).unwrap()).unwrap();
+        assert_eq!(back, ai);
+        ai.compact_keep = 5;
+        ai.compact_buffer = 99;
+        assert_eq!(ai.resolved_compact_keep(), *COMPACT_KEEP_RANGE.start());
+        assert_eq!(ai.resolved_compact_buffer(), *COMPACT_BUFFER_RANGE.end());
+        assert!(ai.applies(SettingId::AiContextSize));
+        ai.switch_provider(AiProvider::OpenRouter);
+        assert!(
+            ai.applies(SettingId::AiContextSize),
+            "the compact budget everywhere"
+        );
+        assert!(ai.applies(SettingId::AiAutoCompact));
+    }
+
+    #[test]
     fn an_older_openai_provider_loads_as_lm_studio_and_keeps_its_fields() {
         let text = r#"{"ai":{"provider":"openai","server":"http://10.0.0.5:1234/v1","model":"qwen","api_key":"k","think":false}}"#;
         let file: SettingsFile = serde_json::from_str(text).unwrap();
@@ -1654,7 +2285,7 @@ mod tests {
         );
         assert_eq!(
             ai.resolved_api_key_with(env),
-            ("sk-env".into(), KeySource::Env("OPENROUTER_API_KEY"))
+            ("sk-env".into(), KeySource::Env("OPENROUTER_API_KEY".into()))
         );
         ai.switch_provider(AiProvider::OpenaiCompatible);
         assert_eq!(
@@ -1667,6 +2298,234 @@ mod tests {
             ai.resolved_api_key_with(all),
             (String::new(), KeySource::None)
         );
+    }
+
+    #[test]
+    fn an_older_file_saves_back_unchanged_with_no_named_providers() {
+        let text = r#"{"ai":{"provider":"openrouter","model":"x/y","profiles":{"ollama":{"server":"http://10.0.0.2:11434/v1","model":"qwen3"}}}}"#;
+        let file: SettingsFile = serde_json::from_str(text).unwrap();
+        assert!(file.ai.named.is_empty() && file.ai.active.is_empty());
+        let saved = serde_json::to_string(&file.ai).unwrap();
+        assert!(
+            !saved.contains("named") && !saved.contains("active"),
+            "{saved}"
+        );
+        let back: AiPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, file.ai);
+    }
+
+    #[test]
+    fn named_providers_keep_their_own_values_and_the_built_ins_keep_theirs() {
+        let mut ai = AiPrefs {
+            server: "http://10.0.0.2:11434/v1".into(),
+            model: "qwen3:8b".into(),
+            ..AiPrefs::default()
+        };
+        ai.add_named("Work box").unwrap();
+        assert_eq!(ai.active, "Work box");
+        assert_eq!(
+            ai.provider,
+            AiProvider::Ollama,
+            "starts as the selected kind"
+        );
+        assert_eq!(ai.server, "http://10.0.0.2:11434/v1", "and server");
+        assert_eq!(ai.model, "", "with no model yet");
+        ai.model = "llama3.3:70b".into();
+        ai.api_key = "work-key".into();
+
+        ai.switch_provider(AiProvider::Ollama);
+        assert!(ai.active.is_empty());
+        assert_eq!(ai.model, "qwen3:8b", "the built-in Ollama is untouched");
+        assert_eq!(ai.api_key, "");
+        assert!(ai.switch_named("work BOX"), "names match in any case");
+        assert_eq!(ai.model, "llama3.3:70b");
+        assert_eq!(ai.api_key, "work-key");
+
+        let saved = serde_json::to_string(&ai).unwrap();
+        let back: AiPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, ai);
+        assert!(saved.contains(r#""active":"Work box""#), "{saved}");
+
+        // The Provider list: built-ins, then the named ones.
+        let names = ai.choice_names_with(SettingId::AiProvider);
+        assert_eq!(names.len(), 5);
+        assert_eq!(names[4], "Work box · Ollama");
+        assert_eq!(ai.choice_index(SettingId::AiProvider), 4);
+        assert_eq!(ai.choice_label(SettingId::AiProvider), "Work box · Ollama");
+        let token = ai.choice_token(SettingId::AiProvider);
+        ai.set_choice(SettingId::AiProvider, 3);
+        assert_eq!(ai.provider, AiProvider::OpenRouter);
+        ai.restore_choice(SettingId::AiProvider, &token);
+        assert_eq!(ai.active, "Work box");
+        assert_eq!(ai.model, "llama3.3:70b");
+
+        // Kind changes how it is talked to, not its values.
+        ai.set_choice(SettingId::AiProviderKind, 2);
+        assert_eq!(ai.provider, AiProvider::OpenaiCompatible);
+        assert_eq!(ai.server, "http://10.0.0.2:11434/v1");
+        ai.switch_provider(AiProvider::OpenaiCompatible);
+        assert!(ai.active.is_empty());
+        assert_eq!(ai.named[0].kind, AiProvider::OpenaiCompatible);
+        assert_eq!(ai.server, "", "the built-in OpenAI-compatible has its own");
+
+        // Delete goes back to the built-in of its kind.
+        ai.switch_provider(AiProvider::Ollama);
+        ai.switch_named("Work box");
+        assert_eq!(ai.delete_named().as_deref(), Some("Work box"));
+        assert!(ai.named.is_empty() && ai.active.is_empty());
+        assert_eq!(ai.provider, AiProvider::OpenaiCompatible);
+    }
+
+    #[test]
+    fn provider_names_are_checked() {
+        let mut ai = AiPrefs::default();
+        assert!(ai.add_named("").is_err());
+        assert_eq!(
+            ai.add_named("OpenRouter").unwrap_err(),
+            "OpenRouter is a built-in provider name"
+        );
+        assert!(ai.add_named("lmstudio").is_err());
+        assert!(ai.add_named("a:b").is_err());
+        assert!(ai.add_named(&"x".repeat(41)).is_err());
+        ai.add_named("Home").unwrap();
+        ai.add_named("Work").unwrap();
+        assert_eq!(
+            ai.add_named("home").unwrap_err(),
+            "A provider named home already exists"
+        );
+        assert!(ai.rename_named("Home").is_err());
+        assert_eq!(ai.rename_named("Office"), Ok(true));
+        assert_eq!(ai.rename_named("Office"), Ok(false));
+        assert_eq!(ai.active, "Office");
+        assert_eq!(ai.named[1].name, "Office");
+    }
+
+    #[test]
+    fn a_named_provider_uses_its_own_key_variable_and_models() {
+        let mut ai = AiPrefs::default();
+        ai.switch_provider(AiProvider::OpenRouter);
+        ai.add_named("Team").unwrap();
+        ai.api_key = "saved".into();
+        let env = |name: &str| (name == "TEAM_KEY").then(|| "from-env".to_string());
+        let openrouter_env = |name: &str| (name == "OPENROUTER_API_KEY").then(|| "or".to_string());
+        assert_eq!(
+            ai.resolved_api_key_with(openrouter_env),
+            ("saved".into(), KeySource::Saved),
+            "the kind's variable does not leak into a named provider"
+        );
+        ai.named[0].api_key_env = "TEAM_KEY".into();
+        assert_eq!(
+            ai.resolved_api_key_with(env),
+            ("from-env".into(), KeySource::Env("TEAM_KEY".into()))
+        );
+        ai.named[0].models = vec!["a/b".into(), "c/d".into()];
+        ai.model = "a/b".into();
+        assert_eq!(
+            ai.seeds_for(SettingId::AiModel),
+            [
+                ("a/b".to_string(), PickSource::Current),
+                ("a/b".to_string(), PickSource::Saved),
+                ("c/d".to_string(), PickSource::Saved),
+            ]
+        );
+        assert!(
+            !ai.extra_headers().is_empty(),
+            "OpenRouter kind keeps its headers"
+        );
+        // A hand-edited `active` naming nothing is the built-in.
+        ai.active = "Gone".into();
+        assert_eq!(ai.active_named(), None);
+        assert_eq!(ai.provider_name(), "OpenRouter");
+    }
+
+    #[test]
+    fn tools_modes_and_detections_round_trip_and_stay_out_of_an_older_file() {
+        let text = r#"{"ai":{"provider":"ollama","model":"gemma3"}}"#;
+        let file: SettingsFile = serde_json::from_str(text).unwrap();
+        assert!(file.ai.model_tools.is_empty() && file.ai.detected.is_empty());
+        let saved = serde_json::to_string(&file.ai).unwrap();
+        assert!(
+            !saved.contains("model_tools") && !saved.contains("detected"),
+            "{saved}"
+        );
+
+        let mut ai = file.ai;
+        ai.set_model_tools(ToolsMode::On);
+        let key = crate::agent::capability_key_for(&ai.endpoint(), "gemma3", true);
+        assert!(ai.detected.learn(&key, false, true));
+        assert!(!ai.detected.learn(&key, false, true), "already known");
+        let saved = serde_json::to_string(&ai).unwrap();
+        assert!(
+            saved.contains(r#""model_tools":{"ollama gemma3":"on"}"#),
+            "{saved}"
+        );
+        assert!(
+            saved.contains(r#""detected":{"no_think":["http://127.0.0.1:11434/api/chat gemma3"]}"#),
+            "{saved}"
+        );
+        let back: AiPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, ai);
+        assert_eq!(back.detected_now(), (false, true));
+        ai.model = "other".into();
+        assert_eq!(ai.detected_now(), (false, false));
+        ai.model = "gemma3".into();
+        ai.reset(SettingId::AiDetected);
+        assert!(ai.detected.is_empty());
+        assert_eq!(
+            AiPrefs::choice_names(SettingId::AiModelTools),
+            ["Auto", "On", "Off"]
+        );
+    }
+
+    #[test]
+    fn model_limits_round_trip_and_stay_out_of_an_older_file() {
+        let text = r#"{"ai":{"provider":"ollama","model":"qwen3:8b","max_tokens":"1000"}}"#;
+        let file: SettingsFile = serde_json::from_str(text).unwrap();
+        assert!(file.ai.model_limits.is_empty());
+        assert_eq!(file.ai.resolved_max_tokens(), Some(1000));
+        let saved = serde_json::to_string(&file.ai).unwrap();
+        assert!(!saved.contains("model_limits"), "{saved}");
+
+        let mut ai = file.ai;
+        assert!(ai.set_model_limits(ModelLimits {
+            context: Some(131_072),
+            max_output: None,
+        }));
+        assert!(!ai.set_model_limits(ai.model_limits()), "no change");
+        let saved = serde_json::to_string(&ai).unwrap();
+        assert!(
+            saved.contains(r#""model_limits":{"ollama qwen3:8b":{"context":131072}}"#),
+            "{saved}"
+        );
+        let back: AiPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, ai);
+        assert_eq!(back.resolved_context_size(), 131_072);
+        assert_eq!(back.global_context_size(), 16384);
+        assert_eq!(
+            back.resolved_max_tokens(),
+            Some(1000),
+            "Max tokens still applies"
+        );
+
+        // A hand-edited value out of range falls back to the global row.
+        ai.model_limits.insert(
+            "ollama qwen3:8b".into(),
+            ModelLimits {
+                context: Some(10),
+                max_output: Some(0),
+            },
+        );
+        assert_eq!(ai.resolved_context_size(), 16384);
+        assert_eq!(ai.resolved_max_tokens(), Some(1000));
+        ai.reset(SettingId::AiModelContext);
+        ai.reset(SettingId::AiModelMaxOutput);
+        assert!(ai.model_limits.is_empty());
+        ai.model.clear();
+        assert!(!ai.set_model_limits(ModelLimits {
+            context: Some(4096),
+            max_output: None,
+        }));
+        assert!(ai.model_limits.is_empty());
     }
 
     #[test]

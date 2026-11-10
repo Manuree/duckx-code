@@ -17,3 +17,7 @@ fn greet() {
 # Streaming shows tokens as they arrive (Settings → AI → Streaming).
 # An API key is optional; leave it empty for Ollama and LM Studio.
 # create_file needs the parent folder, or only one new folder level.
+# Settings -> AI -> Model tools: Auto, On, or Off for the selected model.
+# Off describes the tools in the prompt for a model without tool calling.
+# Detected limits shows "no tools" or "no think" once a server refused them.
+# It is remembered after a restart. Press Enter on it to try again.
