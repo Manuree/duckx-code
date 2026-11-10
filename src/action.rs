@@ -25,6 +25,8 @@ pub enum Focus {
     Agent,
     /// The `preview` side picker. An arrow key opens the preview on that side.
     PreviewSide,
+    /// The `convert-keyboard` layout list. Arrows move, Enter converts, Esc closes.
+    LayoutMenu,
 }
 
 /// A side of the source window for `preview`.
@@ -170,6 +172,11 @@ pub enum SemanticAction {
     Format,
     /// Ask the language server for code actions at the cursor.
     CodeAction,
+    /// Retype the selection (or the word before the cursor) as the same keys
+    /// give on the other keyboard layout.
+    ConvertKeyboard,
+    /// Keys while the `convert-keyboard` layout list is open.
+    LayoutMenu(CompletionAction),
     /// Return to the location from before the last definition or references jump.
     JumpBack,
     /// The other way after [`SemanticAction::JumpBack`].

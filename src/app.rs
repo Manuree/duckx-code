@@ -28,10 +28,12 @@ use crate::theme::SyntaxRole;
 use ropey::Rope;
 
 mod agent;
+mod convert;
 mod lsp_nav;
 mod lsp_sync;
 mod preview;
 
+pub use convert::{ConvertTarget, LayoutMenuView, LayoutOs};
 pub use preview::Preview;
 
 pub use lsp_nav::{ActionView, ReferenceView};
@@ -620,6 +622,10 @@ pub struct App {
     preview_picker: Option<preview::PreviewPicker>,
     /// The side the picker highlights first: the last side used.
     preview_side: crate::action::Side,
+    /// The `convert-keyboard` dropdown, open when the OS cannot pick the layout.
+    layout_menu: Option<convert::LayoutMenu>,
+    /// Installed OS layouts and the layout switch (`convert-keyboard`).
+    layout_os: convert::LayoutOs,
 }
 
 struct TreeScan {
@@ -716,6 +722,8 @@ impl App {
             preview_cache: RefCell::new(Vec::new()),
             preview_renders: std::cell::Cell::new(0),
             preview_picker: None,
+            layout_menu: None,
+            layout_os: convert::LayoutOs::default(),
             preview_side: crate::action::Side::Right,
         };
         app.configure_syntax(TabId(0));
@@ -1166,6 +1174,8 @@ impl App {
             Focus::Prompt
         } else if self.preview_picker.is_some() {
             Focus::PreviewSide
+        } else if self.layout_menu.is_some() {
+            Focus::LayoutMenu
         } else if self.command_bar.is_some() {
             Focus::CommandBar
         } else if self.about {
@@ -2566,6 +2576,8 @@ impl App {
             SemanticAction::CodeAction => self.code_action(),
             SemanticAction::JumpBack => self.jump_back(),
             SemanticAction::JumpForward => self.jump_forward(),
+            SemanticAction::ConvertKeyboard => self.convert_keyboard(),
+            SemanticAction::LayoutMenu(action) => self.handle_layout_menu(action),
             SemanticAction::Completion(action) if self.nav.references.is_some() => match action {
                 CompletionAction::Prev => self.move_reference(false),
                 CompletionAction::Next => self.move_reference(true),
@@ -4688,6 +4700,7 @@ impl App {
             CommandId::MatchBracket => self.match_bracket(false),
             CommandId::Complete => self.complete_now(),
             CommandId::Comment => self.toggle_comment(),
+            CommandId::ConvertKeyboard => self.handle(SemanticAction::ConvertKeyboard),
             CommandId::MoveLineUp => self.handle(SemanticAction::MoveLine { down: false }),
             CommandId::MoveLineDown => self.handle(SemanticAction::MoveLine { down: true }),
             CommandId::DeleteLine => self.handle(SemanticAction::DeleteLine),

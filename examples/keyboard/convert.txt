@@ -1,0 +1,14 @@
+# Typed with the wrong keyboard layout? Fix it with one key.
+# Select the line below with Shift+End, then press Alt+` (Alt and the backtick key).
+ouj8nv8ezbf
+# It becomes นี่คือคำผิด. Press Alt+` again and it turns back.
+# Ctrl+Z undoes the change in one step.
+# No selection? Put the cursor right after a word and press Alt+`.
+# Only that word changes, and the cursor stays after it.
+# Thai typed by mistake goes to English the same way:
+ทำหะ
+# On Windows with only English and Thai installed, it converts at once
+# and switches your keyboard too. Elsewhere a list opens:
+# Up and Down pick a layout, Enter converts, Esc closes.
+# On the Thai layout the same key types _, so Alt+_ works too.
+# You can also run convert-keyboard from the command bar.

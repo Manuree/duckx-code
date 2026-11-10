@@ -438,7 +438,11 @@ pub fn render(frame: &mut Frame, app: &App) {
     let focus = app.focus();
     let editor_focused = focus == crate::action::Focus::Editor
         || focus == crate::action::Focus::CompletionPopup
-        || focus == crate::action::Focus::ActionMenu;
+        || focus == crate::action::Focus::ActionMenu
+        || (focus == crate::action::Focus::LayoutMenu
+            && app
+                .layout_menu_view()
+                .is_some_and(|menu| menu.target == crate::app::ConvertTarget::Editor));
     let mut active_text = None;
     for pane in &layout.panes {
         let editor = app.editor(pane.id);
@@ -492,6 +496,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     if layout.agent.height > 0 {
         agent::render(frame, app, layout.agent);
     }
+    popup::render_layout_menu(frame, app, active_text, layout.agent, &theme);
     if layout.diagnostic.height > 0 {
         status_bar::render_diagnostic(frame, app, layout.diagnostic);
     }
@@ -566,6 +571,29 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_convert_keyboard_list_is_a_rounded_dropdown_under_the_selection() {
+        use crate::action::SemanticAction;
+        let mut app = App::new(crate::buffer::Buffer::from_text("ouj8nv8ezbf"), None);
+        app.handle(SemanticAction::SelectAll);
+        app.handle(SemanticAction::ConvertKeyboard);
+        let screen = draw(&app, 80, 12);
+        let lines: Vec<&str> = screen.lines().collect();
+        let top = lines
+            .iter()
+            .position(|line| line.contains("╭Convert to"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(lines[top + 1].contains("› Thai (Kedmanee)"), "{screen}");
+        // A wide cluster (`คำ`) leaves its second cell blank in the test buffer.
+        assert!(lines[top + 1].contains("นี่คือคำ"), "{screen}");
+        assert!(
+            lines[top + 2].contains("╰") && lines[top + 2].contains("enter esc"),
+            "{screen}"
+        );
+        assert!(lines[top + 2].contains("╯"), "{screen}");
     }
 
     #[test]

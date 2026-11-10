@@ -326,6 +326,14 @@ pub fn bindings() -> &'static [Binding] {
             action: || SemanticAction::CycleTab { next: true },
         },
         Binding {
+            id: "convert-keyboard",
+            label: "Convert keyboard",
+            detail: "Retype the selection as the other keyboard layout, e.g. ouj8nv8ezbf → นี่คือคำผิด.",
+            // On the Thai layout the backtick key types `_`, so Alt+` arrives as Alt+_.
+            defaults: &[ch('`', false, true, false), ch('_', false, true, false)],
+            action: || SemanticAction::ConvertKeyboard,
+        },
+        Binding {
             id: "focus-prefix",
             label: "Pane select mode",
             detail: "Enter PANE mode: arrows move a highlight between windows, Enter focuses it, Esc cancels.",

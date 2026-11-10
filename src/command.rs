@@ -70,6 +70,8 @@ pub enum CommandId {
     Complete,
     /// Add or remove a line comment.
     Comment,
+    /// Retype the selection as the other keyboard layout.
+    ConvertKeyboard,
     /// Move the selected lines up.
     MoveLineUp,
     /// Move the selected lines down.
@@ -374,6 +376,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "comment",
         description: "Add or remove a comment on the selected lines",
         shortcut: "F4",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::ConvertKeyboard,
+        name: "convert-keyboard",
+        description: "Retype the selection as the other keyboard layout (ouj8 → นี่ค)",
+        shortcut: "Alt+`",
         arg: None,
         editor: true,
         explorer: false,
@@ -734,6 +745,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::Format => 140,
         CommandId::CodeAction => 150,
         CommandId::Comment => 160,
+        CommandId::ConvertKeyboard => 165,
         CommandId::DiagnosticNext => 170,
         CommandId::DiagnosticPrev => 180,
         CommandId::RenameSymbol => 190,
@@ -1191,6 +1203,7 @@ mod tests {
                 "format",
                 "code-action",
                 "comment",
+                "convert-keyboard",
                 "diagnostic-next",
                 "diagnostic-prev",
                 "rename-symbol",

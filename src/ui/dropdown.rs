@@ -1,6 +1,7 @@
 //! The one look for every list that drops down over other content: settings
 //! choices, recent values, command-bar matches, assistant `/` and `@` lists, and
-//! the editor's completion, references, and actions popups.
+//! the editor's completion, references, and actions popups, and the
+//! `convert-keyboard` layout list.
 //!
 //! A list is a rounded panel (R1) on the editor background with the accent
 //! border, so it never blends into the rows behind it. The highlighted row is a

@@ -13,5 +13,6 @@ agent/tools.txt  let the assistant search, ask the language server, and edit
 agent/notice.txt a note when the answer arrives and the panel is closed
 agent/size.txt   make the assistant panel taller or shorter
 providers/ pick Ollama, LM Studio, OpenAI-compatible, or OpenRouter
+keyboard/  fix text typed with the wrong keyboard layout
 reveal/    show this file in the tree
 workspace/ open another folder
