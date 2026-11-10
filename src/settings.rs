@@ -53,6 +53,10 @@ pub enum SettingId {
     AiThink,
     /// `max_tokens` cap. Blank keeps the provider's default.
     AiMaxTokens,
+    /// Context window for the current provider and model only.
+    AiModelContext,
+    /// Longest answer for the current provider and model only.
+    AiModelMaxOutput,
     /// Seconds one request may take.
     AiTimeout,
     /// Extra attempts after a 408, 429, or 5xx answer.
@@ -516,6 +520,10 @@ pub struct AiPrefs {
     /// Percent of the context size kept free before compacting.
     #[serde(default = "default_compact_buffer")]
     pub compact_buffer: u32,
+    /// Limits for one model, keyed `"<provider> <model>"` (see [`AiPrefs::model_key`]).
+    /// A model without an entry uses Context size and Max tokens.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_limits: BTreeMap<String, ModelLimits>,
 }
 
 fn default_compact_keep() -> u32 {
@@ -525,6 +533,27 @@ fn default_compact_keep() -> u32 {
 fn default_compact_buffer() -> u32 {
     DEFAULT_COMPACT_BUFFER
 }
+
+/// One model's own limits. `None` falls back to the global row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelLimits {
+    /// Context window in tokens: Ollama's `num_ctx`, and the history budget everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u32>,
+    /// Longest answer (`max_tokens`, or `num_predict` on Ollama).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u32>,
+}
+
+impl ModelLimits {
+    pub fn is_empty(&self) -> bool {
+        self.context.is_none() && self.max_output.is_none()
+    }
+}
+
+/// Context a model may be given on its own row: wider than Context size, for
+/// cloud models with very long windows.
+pub const MODEL_CONTEXT_RANGE: std::ops::RangeInclusive<u32> = 1024..=2_000_000;
 
 fn default_context_size() -> String {
     "16384".to_string()
@@ -568,6 +597,7 @@ impl Default for AiPrefs {
             auto_compact: true,
             compact_keep: DEFAULT_COMPACT_KEEP,
             compact_buffer: DEFAULT_COMPACT_BUFFER,
+            model_limits: BTreeMap::new(),
         }
     }
 }
@@ -581,6 +611,8 @@ impl AiPrefs {
                 | SettingId::AiApiKey
                 | SettingId::AiContextSize
                 | SettingId::AiMaxTokens
+                | SettingId::AiModelContext
+                | SettingId::AiModelMaxOutput
                 | SettingId::AiTimeout
                 | SettingId::AiRetries
                 | SettingId::AiAppName
@@ -733,8 +765,45 @@ impl AiPrefs {
         }
     }
 
-    /// `max_tokens` / `num_predict` for this provider. `None` leaves it out.
+    /// `"<provider> <model>"`, the key of this model's limits. `None` without a model.
+    pub fn model_key(&self) -> Option<String> {
+        let model = self.model.trim();
+        (!model.is_empty()).then(|| format!("{} {model}", self.provider.as_str()))
+    }
+
+    /// The current model's own limits (empty when it has none).
+    pub fn model_limits(&self) -> ModelLimits {
+        self.model_key()
+            .and_then(|key| self.model_limits.get(&key).copied())
+            .unwrap_or_default()
+    }
+
+    /// Changes the current model's limits; an entry with nothing set is removed.
+    /// Returns whether anything changed. Without a model nothing is stored.
+    pub fn set_model_limits(&mut self, limits: ModelLimits) -> bool {
+        let Some(key) = self.model_key() else {
+            return false;
+        };
+        let before = self.model_limits.get(&key).copied().unwrap_or_default();
+        if limits.is_empty() {
+            self.model_limits.remove(&key);
+        } else {
+            self.model_limits.insert(key, limits);
+        }
+        before != limits
+    }
+
+    /// `max_tokens` / `num_predict` for this model: its own Max output, else
+    /// [`Self::global_max_tokens`]. `None` leaves it out.
     pub fn resolved_max_tokens(&self) -> Option<u32> {
+        self.model_limits()
+            .max_output
+            .filter(|n| (1..=MAX_TOKENS_LIMIT).contains(n))
+            .or_else(|| self.global_max_tokens())
+    }
+
+    /// The Max tokens row alone, for every model without its own Max output.
+    pub fn global_max_tokens(&self) -> Option<u32> {
         let raw = self.max_tokens.trim();
         if raw.is_empty() {
             return self.provider.is_local().then_some(LOCAL_MAX_TOKENS);
@@ -880,6 +949,20 @@ impl AiPrefs {
             SettingId::AiApiKey => self.api_key.clear(),
             SettingId::AiContextSize => self.context_size = default_context_size(),
             SettingId::AiMaxTokens => self.max_tokens.clear(),
+            SettingId::AiModelContext => {
+                let limits = ModelLimits {
+                    context: None,
+                    ..self.model_limits()
+                };
+                self.set_model_limits(limits);
+            }
+            SettingId::AiModelMaxOutput => {
+                let limits = ModelLimits {
+                    max_output: None,
+                    ..self.model_limits()
+                };
+                self.set_model_limits(limits);
+            }
             SettingId::AiTimeout => self.request_timeout = DEFAULT_TIMEOUT_SECS,
             SettingId::AiRetries => self.retries = DEFAULT_RETRIES,
             SettingId::AiAppName => self.openrouter_app_name = default_app_name(),
@@ -892,9 +975,8 @@ impl AiPrefs {
         }
     }
 
-    /// Tokens for the prompt window. `auto` / empty / invalid → 16384.
     /// True when the context window is a number the user set, or Ollama, which is
-    /// sent `num_ctx` and so really uses it. Otherwise the status line shows `?`.
+    /// sent `num_ctx` and so really uses it. Otherwise the ctx counter shows `?`.
     pub fn context_size_known(&self) -> bool {
         let raw = self.context_size.trim();
         self.provider == AiProvider::Ollama
@@ -903,7 +985,17 @@ impl AiPrefs {
                 .is_ok_and(|n| (1024..=262_144).contains(&n))
     }
 
+    /// Context window for this model: its own Model context, else
+    /// [`Self::global_context_size`].
     pub fn resolved_context_size(&self) -> u32 {
+        self.model_limits()
+            .context
+            .filter(|n| MODEL_CONTEXT_RANGE.contains(n))
+            .unwrap_or_else(|| self.global_context_size())
+    }
+
+    /// The Context size row alone, for every model without its own context.
+    pub fn global_context_size(&self) -> u32 {
         let raw = self.context_size.trim();
         if raw.is_empty() || raw.eq_ignore_ascii_case("auto") {
             return 16384;
@@ -1459,6 +1551,16 @@ pub fn sections() -> &'static [Section] {
                             id: SettingId::AiModel,
                         },
                         Item {
+                            label: "Model context",
+                            detail: "Token window for this model only. Blank uses Context size. Ollama gets it as num_ctx.",
+                            id: SettingId::AiModelContext,
+                        },
+                        Item {
+                            label: "Model max output",
+                            detail: "Longest answer for this model only. Blank uses Max tokens.",
+                            id: SettingId::AiModelMaxOutput,
+                        },
+                        Item {
                             label: "API key",
                             detail: "Bearer token for this provider. OPENROUTER_API_KEY or OPENAI_API_KEY wins when set.",
                             id: SettingId::AiApiKey,
@@ -1770,6 +1872,57 @@ mod tests {
             ai.resolved_api_key_with(all),
             (String::new(), KeySource::None)
         );
+    }
+
+    #[test]
+    fn model_limits_round_trip_and_stay_out_of_an_older_file() {
+        let text = r#"{"ai":{"provider":"ollama","model":"qwen3:8b","max_tokens":"1000"}}"#;
+        let file: SettingsFile = serde_json::from_str(text).unwrap();
+        assert!(file.ai.model_limits.is_empty());
+        assert_eq!(file.ai.resolved_max_tokens(), Some(1000));
+        let saved = serde_json::to_string(&file.ai).unwrap();
+        assert!(!saved.contains("model_limits"), "{saved}");
+
+        let mut ai = file.ai;
+        assert!(ai.set_model_limits(ModelLimits {
+            context: Some(131_072),
+            max_output: None,
+        }));
+        assert!(!ai.set_model_limits(ai.model_limits()), "no change");
+        let saved = serde_json::to_string(&ai).unwrap();
+        assert!(
+            saved.contains(r#""model_limits":{"ollama qwen3:8b":{"context":131072}}"#),
+            "{saved}"
+        );
+        let back: AiPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, ai);
+        assert_eq!(back.resolved_context_size(), 131_072);
+        assert_eq!(back.global_context_size(), 16384);
+        assert_eq!(
+            back.resolved_max_tokens(),
+            Some(1000),
+            "Max tokens still applies"
+        );
+
+        // A hand-edited value out of range falls back to the global row.
+        ai.model_limits.insert(
+            "ollama qwen3:8b".into(),
+            ModelLimits {
+                context: Some(10),
+                max_output: Some(0),
+            },
+        );
+        assert_eq!(ai.resolved_context_size(), 16384);
+        assert_eq!(ai.resolved_max_tokens(), Some(1000));
+        ai.reset(SettingId::AiModelContext);
+        ai.reset(SettingId::AiModelMaxOutput);
+        assert!(ai.model_limits.is_empty());
+        ai.model.clear();
+        assert!(!ai.set_model_limits(ModelLimits {
+            context: Some(4096),
+            max_output: None,
+        }));
+        assert!(ai.model_limits.is_empty());
     }
 
     #[test]

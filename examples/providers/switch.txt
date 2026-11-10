@@ -19,3 +19,7 @@
 # Type part of a name to filter it. Delete forgets the highlighted value.
 # The Model list also shows the models the server has (marked server).
 # Clear recent history, the last AI row, forgets all of them.
+# Model context and Model max output, under Model, belong to this model only.
+# Leave them blank to use Context size and Max tokens.
+# Set Model context to 131072 for a long-context cloud model,
+# or 8192 for a small local one, and other models keep the global value.
