@@ -832,6 +832,36 @@ mod tests {
     }
 
     #[test]
+    fn model_limit_rows_show_the_value_they_fall_back_to() {
+        use crate::settings::{ModelLimits, SettingId};
+        let mut app = ai_settings_app(SettingId::AiModelContext);
+        let screen = draw(&app, 110, 40);
+        assert!(screen.contains("(set a model first)"), "{screen}");
+        app.ai.model = "qwen3:8b".into();
+        let screen = draw(&app, 110, 40);
+        assert!(screen.contains("16384 (Context size)"), "{screen}");
+        assert!(screen.contains("16384 (Max tokens)"), "{screen}");
+        app.ai.set_model_limits(ModelLimits {
+            context: Some(40_960),
+            max_output: None,
+        });
+        let screen = draw(&app, 110, 40);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("Model context"))
+            .unwrap();
+        assert!(
+            row.contains("40960") && !row.contains("(Context size)"),
+            "{row}"
+        );
+        app.ai
+            .switch_provider(crate::settings::AiProvider::OpenRouter);
+        app.ai.model = "anthropic/claude-sonnet-4".into();
+        let screen = draw(&app, 110, 40);
+        assert!(screen.contains("(omit · Max tokens)"), "{screen}");
+    }
+
+    #[test]
     fn rows_for_another_provider_are_greyed_and_say_which() {
         use crate::settings::{AiProvider, SettingId};
         let mut app = ai_settings_app(SettingId::AiProvider);

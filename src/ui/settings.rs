@@ -377,12 +377,27 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         SettingId::AiContextSize => {
             let raw = app.ai.context_size.trim();
             if raw.is_empty() {
-                format!("{} (default)", app.ai.resolved_context_size())
+                format!("{} (default)", app.ai.global_context_size())
             } else {
                 app.ai.context_size.clone()
             }
         }
-        SettingId::AiMaxTokens => match (app.ai.max_tokens.trim(), app.ai.resolved_max_tokens()) {
+        SettingId::AiModelContext => match (app.ai.model_key(), app.ai.model_limits().context) {
+            (None, _) => "(set a model first)".to_string(),
+            (Some(_), Some(n)) => n.to_string(),
+            (Some(_), None) => format!("{} (Context size)", app.ai.global_context_size()),
+        },
+        SettingId::AiModelMaxOutput => {
+            match (app.ai.model_key(), app.ai.model_limits().max_output) {
+                (None, _) => "(set a model first)".to_string(),
+                (Some(_), Some(n)) => n.to_string(),
+                (Some(_), None) => match app.ai.global_max_tokens() {
+                    Some(n) => format!("{n} (Max tokens)"),
+                    None => "(omit · Max tokens)".to_string(),
+                },
+            }
+        }
+        SettingId::AiMaxTokens => match (app.ai.max_tokens.trim(), app.ai.global_max_tokens()) {
             ("", Some(n)) => format!("{n} (default)"),
             ("", None) => "(omit)".to_string(),
             (_, Some(n)) => n.to_string(),
@@ -532,6 +547,8 @@ fn paint_menu(
         | SettingId::AiApiKey
         | SettingId::AiContextSize
         | SettingId::AiMaxTokens
+        | SettingId::AiModelContext
+        | SettingId::AiModelMaxOutput
         | SettingId::AiTimeout
         | SettingId::AiRetries
         | SettingId::AiAppName

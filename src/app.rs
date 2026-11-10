@@ -2856,12 +2856,25 @@ impl App {
             SettingId::AiApiKey => self.ai.api_key.clone(),
             SettingId::AiContextSize => {
                 if self.ai.context_size.trim().is_empty() {
-                    self.ai.resolved_context_size().to_string()
+                    self.ai.global_context_size().to_string()
                 } else {
                     self.ai.context_size.clone()
                 }
             }
             SettingId::AiMaxTokens => self.ai.max_tokens.clone(),
+            SettingId::AiModelContext | SettingId::AiModelMaxOutput => {
+                if self.ai.model_key().is_none() {
+                    self.message = Some("Set a model first".to_string());
+                    return;
+                }
+                let limits = self.ai.model_limits();
+                let own = if id == SettingId::AiModelContext {
+                    limits.context
+                } else {
+                    limits.max_output
+                };
+                own.map(|n| n.to_string()).unwrap_or_default()
+            }
             SettingId::AiTimeout => self.ai.resolved_timeout().to_string(),
             SettingId::AiRetries => self.ai.resolved_retries().to_string(),
             SettingId::AiAppName => self.ai.openrouter_app_name.clone(),
@@ -2927,8 +2940,8 @@ impl App {
         value: String,
     ) -> Result<bool, String> {
         use crate::settings::{
-            DEFAULT_RETRIES, DEFAULT_TIMEOUT_SECS, MAX_RETRIES, MAX_TOKENS_LIMIT, SettingId,
-            TIMEOUT_RANGE,
+            DEFAULT_RETRIES, DEFAULT_TIMEOUT_SECS, MAX_RETRIES, MAX_TOKENS_LIMIT,
+            MODEL_CONTEXT_RANGE, SettingId, TIMEOUT_RANGE,
         };
         fn put<T: PartialEq>(slot: &mut T, next: T) -> bool {
             let changed = *slot != next;
@@ -2972,6 +2985,42 @@ impl App {
                     }
                 };
                 put(&mut self.ai.max_tokens, stored)
+            }
+            SettingId::AiModelContext | SettingId::AiModelMaxOutput => {
+                let context = id == SettingId::AiModelContext;
+                let typed = value.replace(['_', ','], "");
+                let lower = typed.to_ascii_lowercase();
+                let number = if typed.is_empty() || matches!(lower.as_str(), "auto" | "default") {
+                    None
+                } else {
+                    let range = if context {
+                        MODEL_CONTEXT_RANGE
+                    } else {
+                        1..=MAX_TOKENS_LIMIT
+                    };
+                    match typed.parse::<u32>() {
+                        Ok(n) if range.contains(&n) => Some(n),
+                        _ => {
+                            let name = if context {
+                                "Model context"
+                            } else {
+                                "Model max output"
+                            };
+                            return Err(format!(
+                                "{name} is blank or {} to {}",
+                                range.start(),
+                                range.end()
+                            ));
+                        }
+                    }
+                };
+                let mut limits = self.ai.model_limits();
+                if context {
+                    limits.context = number;
+                } else {
+                    limits.max_output = number;
+                }
+                self.ai.set_model_limits(limits)
             }
             SettingId::AiTimeout => {
                 let seconds = if value.is_empty() {
@@ -3041,6 +3090,8 @@ impl App {
             | SettingId::AiApiKey
             | SettingId::AiContextSize
             | SettingId::AiMaxTokens
+            | SettingId::AiModelContext
+            | SettingId::AiModelMaxOutput
             | SettingId::AiTimeout
             | SettingId::AiRetries
             | SettingId::AiAppName
@@ -3087,6 +3138,8 @@ impl App {
             | SettingId::AiApiKey
             | SettingId::AiContextSize
             | SettingId::AiMaxTokens
+            | SettingId::AiModelContext
+            | SettingId::AiModelMaxOutput
             | SettingId::AiTimeout
             | SettingId::AiRetries
             | SettingId::AiAppName
@@ -3121,6 +3174,8 @@ impl App {
             | SettingId::AiApiKey
             | SettingId::AiContextSize
             | SettingId::AiMaxTokens
+            | SettingId::AiModelContext
+            | SettingId::AiModelMaxOutput
             | SettingId::AiTimeout
             | SettingId::AiRetries
             | SettingId::AiAppName
@@ -3175,6 +3230,8 @@ impl App {
             | SettingId::AiApiKey
             | SettingId::AiContextSize
             | SettingId::AiMaxTokens
+            | SettingId::AiModelContext
+            | SettingId::AiModelMaxOutput
             | SettingId::AiTimeout
             | SettingId::AiRetries
             | SettingId::AiAppName
@@ -3263,6 +3320,8 @@ impl App {
             | SettingId::AiContextSize
             | SettingId::AiThink
             | SettingId::AiMaxTokens
+            | SettingId::AiModelContext
+            | SettingId::AiModelMaxOutput
             | SettingId::AiTimeout
             | SettingId::AiRetries
             | SettingId::AiAppName
@@ -10709,6 +10768,8 @@ mod tests {
                 "Provider",
                 "Server",
                 "Model",
+                "Model context",
+                "Model max output",
                 "API key",
                 "Max tokens",
                 "Request timeout",
@@ -10731,6 +10792,81 @@ mod tests {
             let choices = !crate::settings::AiPrefs::choice_names(item.id).is_empty();
             assert!(text != choices, "{} is either typed or picked", item.label);
         }
+    }
+
+    #[test]
+    fn model_limit_rows_belong_to_the_current_model_only() {
+        use crate::settings::{AiProvider, SettingId};
+        let mut app = App::new(Buffer::new(), None);
+        ai_row(&mut app, SettingId::AiModelContext);
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.settings.as_ref().unwrap().text.is_none());
+        assert_eq!(app.message.as_deref(), Some("Set a model first"));
+
+        app.ai.model = "qwen3:8b".into();
+        let type_row = |app: &mut App, id: SettingId, text: &str| {
+            ai_row(app, id);
+            settings(app, SettingsAction::Enter);
+            for _ in 0..12 {
+                settings(app, SettingsAction::DeleteChar);
+            }
+            settings(app, SettingsAction::Insert(text.into()));
+            settings(app, SettingsAction::Enter);
+        };
+        type_row(&mut app, SettingId::AiModelContext, "40_960");
+        type_row(&mut app, SettingId::AiModelMaxOutput, "2048");
+        assert_eq!(app.ai.resolved_context_size(), 40_960);
+        assert_eq!(app.ai.resolved_max_tokens(), Some(2048));
+        assert_eq!(app.ai.context_size, "16384", "Context size is untouched");
+        let tuning = crate::app::agent::ai_tuning(&app.ai);
+        assert_eq!(tuning.max_tokens, Some(2048));
+
+        type_row(&mut app, SettingId::AiModelContext, "12");
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Model context is blank or 1024 to 2000000")
+        );
+        settings(&mut app, SettingsAction::Back);
+
+        // Another model, or the same name on another provider, has none.
+        app.ai.model = "llama3.2".into();
+        assert_eq!(app.ai.resolved_context_size(), 16384);
+        app.ai.model = "qwen3:8b".into();
+        app.ai.switch_provider(AiProvider::LmStudio);
+        app.ai.model = "qwen3:8b".into();
+        assert_eq!(app.ai.resolved_context_size(), 16384);
+        app.ai.switch_provider(AiProvider::Ollama);
+        assert_eq!(app.ai.resolved_context_size(), 40_960);
+
+        // Blank goes back to the global rows and drops the entry.
+        type_row(&mut app, SettingId::AiModelContext, "");
+        type_row(&mut app, SettingId::AiModelMaxOutput, "");
+        assert!(app.ai.model_limits.is_empty());
+        assert_eq!(app.ai.resolved_max_tokens(), Some(16384));
+    }
+
+    #[test]
+    fn a_turn_sends_the_models_own_context_and_max_output() {
+        let mut app = App::new(Buffer::new(), None);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.agent_tx = Some(tx);
+        app.ai.model = "qwen3:8b".into();
+        app.ai.set_model_limits(crate::settings::ModelLimits {
+            context: Some(65_536),
+            max_output: Some(4096),
+        });
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.agent.prompt = "hi".into();
+        app.submit_agent();
+        let Ok(crate::agent::AgentCommand::Turn {
+            num_ctx, tuning, ..
+        }) = rx.try_recv()
+        else {
+            panic!("no turn");
+        };
+        assert_eq!(num_ctx, Some(65_536));
+        assert_eq!(tuning.max_tokens, Some(4096));
     }
 
     #[test]
