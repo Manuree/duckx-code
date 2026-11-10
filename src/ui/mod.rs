@@ -2,6 +2,7 @@ mod about;
 mod agent;
 mod command_bar;
 mod cursor;
+mod dropdown;
 mod icons;
 mod picker;
 mod popup;
@@ -882,6 +883,132 @@ mod tests {
         assert!(x < 80);
     }
 
+    /// Cells of the screen, for checking colors.
+    fn cells(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    /// The highlighted entry of a framed list is a bar across the whole inside
+    /// of the frame, in a color the rows behind the list do not use.
+    fn assert_full_bar(buffer: &ratatui::buffer::Buffer, app: &App, marker_row: u16) {
+        let bar = app.styles().selection.bg.unwrap();
+        let line = row_text(buffer, marker_row);
+        let chars: Vec<&str> = (0..buffer.area.width)
+            .map(|x| buffer[(x, marker_row)].symbol())
+            .collect();
+        let marker = (1..chars.len())
+            .find(|x| chars[*x] == "›" && chars[*x - 1] == "│")
+            .expect("marker") as u16;
+        let left = marker - 1;
+        assert_eq!(buffer[(left, marker_row)].symbol(), "│", "{line}");
+        let right = (left + 1..buffer.area.width)
+            .find(|x| buffer[(*x, marker_row)].symbol() == "│")
+            .expect("right border");
+        for x in left + 1..right {
+            assert_eq!(buffer[(x, marker_row)].bg, bar, "column {x}: {line}");
+        }
+        assert_ne!(bar, app.styles().sidebar_bg);
+    }
+
+    #[test]
+    fn the_provider_picker_is_a_framed_list_with_a_full_width_bar() {
+        use crate::settings::SettingId;
+        let mut app = ai_settings_app(SettingId::AiProvider);
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Down,
+        ));
+        let buffer = cells(&app, 100, 40);
+        let screen = draw(&app, 100, 40);
+        let lines: Vec<&str> = screen.lines().collect();
+        let row = lines
+            .iter()
+            .position(|line| line.contains("│ Provider"))
+            .unwrap();
+        assert!(lines[row + 1].contains("╭ Provider"), "{screen}");
+        assert!(lines[row + 2].contains("Ollama"), "{screen}");
+        assert!(lines[row + 3].contains("› LM Studio"), "{screen}");
+        assert!(lines[row + 6].contains("╰"), "{screen}");
+        assert!(
+            lines[row + 6].contains("↑↓ move  enter select  esc"),
+            "{screen}"
+        );
+        assert_full_bar(&buffer, &app, row as u16 + 3);
+    }
+
+    #[test]
+    fn the_command_list_and_assistant_lists_are_framed_with_a_bar() {
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        app.handle(SemanticAction::OpenCommandBar);
+        app.handle(SemanticAction::CommandBar(CommandBarAction::Insert(
+            "s".into(),
+        )));
+        let buffer = cells(&app, 80, 20);
+        let marker = (0..20)
+            .find(|y| row_text(&buffer, *y).contains("› "))
+            .expect("highlight");
+        assert!(row_text(&buffer, marker - 1).contains("╭ Commands"));
+        assert_full_bar(&buffer, &app, marker);
+
+        let mut app = App::new(Buffer::from_text("x\n"), None);
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.set_screen_size(80, 24);
+        app.handle(SemanticAction::Agent(AgentAction::Insert("/".into())));
+        let buffer = cells(&app, 80, 24);
+        let screen = draw(&app, 80, 24);
+        assert!(screen.contains("╭ Commands"), "{screen}");
+        assert!(screen.contains("↑↓ tab enter esc ╯"), "{screen}");
+        let marker = (0..24)
+            .find(|y| row_text(&buffer, *y).contains("› /new"))
+            .expect("highlight");
+        assert_full_bar(&buffer, &app, marker);
+    }
+
+    #[test]
+    fn open_lists_never_panic_on_tiny_screens() {
+        use crate::settings::{SettingId, TextDraft};
+        let mut picker = ai_settings_app(SettingId::AiProvider);
+        picker.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
+        let mut recent = ai_settings_app(SettingId::AiModel);
+        for model in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"] {
+            recent.ai.model = model.into();
+            recent.ai.remember_current();
+        }
+        let mut draft = TextDraft::new(String::new());
+        draft.pick = Some(9);
+        recent.settings.as_mut().unwrap().text = Some(draft);
+        let mut bar = App::new(Buffer::from_text("x\n"), None);
+        bar.handle(SemanticAction::OpenCommandBar);
+        let mut slash = App::new(Buffer::from_text("x\n"), None);
+        slash.agent.open = true;
+        slash.agent.focused = true;
+        slash.handle(SemanticAction::Agent(AgentAction::Insert("/".into())));
+        for app in [&picker, &recent, &bar, &slash] {
+            for width in [1u16, 4, 8, 12, 20, 33, 47] {
+                for height in [1u16, 2, 3, 4, 5, 7, 9, 12] {
+                    draw(app, width, height);
+                }
+            }
+        }
+        // Ten recent models in a short page scroll and keep the highlight.
+        let screen = draw(&recent, 90, 14);
+        assert!(screen.contains("› a"), "{screen}");
+        assert!(screen.contains("10/10"), "{screen}");
+    }
+
     #[test]
     fn the_recent_list_opens_under_the_model_row_with_its_sources() {
         use crate::settings::{SettingId, TextDraft};
@@ -904,22 +1031,24 @@ mod tests {
             .position(|line| line.contains("│ Model"))
             .unwrap();
         assert!(
-            lines[row + 1].contains("qwen3:8b") && lines[row + 1].contains("recent"),
+            lines[row + 1].contains("╭ Recent"),
+            "the list is framed right under the row\n{screen}"
+        );
+        assert!(
+            lines[row + 2].contains("› qwen3:8b") && lines[row + 2].contains("recent │"),
             "{screen}"
         );
         assert!(
-            lines[row + 2].contains("llama3.2") && lines[row + 2].contains("recent"),
+            lines[row + 3].contains("llama3.2") && lines[row + 3].contains("recent │"),
             "{screen}"
         );
         assert!(
-            lines[row + 3].contains("gemma3") && lines[row + 3].contains("server"),
+            lines[row + 4].contains("gemma3") && lines[row + 4].contains("server │"),
             "{screen}"
         );
+        assert!(lines[row + 5].contains("╰"), "{screen}");
+        assert!(lines[row + 5].contains("↑↓ pick  del forget"), "{screen}");
         assert!(screen.contains("↑↓ recent    del forget"), "{screen}");
-        assert!(
-            !screen.contains("╭─ Model"),
-            "the list has no border of its own"
-        );
     }
 
     #[test]
@@ -955,10 +1084,13 @@ mod tests {
         assert!(!status.contains("NORMAL"), "{status}");
         assert!(screen.contains("goto <line>"), "{screen}");
         assert!(screen.contains("Go to line number"), "{screen}");
-        assert!(hint.contains("↑↓"), "{hint}");
-        assert!(hint.contains("tab"), "{hint}");
-        assert!(hint.contains("esc"), "{hint}");
-        assert!(!screen.contains("╭"), "{screen}");
+        assert!(hint.contains("› goto <line>"), "{hint}");
+        let keys = lines[lines.len() - 2];
+        assert!(keys.starts_with("╰"), "{keys}");
+        assert!(keys.contains("↑↓"), "{keys}");
+        assert!(keys.contains("tab"), "{keys}");
+        assert!(keys.contains("esc"), "{keys}");
+        assert!(screen.contains("╭ Commands"), "{screen}");
     }
 
     #[test]
@@ -1168,8 +1300,10 @@ mod tests {
         let screen = draw(&app, 80, 12);
         let lines: Vec<&str> = screen.lines().collect();
         let status = lines.len() - 1;
-        let right = lines[status - 2];
-        let down = lines[status - 1];
+        assert!(lines[status - 4].contains("╭ Commands"), "{screen}");
+        let right = lines[status - 3];
+        let down = lines[status - 2];
+        assert!(lines[status - 1].contains("╰"), "{screen}");
         assert!(right.contains("split-right"), "{right}");
         assert!(
             right.contains("Open an empty editor to the right"),
@@ -1975,7 +2109,9 @@ mod tests {
         for (w, h) in [(8, 4), (20, 6), (40, 10), (80, 24)] {
             draw(&app, w, h);
         }
-        app.handle(SemanticAction::Settings(SettingsAction::Enter));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
         let screen = draw(&app, 80, 24);
         assert!(screen.contains("Tab width"), "{screen}");
         assert!(screen.contains("Spaces inserted for a Tab."), "{screen}");
@@ -1989,9 +2125,15 @@ mod tests {
         assert!(tab_line.contains('4'), "{tab_line}");
         assert!(tab_line.contains('▾'), "{tab_line}");
 
-        app.handle(SemanticAction::Settings(SettingsAction::Back));
-        app.handle(SemanticAction::Settings(SettingsAction::Down));
-        app.handle(SemanticAction::Settings(SettingsAction::Enter));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Back,
+        ));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Down,
+        ));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
         let screen = draw(&app, 80, 24);
         assert!(screen.contains("Color theme"), "{screen}");
         assert!(screen.contains("Tokyo Night"), "{screen}");
@@ -2001,22 +2143,28 @@ mod tests {
         assert!(!screen.contains("Placeholders"), "{screen}");
         assert!(!screen.contains("Tab width"), "{screen}");
 
-        app.handle(SemanticAction::Settings(SettingsAction::Enter));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
         let screen = draw(&app, 80, 24);
         assert!(screen.contains('▴'), "{screen}");
         assert!(screen.contains("Catppuccin Latte"), "{screen}");
         assert!(screen.contains("Catppuccin Frappé"), "{screen}");
         assert!(screen.contains("Catppuccin Macchiato"), "{screen}");
         assert!(screen.contains("Catppuccin Mocha"), "{screen}");
-        assert!(screen.contains("↑↓  enter  esc"), "{screen}");
+        assert!(screen.contains("↑↓ move  enter select  esc"), "{screen}");
         assert!(screen.contains('╭'), "{screen}");
         for square in ["┌", "┐", "└", "┘"] {
             assert!(!screen.contains(square), "found square corner {square}");
         }
         assert_eq!(app.appearance.color.id, "tokyo-night");
-        app.handle(SemanticAction::Settings(SettingsAction::Down));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Down,
+        ));
         assert_eq!(app.appearance.color.id, "catppuccin-latte");
-        app.handle(SemanticAction::Settings(SettingsAction::Back));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Back,
+        ));
         assert_eq!(app.appearance.color.id, "tokyo-night");
         assert!(
             app.settings
@@ -2024,9 +2172,15 @@ mod tests {
                 .is_some_and(|page| page.menu.is_none())
         );
 
-        app.handle(SemanticAction::Settings(SettingsAction::Enter));
-        app.handle(SemanticAction::Settings(SettingsAction::Down));
-        app.handle(SemanticAction::Settings(SettingsAction::Enter));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Down,
+        ));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
         assert_eq!(app.appearance.color.id, "catppuccin-latte");
         assert!(
             app.settings
@@ -2037,10 +2191,18 @@ mod tests {
         assert!(screen.contains("Catppuccin Latte"), "{screen}");
         assert!(!screen.contains("Catppuccin Mocha"), "{screen}");
 
-        app.handle(SemanticAction::Settings(SettingsAction::Down));
-        app.handle(SemanticAction::Settings(SettingsAction::Enter));
-        app.handle(SemanticAction::Settings(SettingsAction::Down));
-        app.handle(SemanticAction::Settings(SettingsAction::Enter));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Down,
+        ));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Down,
+        ));
+        app.handle(SemanticAction::Settings(
+            crate::action::SettingsAction::Enter,
+        ));
         assert_eq!(app.appearance.syntax.id, "catppuccin-latte");
         assert_eq!(app.appearance.color.id, "catppuccin-latte");
     }

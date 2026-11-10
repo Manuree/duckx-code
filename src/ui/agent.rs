@@ -9,6 +9,12 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::panel;
 use crate::agent::{wrap_rows, AgentPopup, filter_commands};
+
+use super::dropdown::{List, Row};
+
+const POPUP_KEYS: &str = "↑↓ tab enter esc";
+/// Most entries the `/` and `@` lists show at once.
+const POPUP_ROWS: usize = 8;
 use crate::app::App;
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -150,121 +156,40 @@ fn render_popup(
     theme: &crate::theme::UiStyles,
 ) {
     let _ = app;
-    let rows: Vec<(String, String, bool)> = match popup {
+    let (title, empty, rows, selected) = match popup {
         AgentPopup::Slash { filter, selected } => {
-            let hits = filter_commands(filter);
-            if hits.is_empty() {
-                vec![("(no matching commands)".into(), String::new(), false)]
-            } else {
-                hits.iter()
-                    .enumerate()
-                    .map(|(i, cmd)| {
-                        (
-                            format!("/{}", cmd.name),
-                            cmd.summary.to_string(),
-                            i == *selected,
-                        )
-                    })
-                    .collect()
-            }
+            let rows: Vec<Row> = filter_commands(filter)
+                .iter()
+                .map(|cmd| Row::new(format!("/{}", cmd.name)).detail(cmd.summary))
+                .collect();
+            (" Commands ", "No matching commands", rows, *selected)
         }
         AgentPopup::Mention {
             paths, selected, query, ..
         } => {
-            if paths.is_empty() {
-                let msg = if query.is_empty() {
-                    "(type to filter files)".to_string()
-                } else {
-                    "(no matching files)".to_string()
-                };
-                vec![(msg, String::new(), false)]
+            let empty = if query.is_empty() {
+                "Type to filter files"
             } else {
-                paths
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| (p.clone(), String::new(), i == *selected))
-                    .collect()
-            }
+                "No matching files"
+            };
+            let rows: Vec<Row> = paths.iter().map(|path| Row::new(path.clone())).collect();
+            (" Files ", empty, rows, *selected)
         }
     };
-
-    // Space above the prompt inside the panel. Always keep at least one hint row
-    // by borrowing from the prompt strip when the panel is tiny.
-    let available_above = prompt_top.saturating_sub(area.y) as usize;
-    let mut hint_rows = available_above.max(1).min(rows.len()).min(8);
-    if hint_rows == 0 {
-        return;
-    }
-    // Prefer drawing immediately above the prompt; if there is no room above,
-    // draw into the top of the inner area (over transcript / overlapping prompt top).
-    let y0 = if available_above > 0 {
-        prompt_top.saturating_sub(hint_rows as u16)
+    let list = List::new(title, POPUP_KEYS, &rows)
+        .selected(Some(selected))
+        .empty(empty);
+    let want = super::dropdown::frame_height(rows.len(), POPUP_ROWS);
+    // Sit right above the prompt. With no room there, cover the top of the panel
+    // (transcript, then the prompt) so the list is never lost.
+    let above = prompt_top.saturating_sub(area.y);
+    let rect = if above >= 3 {
+        let height = want.min(above);
+        Rect::new(area.x, prompt_top - height, area.width, height)
     } else {
-        area.y
+        Rect::new(area.x, area.y, area.width, want.min(area.height))
     };
-    // Clamp so we stay inside the panel and leave the last prompt row alone when possible.
-    let max_y = prompt_top.saturating_sub(1).max(area.y);
-    let y0 = y0.min(max_y);
-    let room = (prompt_top.saturating_sub(y0)).max(1) as usize;
-    hint_rows = hint_rows.min(room).min(rows.len()).max(1);
-
-    let selected = match popup {
-        AgentPopup::Slash { selected, .. } | AgentPopup::Mention { selected, .. } => *selected,
-    };
-    let scroll = selected.saturating_sub(hint_rows.saturating_sub(1));
-    let width = area.width as usize;
-
-    for (offset, (left, right, is_sel)) in rows
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(hint_rows)
-    {
-        let y = y0 + (offset - scroll) as u16;
-        if y >= prompt_top && available_above > 0 {
-            break;
-        }
-        if y < area.y || y >= area.y + area.height {
-            continue;
-        }
-        let base = if *is_sel { theme.hint_active } else { theme.hint };
-        let name_style = if *is_sel {
-            theme.hint_active_name
-        } else {
-            theme.hint_dim
-        };
-        let desc_style = if *is_sel {
-            theme.hint_active_dim
-        } else {
-            theme.hint_keys
-        };
-        let keys = if *is_sel { " ↑↓ tab enter esc" } else { "" };
-        let name = format!(" {left}");
-        let mut spans = vec![Span::styled(name.clone(), name_style)];
-        let mut used = name.width();
-        if !right.is_empty() {
-            let gap = "  ";
-            let budget = width.saturating_sub(used + gap.width() + keys.width());
-            if budget > 0 {
-                let shown = fit(right, budget);
-                spans.push(Span::styled(gap, base));
-                spans.push(Span::styled(shown.clone(), desc_style));
-                used += gap.width() + shown.width();
-            }
-        }
-        if !keys.is_empty() && used + keys.width() <= width {
-            let pad = " ".repeat(width.saturating_sub(used + keys.width()));
-            spans.push(Span::styled(pad, base));
-            spans.push(Span::styled(keys, desc_style));
-            used = width;
-        }
-        if used < width {
-            spans.push(Span::styled(" ".repeat(width - used), base));
-        }
-        let rect = Rect::new(area.x, y, area.width, 1);
-        frame.render_widget(Clear, rect);
-        frame.render_widget(Paragraph::new(Line::from(spans)).style(base), rect);
-    }
+    super::dropdown::render(frame, rect, &list, theme);
 }
 
 fn approve_label(choice: crate::agent::ApprovalChoice) -> &'static str {
