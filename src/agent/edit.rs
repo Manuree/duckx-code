@@ -394,7 +394,7 @@ mod tests {
             &FileEdit::Snippet {
                 find: "beta".into(),
                 replace: "BETA".into(),
-            all: false,
+                all: false,
             },
         )
         .unwrap();
@@ -404,7 +404,7 @@ mod tests {
             &FileEdit::Snippet {
                 find: "a".into(),
                 replace: "x".into(),
-            all: false,
+                all: false,
             },
         )
         .unwrap_err();
@@ -428,7 +428,7 @@ mod tests {
             &FileEdit::Snippet {
                 find: find.into(),
                 replace: "REPLACED".into(),
-            all: false,
+                all: false,
             },
         )
         .unwrap();
@@ -453,7 +453,7 @@ mod tests {
                 &FileEdit::Snippet {
                     find: find.into(),
                     replace: "OK".into(),
-                all: false,
+                    all: false,
                 },
             )
             .expect("multibyte overlap cut must not panic");
@@ -470,7 +470,7 @@ mod tests {
             &FileEdit::Snippet {
                 find: "Tailwind CSS via CDN".into(),
                 replace: "UnoCSS".into(),
-            all: false,
+                all: false,
             },
         )
         .unwrap();

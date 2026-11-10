@@ -10,7 +10,6 @@ use crate::action::{
     CommandBarAction, CompletionAction, FindAction, Focus, PaneDirection, PaneSelectAction,
     PickerAction, PromptAction, ReplaceAction, SemanticAction, SettingsAction, SidebarAction,
 };
-use ropey::Rope;
 use crate::buffer::{Buffer, Movement};
 use crate::command::{
     CommandBar, CommandContext, CommandId, CommandSpec, NameSource, find_command, ghost_suffix,
@@ -26,6 +25,7 @@ use crate::services::fs::Change;
 use crate::services::git::DiffResult;
 use crate::syntax::{self, SyntaxState};
 use crate::theme::SyntaxRole;
+use ropey::Rope;
 
 mod agent;
 mod lsp_nav;
@@ -1146,9 +1146,7 @@ impl App {
             Some(crate::agent::AgentPopup::Slash { filter, .. }) => {
                 crate::agent::filter_commands(filter).len().clamp(1, 8) as u16
             }
-            Some(crate::agent::AgentPopup::Mention { paths, .. }) => {
-                paths.len().clamp(1, 8) as u16
-            }
+            Some(crate::agent::AgentPopup::Mention { paths, .. }) => paths.len().clamp(1, 8) as u16,
             None => 0,
         };
         let with_hints = grown.max(base).saturating_add(hint_rows);
@@ -6273,7 +6271,10 @@ impl App {
         if let Some(tab) = self.find_tab_mut(tab_id) {
             tab.loading = false;
         }
-        let failure = result.as_ref().err().map(|error| error.clone().message(&path));
+        let failure = result
+            .as_ref()
+            .err()
+            .map(|error| error.clone().message(&path));
         self.finish_load_inner(tab_id, path, kind, result, baseline);
         self.agent_tab_loaded(tab_id, failure);
     }
@@ -7566,11 +7567,22 @@ mod tests {
             arguments: args,
         });
         let pending = app.agent.pending.as_ref().expect("pending");
-        assert_eq!(pending.choice, crate::agent::ApprovalChoice::Yes, "Yes is the default selection");
-        assert!(pending.summary.contains("apply_edit"), "{}", pending.summary);
+        assert_eq!(
+            pending.choice,
+            crate::agent::ApprovalChoice::Yes,
+            "Yes is the default selection"
+        );
+        assert!(
+            pending.summary.contains("apply_edit"),
+            "{}",
+            pending.summary
+        );
         assert!(pending.summary.contains("- hello"), "{}", pending.summary);
         assert!(pending.summary.contains("+ hi"), "{}", pending.summary);
-        assert!(!pending.summary.contains("[y]"), "buttons are separate from the card");
+        assert!(
+            !pending.summary.contains("[y]"),
+            "buttons are separate from the card"
+        );
 
         // Typing into the prompt must not leak while approval is open.
         let before = app.agent.prompt.clone();
@@ -7612,7 +7624,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    fn session_approve_test_app(tag: &str) -> (App, tokio::sync::mpsc::UnboundedReceiver<crate::agent::AgentCommand>, std::path::PathBuf) {
+    fn session_approve_test_app(
+        tag: &str,
+    ) -> (
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<crate::agent::AgentCommand>,
+        std::path::PathBuf,
+    ) {
         let root = std::env::temp_dir().join(format!(
             "duckx-session-{tag}-{}-{}",
             std::process::id(),
@@ -7647,7 +7665,9 @@ mod tests {
         let (mut app, _rx, root) = session_approve_test_app("allow");
         send_create(&mut app, "c1", &root.join("a.txt"));
         assert!(app.agent.pending.as_ref().unwrap().offers_session());
-        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert("a".into())));
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+            "a".into(),
+        )));
         assert!(app.agent.pending.is_none());
         assert!(app.agent.session_allow.contains("create_file"));
         assert_eq!(app.agent.session_allow.len(), 1, "only that tool name");
@@ -7655,7 +7675,10 @@ mod tests {
         // Same tool again: no prompt.
         app.agent.busy = true;
         send_create(&mut app, "c2", &root.join("b.txt"));
-        assert!(app.agent.pending.is_none(), "session-approved tool must not ask again");
+        assert!(
+            app.agent.pending.is_none(),
+            "session-approved tool must not ask again"
+        );
 
         // Different mutating tool still asks.
         app.handle_agent(crate::agent::AgentEvent::Tool {
@@ -7664,7 +7687,10 @@ mod tests {
             name: "save".into(),
             arguments: "{}".into(),
         });
-        assert!(app.agent.pending.is_some(), "other tools still need approval");
+        assert!(
+            app.agent.pending.is_some(),
+            "other tools still need approval"
+        );
         app.handle(SemanticAction::Agent(crate::action::AgentAction::Close));
 
         let screen_status = app.agent.session_allow.iter().cloned().collect::<Vec<_>>();
@@ -7677,7 +7703,10 @@ mod tests {
         app.agent.busy = true;
         app.agent.turn = 1;
         send_create(&mut app, "c4", &root.join("c.txt"));
-        assert!(app.agent.pending.is_some(), "after /new the tool asks again");
+        assert!(
+            app.agent.pending.is_some(),
+            "after /new the tool asks again"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7685,7 +7714,10 @@ mod tests {
     fn enter_on_session_button_and_ctrl_l_clear() {
         let (mut app, _rx, root) = session_approve_test_app("enter");
         send_create(&mut app, "c1", &root.join("a.txt"));
-        app.handle(SemanticAction::Agent(crate::action::AgentAction::Move { right: true, extend: false }));
+        app.handle(SemanticAction::Agent(crate::action::AgentAction::Move {
+            right: true,
+            extend: false,
+        }));
         app.handle(SemanticAction::Agent(crate::action::AgentAction::Submit));
         assert!(app.agent.session_allow.contains("create_file"));
         app.agent.busy = false;
@@ -7936,10 +7968,7 @@ mod tests {
             app.handle(SemanticAction::ResizeAgent { taller: false });
         }
         assert_eq!(app.agent_rows(), 4);
-        assert_eq!(
-            app.message.as_deref(),
-            Some("Assistant is at its shortest")
-        );
+        assert_eq!(app.message.as_deref(), Some("Assistant is at its shortest"));
         for _ in 0..80 {
             app.handle(SemanticAction::ResizeAgent { taller: true });
         }
@@ -8110,7 +8139,6 @@ mod tests {
         );
         assert!(app.explorer.open, "sidebar must stay open");
     }
-
 
     #[test]
     fn focus_shows_one_buffer_and_leaves_the_rest_in_place() {

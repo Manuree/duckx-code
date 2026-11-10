@@ -479,11 +479,7 @@ fn route_agent(
     // Track printable / navigation keys for the conhost paste-burst heuristic.
     let tracks_burst = matches!(
         key.code,
-        KeyCode::Char(_)
-            | KeyCode::Enter
-            | KeyCode::Backspace
-            | KeyCode::Delete
-            | KeyCode::Tab
+        KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace | KeyCode::Delete | KeyCode::Tab
     );
     if tracks_burst {
         burst.note();
@@ -981,7 +977,16 @@ mod tests {
         let map = crate::keys::KeyMap::resolve(&overrides);
         let route = |event| {
             let mut burst = crate::agent::PasteBurst::default();
-            route_flags(&event, Focus::Editor, false, false, &map, false, false, &mut burst)
+            route_flags(
+                &event,
+                Focus::Editor,
+                false,
+                false,
+                &map,
+                false,
+                false,
+                &mut burst,
+            )
         };
         assert_eq!(route(key(KeyCode::Char('s'), KeyModifiers::CONTROL)), None);
         assert_eq!(
@@ -1144,7 +1149,11 @@ mod tests {
     #[test]
     fn agent_shift_enter_and_fallbacks_insert_newline() {
         assert_eq!(
-            route(&key(KeyCode::Enter, KeyModifiers::SHIFT), Focus::Agent, false),
+            route(
+                &key(KeyCode::Enter, KeyModifiers::SHIFT),
+                Focus::Agent,
+                false
+            ),
             Some(SemanticAction::Agent(AgentAction::Insert("\n".into())))
         );
         assert_eq!(
@@ -1152,11 +1161,19 @@ mod tests {
             Some(SemanticAction::Agent(AgentAction::Insert("\n".into())))
         );
         assert_eq!(
-            route(&key(KeyCode::Char('j'), KeyModifiers::CONTROL), Focus::Agent, false),
+            route(
+                &key(KeyCode::Char('j'), KeyModifiers::CONTROL),
+                Focus::Agent,
+                false
+            ),
             Some(SemanticAction::Agent(AgentAction::Insert("\n".into())))
         );
         assert_eq!(
-            route(&key(KeyCode::Enter, KeyModifiers::NONE), Focus::Agent, false),
+            route(
+                &key(KeyCode::Enter, KeyModifiers::NONE),
+                Focus::Agent,
+                false
+            ),
             Some(SemanticAction::Agent(AgentAction::Submit))
         );
     }

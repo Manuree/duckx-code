@@ -131,7 +131,13 @@ pub(crate) fn frame_height(rows: usize, max: usize) -> u16 {
 /// A rectangle `width` x `height` inside `bounds`, directly under the row at
 /// `anchor_y`, or above it when there is more room there. Wider than `bounds`
 /// is clipped; `x` moves left so the list stays inside. `None` when no row fits.
-pub(crate) fn anchored(bounds: Rect, x: u16, width: u16, anchor_y: u16, height: u16) -> Option<Rect> {
+pub(crate) fn anchored(
+    bounds: Rect,
+    x: u16,
+    width: u16,
+    anchor_y: u16,
+    height: u16,
+) -> Option<Rect> {
     if bounds.width == 0 || bounds.height == 0 || width == 0 || height == 0 {
         return None;
     }
@@ -200,7 +206,8 @@ pub(crate) fn render(frame: &mut Frame, area: Rect, list: &List, theme: &UiStyle
             .border_style(colors.border)
             .style(colors.base);
         if !list.keys.is_empty() {
-            block = block.title_bottom(Line::from(format!(" {} ", list.keys.trim())).right_aligned());
+            block =
+                block.title_bottom(Line::from(format!(" {} ", list.keys.trim())).right_aligned());
         }
         if len > slots {
             let at = list.selected.map_or(0, |index| index.min(len - 1) + 1);
@@ -217,7 +224,10 @@ pub(crate) fn render(frame: &mut Frame, area: Rect, list: &List, theme: &UiStyle
     let slots = inner.height.saturating_sub(note_rows) as usize;
     let width = inner.width as usize;
     if list.rows.is_empty() {
-        let line = Line::from(Span::styled(clip(&format!("  {}", list.empty), width), colors.dim));
+        let line = Line::from(Span::styled(
+            clip(&format!("  {}", list.empty), width),
+            colors.dim,
+        ));
         frame.render_widget(
             Paragraph::new(line).style(colors.base),
             Rect::new(inner.x, inner.y, inner.width, 1),
@@ -229,11 +239,17 @@ pub(crate) fn render(frame: &mut Frame, area: Rect, list: &List, theme: &UiStyle
             let on = selected == Some(offset);
             let y = inner.y + (offset - start) as u16;
             let (line, style) = row_line(row, on, list.label_width, width, &colors);
-            frame.render_widget(Paragraph::new(line).style(style), Rect::new(inner.x, y, inner.width, 1));
+            frame.render_widget(
+                Paragraph::new(line).style(style),
+                Rect::new(inner.x, y, inner.width, 1),
+            );
         }
     }
     if note_rows == 1 {
-        let line = Line::from(Span::styled(clip(&format!("  {}", list.note), width), colors.dim));
+        let line = Line::from(Span::styled(
+            clip(&format!("  {}", list.note), width),
+            colors.dim,
+        ));
         frame.render_widget(
             Paragraph::new(line).style(colors.base),
             Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
@@ -241,7 +257,13 @@ pub(crate) fn render(frame: &mut Frame, area: Rect, list: &List, theme: &UiStyle
     }
 }
 
-fn row_line(row: &Row, on: bool, label_width: usize, width: usize, colors: &Colors) -> (Line<'static>, Style) {
+fn row_line(
+    row: &Row,
+    on: bool,
+    label_width: usize,
+    width: usize,
+    colors: &Colors,
+) -> (Line<'static>, Style) {
     let (base, name, dim) = if on {
         (colors.on, colors.on_name, colors.on_dim)
     } else {
@@ -309,18 +331,24 @@ mod tests {
     }
 
     fn rows(count: usize) -> Vec<Row> {
-        (0..count).map(|index| Row::new(format!("item {index}"))).collect()
+        (0..count)
+            .map(|index| Row::new(format!("item {index}")))
+            .collect()
     }
 
     fn draw(width: u16, height: u16, area: Rect, list: &List) -> Buffer {
         let theme = theme();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(frame, area, list, &theme)).unwrap();
+        terminal
+            .draw(|frame| render(frame, area, list, &theme))
+            .unwrap();
         terminal.backend().buffer().clone()
     }
 
     fn line(buffer: &Buffer, y: u16) -> String {
-        (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect()
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
     }
 
     #[test]
@@ -333,8 +361,16 @@ mod tests {
         assert_eq!(buffer[(0, 4)].symbol(), "╰");
         assert_eq!(buffer[(29, 4)].symbol(), "╯");
         assert!(line(&buffer, 0).contains("Provider"));
-        assert!(line(&buffer, 4).contains("↑↓ enter esc"), "{}", line(&buffer, 4));
-        assert!(line(&buffer, 2).contains("› item 1"), "{}", line(&buffer, 2));
+        assert!(
+            line(&buffer, 4).contains("↑↓ enter esc"),
+            "{}",
+            line(&buffer, 4)
+        );
+        assert!(
+            line(&buffer, 2).contains("› item 1"),
+            "{}",
+            line(&buffer, 2)
+        );
     }
 
     #[test]
@@ -353,11 +389,22 @@ mod tests {
 
     #[test]
     fn tags_sit_at_the_right_edge() {
-        let items = vec![Row::new("anthropic/claude").tag("recent"), Row::new("openai/gpt-4o").tag("server")];
+        let items = vec![
+            Row::new("anthropic/claude").tag("recent"),
+            Row::new("openai/gpt-4o").tag("server"),
+        ];
         let list = List::new(" Model ", "", &items).selected(Some(0));
         let buffer = draw(40, 5, Rect::new(0, 0, 40, 4), &list);
-        assert!(line(&buffer, 1).ends_with("recent │"), "{}", line(&buffer, 1));
-        assert!(line(&buffer, 2).ends_with("server │"), "{}", line(&buffer, 2));
+        assert!(
+            line(&buffer, 1).ends_with("recent │"),
+            "{}",
+            line(&buffer, 1)
+        );
+        assert!(
+            line(&buffer, 2).ends_with("server │"),
+            "{}",
+            line(&buffer, 2)
+        );
     }
 
     #[test]
@@ -398,8 +445,14 @@ mod tests {
     fn anchored_prefers_below_and_flips_above_when_there_is_more_room() {
         let bounds = Rect::new(0, 0, 40, 20);
         assert_eq!(anchored(bounds, 5, 10, 2, 6), Some(Rect::new(5, 3, 10, 6)));
-        assert_eq!(anchored(bounds, 5, 10, 17, 6), Some(Rect::new(5, 11, 10, 6)));
-        assert_eq!(anchored(bounds, 35, 10, 2, 6), Some(Rect::new(30, 3, 10, 6)));
+        assert_eq!(
+            anchored(bounds, 5, 10, 17, 6),
+            Some(Rect::new(5, 11, 10, 6))
+        );
+        assert_eq!(
+            anchored(bounds, 35, 10, 2, 6),
+            Some(Rect::new(30, 3, 10, 6))
+        );
         assert_eq!(anchored(bounds, 0, 80, 2, 6).map(|r| r.width), Some(40));
         assert_eq!(anchored(Rect::new(0, 0, 40, 1), 0, 10, 0, 6), None);
         assert_eq!(anchored(Rect::default(), 0, 10, 0, 6), None);

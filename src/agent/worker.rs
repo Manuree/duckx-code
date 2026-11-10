@@ -110,7 +110,10 @@ async fn run(
                 match result {
                     Ok(Ok(())) => {}
                     Ok(Err(text)) => {
-                        if text.to_ascii_lowercase().contains("invalid tool call arguments") {
+                        if text
+                            .to_ascii_lowercase()
+                            .contains("invalid tool call arguments")
+                        {
                             let _ = events.send(AgentEvent::ResetMemory { id });
                         }
                         let _ = events.send(AgentEvent::Failed { id, text });
@@ -246,7 +249,9 @@ struct SystemParts {
 
 /// The workspace's `AGENTS.md`, cut to [`RULES_BUDGET`]. `None` when there is none.
 async fn project_rules(root: &std::path::Path) -> Option<String> {
-    let text = tokio::fs::read_to_string(root.join("AGENTS.md")).await.ok()?;
+    let text = tokio::fs::read_to_string(root.join("AGENTS.md"))
+        .await
+        .ok()?;
     let text = text.trim();
     if text.is_empty() {
         return None;
@@ -255,7 +260,9 @@ async fn project_rules(root: &std::path::Path) -> Option<String> {
         return Some(text.to_string());
     }
     let cut: String = text.chars().take(RULES_BUDGET).collect();
-    Some(format!("{cut}\n… (AGENTS.md is longer; read_file it for the rest)"))
+    Some(format!(
+        "{cut}\n… (AGENTS.md is longer; read_file it for the rest)"
+    ))
 }
 
 /// The system prompt: base rules, mode, project rules, then the summary of folded turns.
@@ -266,14 +273,20 @@ fn system_prompt(parts: &SystemParts) -> String {
         text.push_str("\n\n");
         text.push_str(mode);
     }
-    if let Some(rules) = parts.rules.as_deref().filter(|text| !text.trim().is_empty()) {
+    if let Some(rules) = parts
+        .rules
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
         text.push_str("\n\nProject instructions from AGENTS.md (follow them):\n");
         text.push_str(rules);
     }
-    if let Some(summary) = parts.summary.as_deref().filter(|text| !text.trim().is_empty()) {
-        text.push_str(
-            "\n\nSummary of the earlier conversation (older turns were compacted):\n",
-        );
+    if let Some(summary) = parts
+        .summary
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        text.push_str("\n\nSummary of the earlier conversation (older turns were compacted):\n");
         text.push_str(summary);
     }
     text
@@ -427,9 +440,7 @@ async fn run_turn(
                             .or_else(|| call.get("arguments").cloned())
                             .unwrap_or(serde_json::Value::String(String::new()));
                         let args = match args {
-                            serde_json::Value::String(s) => {
-                                provider::normalize_tool_arguments(&s)
-                            }
+                            serde_json::Value::String(s) => provider::normalize_tool_arguments(&s),
                             other => provider::normalize_tool_arguments(&other.to_string()),
                         };
                         let call_id = call
@@ -573,20 +584,18 @@ async fn complete_or_cancel(
                 model,
                 messages,
                 options,
-                move |kind, text| {
-                    match kind {
-                        provider::DeltaKind::Content => {
-                            let _ = events.send(AgentEvent::Delta {
-                                id,
-                                text: text.to_string(),
-                            });
-                        }
-                        provider::DeltaKind::Thinking => {
-                            let _ = events.send(AgentEvent::Thinking {
-                                id,
-                                text: text.to_string(),
-                            });
-                        }
+                move |kind, text| match kind {
+                    provider::DeltaKind::Content => {
+                        let _ = events.send(AgentEvent::Delta {
+                            id,
+                            text: text.to_string(),
+                        });
+                    }
+                    provider::DeltaKind::Thinking => {
+                        let _ = events.send(AgentEvent::Thinking {
+                            id,
+                            text: text.to_string(),
+                        });
                     }
                 },
             )
@@ -787,7 +796,10 @@ mod tests {
         })
         .unwrap();
         let events = events_until_done(&mut rx).await;
-        assert!(matches!(events.last(), Some(crate::agent::AgentEvent::Reply { .. })));
+        assert!(matches!(
+            events.last(),
+            Some(crate::agent::AgentEvent::Reply { .. })
+        ));
         let seen = server.join().unwrap();
         let body: serde_json::Value = serde_json::from_str(&seen[0]).unwrap();
         let system = body["messages"][0]["content"].as_str().unwrap();
@@ -797,10 +809,19 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(|tool| tool.pointer("/function/name").and_then(|name| name.as_str()))
+            .filter_map(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(|name| name.as_str())
+            })
             .collect();
-        assert!(names.contains(&"read_file") && names.contains(&"search"), "{names:?}");
-        assert!(!names.contains(&"apply_edit") && !names.contains(&"create_file"), "{names:?}");
+        assert!(
+            names.contains(&"read_file") && names.contains(&"search"),
+            "{names:?}"
+        );
+        assert!(
+            !names.contains(&"apply_edit") && !names.contains(&"create_file"),
+            "{names:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::panel;
-use crate::agent::{wrap_rows, AgentPopup, filter_commands};
+use crate::agent::{AgentPopup, filter_commands, wrap_rows};
 
 use super::dropdown::{List, Row};
 
@@ -95,7 +95,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             Rect::new(inner.x, y, inner.width, 1),
         );
         if focused {
-            let column = button_cursor_column(pending.choices(), pending.choice).min(inner.width.saturating_sub(1) as usize);
+            let column = button_cursor_column(pending.choices(), pending.choice)
+                .min(inner.width.saturating_sub(1) as usize);
             super::cursor::place(inner.x + column as u16, y);
         }
         return;
@@ -150,7 +151,6 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         render_popup(frame, app, popup, inner, prompt_top, &theme);
     }
 }
-
 
 /// `12.4k`; a limit that is a multiple of 1024 reads as `32k`, the way models list it.
 pub(crate) fn short_tokens(tokens: u32) -> String {
@@ -215,7 +215,10 @@ fn render_popup(
             (" Commands ", "No matching commands", rows, *selected)
         }
         AgentPopup::Mention {
-            paths, selected, query, ..
+            paths,
+            selected,
+            query,
+            ..
         } => {
             let empty = if query.is_empty() {
                 "Type to filter files"
@@ -269,7 +272,10 @@ fn approve_button_spans(
         .iter()
         .map(|choice| {
             let on = *choice == selected;
-            Span::styled(approve_button_text(*choice, on), if on { marked } else { base })
+            Span::styled(
+                approve_button_text(*choice, on),
+                if on { marked } else { base },
+            )
         })
         .collect()
 }

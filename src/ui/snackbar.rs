@@ -1,12 +1,6 @@
 //! A short notice above the status bar. The corners are rounded, like every panel.
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::Style,
-    text::Line,
-    widgets::Paragraph,
-};
+use ratatui::{Frame, layout::Rect, style::Style, text::Line, widgets::Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::App;
@@ -48,7 +42,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
     frame.render_widget(block, rect);
     if inner.width > 0 && inner.height > 0 {
         frame.render_widget(
-            Paragraph::new(Line::from(shown)).style(Style::new().fg(theme.editor_fg).bg(theme.editor_bg)),
+            Paragraph::new(Line::from(shown))
+                .style(Style::new().fg(theme.editor_fg).bg(theme.editor_bg)),
             inner,
         );
     }

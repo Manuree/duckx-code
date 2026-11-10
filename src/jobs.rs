@@ -323,7 +323,7 @@ pub fn run(job: Job) -> AppEvent {
                 epoch,
                 after,
             }
-        },
+        }
         Job::LoadFile {
             editor_id,
             tab_id,

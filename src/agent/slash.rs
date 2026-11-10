@@ -146,9 +146,7 @@ pub fn slash_filter(prompt: &str) -> Option<&str> {
         return None;
     }
     let rest = &prompt[1..];
-    let end = rest
-        .find(char::is_whitespace)
-        .unwrap_or(rest.len());
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
     Some(&rest[..end])
 }
 
@@ -205,7 +203,9 @@ pub fn help_text() -> String {
     }
     lines.push(String::new());
     lines.push("Keys: Enter send · Shift+Enter newline · Ctrl+L new chat · Alt+Up/Down panel height · Esc hides the panel".into());
-    lines.push("A running turn keeps going when the panel hides. /stop is the only way to stop it.".into());
+    lines.push(
+        "A running turn keeps going when the panel hides. /stop is the only way to stop it.".into(),
+    );
     lines.push("@file: type @ after a space (or at start) to attach a workspace file.".into());
     lines.push(
         "Approval: [ Yes ] [ Yes, this session ] [ No ] · ←/→ Tab h/l move · y yes · a this session · n/Esc no"

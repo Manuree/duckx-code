@@ -88,11 +88,7 @@ pub fn active_mention(prompt: &str, cursor: usize) -> Option<ActiveMention> {
             let end = cursor.max(i + 1).min(chars.len());
             let query: String = chars[i + 1..end].iter().collect();
             let query = strip_quotes(&query);
-            return Some(ActiveMention {
-                at: i,
-                query,
-                end,
-            });
+            return Some(ActiveMention { at: i, query, end });
         }
         if chars[i].is_whitespace() {
             break;

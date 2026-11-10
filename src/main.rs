@@ -2,6 +2,7 @@ use std::env;
 use std::io::{self, Stdout};
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crossterm::{
@@ -12,7 +13,7 @@ use crossterm::{
     },
     execute,
     terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
         supports_keyboard_enhancement,
     },
 };
@@ -66,7 +67,10 @@ fn setup_terminal() -> io::Result<Tui> {
         );
     }
 
-    Terminal::new(CrosstermBackend::new(stdout))
+    let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+    // After the alternate screen, so a host that clears the title on entry still shows it.
+    show_app_title();
+    Ok(terminal)
 }
 
 fn restore_terminal() -> io::Result<()> {
@@ -78,8 +82,89 @@ fn restore_terminal() -> io::Result<()> {
         DisableBracketedPaste,
         LeaveAlternateScreen
     );
+    restore_app_title();
     let _ = disable_raw_mode();
     Ok(())
+}
+
+/// Name the terminal shows on this tab while the editor is open.
+const APP_TITLE: &str = env!("CARGO_PKG_NAME");
+
+/// Title to put back on quit, including after a panic. `None` means it could not be read.
+static PREVIOUS_CONSOLE_TITLE: OnceLock<Option<String>> = OnceLock::new();
+
+fn show_app_title() {
+    let _ = PREVIOUS_CONSOLE_TITLE.set(read_console_title());
+    apply_console_title(APP_TITLE);
+}
+
+fn restore_app_title() {
+    let Some(Some(title)) = PREVIOUS_CONSOLE_TITLE.get() else {
+        return;
+    };
+    apply_console_title(title);
+}
+
+fn apply_console_title(title: &str) {
+    let title = osc_title(title);
+    #[cfg(windows)]
+    let _ = set_console_title_winapi(&title);
+    // OSC 0. On Windows 10+ this is what crossterm writes; ConPTY forwards it to the tab.
+    let _ = execute!(io::stdout(), SetTitle(title));
+}
+
+/// Drops bytes that would end an OSC 0 title sequence early.
+fn osc_title(title: &str) -> String {
+    title
+        .chars()
+        .filter(|c| !matches!(c, '\u{0}' | '\u{1b}' | '\u{07}' | '\u{9c}'))
+        .collect()
+}
+
+fn read_console_title() -> Option<String> {
+    #[cfg(windows)]
+    {
+        read_console_title_winapi()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn read_console_title_winapi() -> Option<String> {
+    unsafe extern "system" {
+        fn GetConsoleTitleW(buffer: *mut u16, size: u32) -> u32;
+    }
+
+    let mut buf = vec![0u16; 4096];
+    let n = unsafe { GetConsoleTitleW(buf.as_mut_ptr(), buf.len() as u32) };
+    if n == 0 {
+        return None;
+    }
+    let n = (n as usize).min(buf.len());
+    Some(String::from_utf16_lossy(&buf[..n]))
+}
+
+#[cfg(windows)]
+fn set_console_title_winapi(title: &str) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    unsafe extern "system" {
+        fn SetConsoleTitleW(title: *const u16) -> i32;
+    }
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(title)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let ok = unsafe { SetConsoleTitleW(wide.as_ptr()) };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn load_app(path: Option<PathBuf>) -> io::Result<App> {
@@ -260,8 +345,7 @@ async fn drive(
         }
 
         let snack_at = app.snackbar_deadline().map(|until| {
-            tokio::time::Instant::now()
-                + until.saturating_duration_since(std::time::Instant::now())
+            tokio::time::Instant::now() + until.saturating_duration_since(std::time::Instant::now())
         });
 
         tokio::select! {
@@ -370,4 +454,40 @@ async fn drive(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{APP_TITLE, osc_title};
+
+    #[test]
+    fn app_title_is_the_package_name_and_safe_for_the_terminal() {
+        assert_eq!(APP_TITLE, "duckx-code");
+        assert_eq!(osc_title(APP_TITLE), "duckx-code");
+        assert_eq!(osc_title("a\u{1b}]0;x\u{7}b"), "a]0;xb");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_console_title_round_trip() {
+        let Some(previous) = super::read_console_title() else {
+            return;
+        };
+        struct PutBack(String);
+        impl Drop for PutBack {
+            fn drop(&mut self) {
+                let _ = super::set_console_title_winapi(&self.0);
+            }
+        }
+        let _put_back = PutBack(previous.clone());
+        let probe = "duckx-code-title-probe";
+        super::set_console_title_winapi(probe).expect("set title");
+        let got = super::read_console_title();
+        assert_eq!(got.as_deref(), Some(probe));
+        drop(_put_back);
+        assert_eq!(
+            super::read_console_title().as_deref(),
+            Some(previous.as_str())
+        );
+    }
 }

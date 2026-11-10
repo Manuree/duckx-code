@@ -57,16 +57,14 @@ fn resolve_under(root: &Path, clean: &Path) -> Result<(), String> {
     if !root.exists() {
         return Err("Workspace folder is missing".to_string());
     }
-    let root_canon = canonicalize(root).map_err(|err| {
-        format!("Cannot resolve workspace {}: {err}", root.display())
-    })?;
+    let root_canon = canonicalize(root)
+        .map_err(|err| format!("Cannot resolve workspace {}: {err}", root.display()))?;
 
     let (base, suffix) = nearest_existing(clean);
     let base_canon = if base.as_os_str().is_empty() || !base.exists() {
         root_canon.clone()
     } else {
-        canonicalize(&base)
-            .map_err(|err| format!("Cannot resolve {}: {err}", base.display()))?
+        canonicalize(&base).map_err(|err| format!("Cannot resolve {}: {err}", base.display()))?
     };
 
     let mut check = base_canon;
@@ -127,10 +125,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "duckx-path-{label}-{}-{nanos}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("duckx-path-{label}-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         root
     }
@@ -162,7 +158,9 @@ mod tests {
             !text.contains(r"\\?\"),
             "within must not return a verbatim path: {text}"
         );
-        assert!(child.ends_with(Path::new("src/main.rs")) || child.ends_with(Path::new("src\\main.rs")));
+        assert!(
+            child.ends_with(Path::new("src/main.rs")) || child.ends_with(Path::new("src\\main.rs"))
+        );
         let outside = temp_root("other");
         assert!(within(&root, outside.join("a.rs").to_str().unwrap()).is_err());
         let _ = fs::remove_dir_all(&root);
@@ -179,10 +177,7 @@ mod tests {
         {
             std::os::unix::fs::symlink(&outside, &link).unwrap();
             let err = within(&root, "leak/secret.txt").unwrap_err();
-            assert!(
-                err.contains("outside"),
-                "expected outside error, got {err}"
-            );
+            assert!(err.contains("outside"), "expected outside error, got {err}");
         }
         #[cfg(not(unix))]
         {
@@ -198,7 +193,9 @@ mod tests {
         let path = within(&root, "new/file.rs").unwrap();
         let text = path.to_string_lossy();
         assert!(!text.contains(r"\\?\"), "{text}");
-        assert!(path.ends_with(Path::new("new/file.rs")) || path.ends_with(Path::new("new\\file.rs")));
+        assert!(
+            path.ends_with(Path::new("new/file.rs")) || path.ends_with(Path::new("new\\file.rs"))
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

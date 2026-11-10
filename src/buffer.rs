@@ -94,7 +94,6 @@ pub fn find_spans_in_rope(rope: &Rope, query: &str) -> Vec<(usize, usize)> {
     spans
 }
 
-
 fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
     for &byte in bytes {
         hash ^= u64::from(byte);
@@ -2310,7 +2309,11 @@ mod tests {
         // Large right-hand insert keeps `X|Y` on a leaf boundary; a tiny insert can coalesce.
         rope.insert(rope.len_chars(), &format!("Y{}", "b".repeat(5000)));
         rope.insert(rope.len_chars(), "QQXYQQ");
-        assert!(rope.chunks().count() > 1, "expected multiple chunks, got {}", rope.chunks().count());
+        assert!(
+            rope.chunks().count() > 1,
+            "expected multiple chunks, got {}",
+            rope.chunks().count()
+        );
         // Confirm at least one hit straddles a leaf.
         let text = rope.to_string();
         let first_xy = text.find("XY").expect("XY");

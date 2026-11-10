@@ -9,9 +9,9 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde_json::{Value, json};
 
-use super::tool_specs_for;
 #[cfg(test)]
 use super::tool_specs;
+use super::tool_specs_for;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCall {
@@ -289,8 +289,10 @@ fn messages_for_ollama_native(messages: &[Value]) -> Vec<Value> {
                     .or_else(|| call.get("arguments").cloned())
                     .unwrap_or(json!({}));
                 let args_obj = match args {
-                    Value::String(s) => serde_json::from_str::<Value>(&normalize_tool_arguments(&s))
-                        .unwrap_or_else(|_| json!({})),
+                    Value::String(s) => {
+                        serde_json::from_str::<Value>(&normalize_tool_arguments(&s))
+                            .unwrap_or_else(|_| json!({}))
+                    }
                     Value::Object(_) => args,
                     other => other,
                 };
@@ -461,9 +463,11 @@ fn messages_with_tool_prompt_for(messages: &[Value], read_only: bool) -> Vec<Val
         if !injected && message.get("role").and_then(|r| r.as_str()) == Some("system") {
             let mut copy = message.clone();
             let existing = copy.get("content").and_then(|c| c.as_str()).unwrap_or("");
-            copy["content"] = Value::String(format!("{existing}
+            copy["content"] = Value::String(format!(
+                "{existing}
 
-{catalog}"));
+{catalog}"
+            ));
             out.push(copy);
             injected = true;
         } else {
@@ -488,8 +492,10 @@ fn tool_catalog_prompt(read_only: bool) -> String {
         let desc = tool["function"]["description"].as_str().unwrap_or("");
         lines.push(format!("- {name}: {desc}"));
     }
-    lines.join("
-")
+    lines.join(
+        "
+",
+    )
 }
 
 fn apply_auth(request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
@@ -820,10 +826,8 @@ impl ContentThinkSplit {
             }
             let hold = longest_tag_prefix(&self.buf, "<think>")
                 .max(longest_tag_prefix(&self.buf, "</think>"));
-            let emit_len = crate::utf8::floor_char_boundary(
-                &self.buf,
-                self.buf.len().saturating_sub(hold),
-            );
+            let emit_len =
+                crate::utf8::floor_char_boundary(&self.buf, self.buf.len().saturating_sub(hold));
             if emit_len == 0 {
                 break;
             }
@@ -1115,11 +1119,7 @@ fn extract_json_string_field_unterminated(raw: &str, key: &str) -> Option<String
         }
         out.push(ch);
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// Build OpenAI-shaped tool_calls with `arguments` always a valid JSON string.
@@ -1316,11 +1316,7 @@ fn extract_json_calls(text: &str) -> (Vec<ToolCall>, String) {
         let fence_at = rest.find("```").map(|at| cursor + at);
         let brace_at = rest.find('{').map(|at| cursor + at);
         let bracket_at = rest.find('[').map(|at| cursor + at);
-        let Some(at) = [fence_at, brace_at, bracket_at]
-            .into_iter()
-            .flatten()
-            .min()
-        else {
+        let Some(at) = [fence_at, brace_at, bracket_at].into_iter().flatten().min() else {
             stripped.push_str(&text[cursor..]);
             break;
         };
@@ -1371,8 +1367,7 @@ fn take_fence_tool_calls(text: &str, calls: &mut Vec<ToolCall>) -> Option<usize>
     if let Some(value) = first_json(body).filter(value_looks_like_tool_call) {
         push_value_calls(&value, calls);
     }
-    if calls.len() == before
-        && matches!(lang.as_str(), "tool_code" | "python" | "py" | "json" | "")
+    if calls.len() == before && matches!(lang.as_str(), "tool_code" | "python" | "py" | "json" | "")
     {
         let (py, _) = extract_python_calls(body);
         calls.extend(py);
@@ -1782,7 +1777,10 @@ impl StreamAssembler {
             return;
         };
         for item in list {
-            let index = item.get("index").and_then(|value| value.as_u64()).unwrap_or(0) as usize;
+            let index = item
+                .get("index")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as usize;
             while self.calls.len() <= index {
                 self.calls.push(PartialCall::default());
             }
@@ -2229,11 +2227,11 @@ where
     let mut stream = response.bytes_stream();
 
     let handle_delta = |delta: &Value,
-                            assembler: &mut StreamAssembler,
-                            think_split: &mut ContentThinkSplit,
-                            hold_deltas: &mut bool,
-                            held: &mut String,
-                            on_delta: &mut F| {
+                        assembler: &mut StreamAssembler,
+                        think_split: &mut ContentThinkSplit,
+                        hold_deltas: &mut bool,
+                        held: &mut String,
+                        on_delta: &mut F| {
         assembler.push_delta(delta);
         for key in ["reasoning", "reasoning_content", "thinking"] {
             if let Some(text) = delta.get(key).and_then(|value| value.as_str()) {
@@ -2780,7 +2778,10 @@ mod tests {
     #[tokio::test]
     async fn posts_an_openai_compatible_chat_completion() {
         let (server_url, server) = spawn_mock(|request| {
-            assert!(request.starts_with("POST /v1/chat/completions"), "{request}");
+            assert!(
+                request.starts_with("POST /v1/chat/completions"),
+                "{request}"
+            );
             assert!(request.contains("\"model\":\"qwen\""), "{request}");
             assert!(request.contains("\"tools\":"), "{request}");
             assert!(request.contains("read_file"), "{request}");
@@ -2816,7 +2817,9 @@ mod tests {
     async fn sends_bearer_token_only_when_set() {
         let (server_url, server) = spawn_mock(|request| {
             assert!(
-                request.to_ascii_lowercase().contains("authorization: bearer secret-key"),
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer secret-key"),
                 "{request}"
             );
             let body = r#"{"choices":[{"message":{"role":"assistant","content":"authed"}}]}"#;
@@ -2893,7 +2896,11 @@ mod tests {
         assert_eq!(reply.content, "Hi there");
         assert_eq!(reply.calls.len(), 1);
         assert_eq!(reply.calls[0].name, "list_dir");
-        assert!(reply.calls[0].arguments.contains('.'), "{}", reply.calls[0].arguments);
+        assert!(
+            reply.calls[0].arguments.contains('.'),
+            "{}",
+            reply.calls[0].arguments
+        );
         server.join().unwrap();
     }
 
@@ -2995,7 +3002,8 @@ mod tests {
                     stream.write_all(response.as_bytes()).unwrap();
                 } else {
                     assert!(!request.contains("\"stream\":true"), "{request}");
-                    let body = r#"{"choices":[{"message":{"role":"assistant","content":"fallback"}}]}"#;
+                    let body =
+                        r#"{"choices":[{"message":{"role":"assistant","content":"fallback"}}]}"#;
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -3114,18 +3122,24 @@ mod tests {
         })];
         let out = messages_for_ollama_native(&messages);
         assert!(out[0]["tool_calls"][0]["function"]["arguments"].is_object());
-        assert_eq!(out[0]["tool_calls"][0]["function"]["arguments"]["path"], "a.rs");
+        assert_eq!(
+            out[0]["tool_calls"][0]["function"]["arguments"]["path"],
+            "a.rs"
+        );
     }
 
     #[test]
-        fn request_body_omits_tools_when_empty() {
+    fn request_body_omits_tools_when_empty() {
         let body = request_body("tiny", &[], &[], false);
         assert!(body.get("tools").is_none(), "{body}");
     }
 
     #[test]
     fn messages_with_tool_prompt_appends_catalog() {
-        let messages = [json!({"role":"system","content":"Be brief."}), json!({"role":"user","content":"hi"})];
+        let messages = [
+            json!({"role":"system","content":"Be brief."}),
+            json!({"role":"user","content":"hi"}),
+        ];
         let out = messages_with_tool_prompt(&messages);
         assert_eq!(out.len(), 2);
         let sys = out[0]["content"].as_str().unwrap();
@@ -3190,7 +3204,10 @@ mod tests {
                     );
                     stream.write_all(response.as_bytes()).unwrap();
                 } else if round == 1 {
-                    assert!(!request.contains("\"tools\":"), "retry must omit tools: {request}");
+                    assert!(
+                        !request.contains("\"tools\":"),
+                        "retry must omit tools: {request}"
+                    );
                     assert!(request.contains("Available tools"), "{request}");
                     assert!(request.contains(&model_for_server), "{request}");
                     let body = r#"{"choices":[{"message":{"role":"assistant","content":"{\"name\":\"editor_state\",\"arguments\":{}}" }}]}"#;
@@ -3202,7 +3219,10 @@ mod tests {
                     stream.write_all(response.as_bytes()).unwrap();
                 } else {
                     // Third call (new complete) must skip tools immediately because model was remembered.
-                    assert!(!request.contains("\"tools\":"), "remembered model must skip tools: {request}");
+                    assert!(
+                        !request.contains("\"tools\":"),
+                        "remembered model must skip tools: {request}"
+                    );
                     let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -3215,7 +3235,10 @@ mod tests {
         });
         let client = reqwest::Client::new();
         let server_url = format!("http://{addr}/v1");
-        let messages = [json!({"role":"system","content":"Be helpful."}), json!({"role":"user","content":"hi"})];
+        let messages = [
+            json!({"role":"system","content":"Be helpful."}),
+            json!({"role":"user","content":"hi"}),
+        ];
         let reply = complete(
             &client,
             &server_url,
@@ -3240,14 +3263,16 @@ mod tests {
         server.join().unwrap();
     }
 
-    
     #[test]
     fn normalize_tool_arguments_empty_and_invalid_become_object() {
         assert_eq!(normalize_tool_arguments(""), "{}");
         assert_eq!(normalize_tool_arguments("   "), "{}");
         assert_eq!(normalize_tool_arguments("{\"a\":"), "{}");
         assert_eq!(normalize_tool_arguments("{}"), "{}");
-        assert_eq!(normalize_tool_arguments("{\"path\":\"a.rs\"}"), "{\"path\":\"a.rs\"}");
+        assert_eq!(
+            normalize_tool_arguments("{\"path\":\"a.rs\"}"),
+            "{\"path\":\"a.rs\"}"
+        );
     }
 
     #[test]
@@ -3344,7 +3369,9 @@ mod tests {
             for call in wire.as_array().unwrap() {
                 assert_eq!(call["type"], "function");
                 assert!(call["id"].as_str().is_some_and(|s| !s.is_empty()));
-                let args = call["function"]["arguments"].as_str().expect("arguments must be a JSON string");
+                let args = call["function"]["arguments"]
+                    .as_str()
+                    .expect("arguments must be a JSON string");
                 let parsed: Value = serde_json::from_str(args).expect(args);
                 assert!(parsed.is_object(), "{args}");
             }
@@ -3375,7 +3402,10 @@ mod tests {
         assert_eq!(calls[0]["id"], "call-0");
         assert_eq!(calls[0]["type"], "function");
         assert_eq!(calls[0]["function"]["arguments"], "{}");
-        assert_eq!(calls[1]["function"]["arguments"].as_str().unwrap(), "{\"path\":\".\"}");
+        assert_eq!(
+            calls[1]["function"]["arguments"].as_str().unwrap(),
+            "{\"path\":\".\"}"
+        );
     }
 
     #[test]
@@ -3393,7 +3423,12 @@ mod tests {
         let flat = flatten_tool_history(&messages);
         assert!(flat.iter().all(|m| m.get("tool_calls").is_none()));
         assert!(flat.iter().all(|m| m["role"] != "tool"));
-        assert!(flat.iter().any(|m| m["content"].as_str().unwrap_or("").contains("Called editor_state")));
+        assert!(flat.iter().any(|m| {
+            m["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Called editor_state")
+        }));
     }
 
     #[test]
@@ -3407,7 +3442,6 @@ mod tests {
         let args: Value = serde_json::from_str(&reply.calls[0].arguments).unwrap();
         assert_eq!(args["file"], "(none)");
     }
-
 
     #[tokio::test]
     async fn live_ollama_rejects_empty_args_but_sanitize_recovers() {
@@ -3568,7 +3602,10 @@ mod tests {
                 "stream flashed tool JSON: {pieces:?}"
             );
             assert!(
-                reply.calls.iter().any(|c| c.name.contains("editor_state") || !c.name.is_empty()),
+                reply
+                    .calls
+                    .iter()
+                    .any(|c| c.name.contains("editor_state") || !c.name.is_empty()),
                 "{reply:?}"
             );
         }

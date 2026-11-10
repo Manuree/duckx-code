@@ -203,7 +203,8 @@ impl App {
             Some(doc) => (doc.language, doc.version),
             None => {
                 let path = self.find_tab(tab)?.path.as_ref()?;
-                let language = Language::detect(path).filter(|language| registry::supports(*language))?;
+                let language =
+                    Language::detect(path).filter(|language| registry::supports(*language))?;
                 (language, 0)
             }
         };

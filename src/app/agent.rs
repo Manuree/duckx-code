@@ -91,7 +91,10 @@ impl App {
                 }
                 self.agent.stream_draft = None;
                 self.agent.thinking_draft = None;
-                if text.to_ascii_lowercase().contains("invalid tool call arguments") {
+                if text
+                    .to_ascii_lowercase()
+                    .contains("invalid tool call arguments")
+                {
                     self.agent.memory.clear();
                 }
                 self.push_line(false, text.clone());
@@ -167,9 +170,7 @@ impl App {
                 }
                 if let Some(draft) = self.agent.stream_draft.take() {
                     // Textual tool JSON may have been streamed before parse; do not show it as chat.
-                    if !draft.trim().is_empty()
-                        && !agent::content_looks_like_tool_prefix(&draft)
-                    {
+                    if !draft.trim().is_empty() && !agent::content_looks_like_tool_prefix(&draft) {
                         self.remember_assistant(&draft);
                         self.push_line(false, draft);
                     }
@@ -262,7 +263,12 @@ impl App {
                         self.resolve_pending_tool(ApprovalChoice::Yes);
                     } else if key.eq_ignore_ascii_case("a") {
                         // Session approval only where offered; otherwise ignore.
-                        if self.agent.pending.as_ref().is_some_and(|p| p.offers_session()) {
+                        if self
+                            .agent
+                            .pending
+                            .as_ref()
+                            .is_some_and(|p| p.offers_session())
+                        {
                             self.resolve_pending_tool(ApprovalChoice::Session);
                         }
                     } else if key.eq_ignore_ascii_case("n") {
@@ -491,10 +497,7 @@ impl App {
         } else {
             format!("{prompt}\n\n{attached}")
         };
-        model_prompt = format!(
-            "{model_prompt}\n\neditor_state:\n{}",
-            self.tool_state()
-        );
+        model_prompt = format!("{model_prompt}\n\neditor_state:\n{}", self.tool_state());
         self.remember_user(&model_prompt);
         let (history, compact) = if self.ai.auto_compact {
             let (history, split) = compact_plan(
@@ -543,8 +546,8 @@ impl App {
         let mode = self.agent.mode;
         let mut tuning = ai_tuning(&self.ai);
         tuning.read_only = mode.read_only();
-        let workspace = (!self.explorer.root.as_os_str().is_empty())
-            .then(|| self.explorer.root.clone());
+        let workspace =
+            (!self.explorer.root.as_os_str().is_empty()).then(|| self.explorer.root.clone());
         let _ = tx.send(AgentCommand::Turn {
             id,
             server: self.ai.endpoint(),
@@ -591,7 +594,10 @@ impl App {
     /// `/changes` lists this chat's edits. `/changes 2` opens the second one.
     fn slash_changes(&mut self, args: &str) {
         if self.agent.changes.is_empty() {
-            self.push_line(false, "The assistant has not changed any file in this chat.".into());
+            self.push_line(
+                false,
+                "The assistant has not changed any file in this chat.".into(),
+            );
             return;
         }
         if let Ok(number) = args.trim().parse::<usize>() {
@@ -602,7 +608,10 @@ impl App {
             else {
                 self.push_line(
                     false,
-                    format!("There are {} changes. Try /changes 1.", self.agent.changes.len()),
+                    format!(
+                        "There are {} changes. Try /changes 1.",
+                        self.agent.changes.len()
+                    ),
                 );
                 return;
             };
@@ -850,7 +859,12 @@ impl App {
         }
         if choice != ApprovalChoice::No {
             self.agent.status = format!("running {}", pending.name);
-            self.execute_tool(pending.turn, pending.call_id, &pending.name, &pending.arguments);
+            self.execute_tool(
+                pending.turn,
+                pending.call_id,
+                &pending.name,
+                &pending.arguments,
+            );
         } else {
             self.reply_tool(
                 pending.turn,
@@ -870,10 +884,7 @@ impl App {
         match name {
             "apply_edit" => {
                 if let Some(find) = value.get("find").and_then(|v| v.as_str()) {
-                    let replace = value
-                        .get("replace")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let replace = value.get("replace").and_then(|v| v.as_str()).unwrap_or("");
                     let mut lines = vec![format!("apply_edit · {path}")];
                     lines.extend(diff_preview_lines(find, replace));
                     lines.join("\n")
@@ -974,7 +985,9 @@ impl App {
             };
             return Some(match result {
                 Ok(lines) => {
-                    self.agent.reads.insert(path, agent::ReadMark::Buffer(revision));
+                    self.agent
+                        .reads
+                        .insert(path, agent::ReadMark::Buffer(revision));
                     lines
                 }
                 Err(err) => err,
@@ -1069,7 +1082,9 @@ impl App {
             .take(30)
             .map(|item| {
                 let where_ = rope
-                    .map(|rope| (rope.byte_to_line(item.start.min(rope.len_bytes())) + 1).to_string())
+                    .map(|rope| {
+                        (rope.byte_to_line(item.start.min(rope.len_bytes())) + 1).to_string()
+                    })
                     .unwrap_or_else(|| "?:?".to_string());
                 format!(
                     "{where_} {} {}",
@@ -1719,7 +1734,9 @@ impl App {
                         })
                         .unwrap_or(0),
                 });
-                if let Some(crate::agent::AgentPopup::Slash { selected, filter }) = self.agent.popup.as_mut() {
+                if let Some(crate::agent::AgentPopup::Slash { selected, filter }) =
+                    self.agent.popup.as_mut()
+                {
                     let n = agent::filter_commands(filter).len();
                     if n == 0 {
                         // Keep popup to show "no matches" or close? Close when empty filter of unknown.
@@ -1804,9 +1821,13 @@ impl App {
                     return;
                 };
                 // Replace `/filter` with `/name` (and a trailing space for args).
-                let replacement = if run_command && cmd.name != "model" && cmd.name != "provider"
-                    && cmd.name != "context" && cmd.name != "stream"
-                    && cmd.name != "auto-approve" && cmd.name != "think"
+                let replacement = if run_command
+                    && cmd.name != "model"
+                    && cmd.name != "provider"
+                    && cmd.name != "context"
+                    && cmd.name != "stream"
+                    && cmd.name != "auto-approve"
+                    && cmd.name != "think"
                 {
                     format!("/{}", cmd.name)
                 } else {
@@ -1872,10 +1893,7 @@ impl App {
             return;
         }
         let Some(_) = agent::lookup(name) else {
-            self.push_line(
-                false,
-                format!("Unknown command /{name}. Try /help."),
-            );
+            self.push_line(false, format!("Unknown command /{name}. Try /help."));
             return;
         };
         match name {
@@ -1935,7 +1953,11 @@ impl App {
 
     fn slash_on_off(&mut self, which: &str, args: &str, default_on_label: bool) {
         let _ = default_on_label;
-        let token = args.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        let token = args
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let set = match token.as_str() {
             "" => None,
             "on" | "true" | "1" => Some(true),
@@ -2127,7 +2149,10 @@ impl App {
                 continue;
             }
             if budget == 0 {
-                parts.push(format!("(attach budget reached; skipped @{})", mention.path));
+                parts.push(format!(
+                    "(attach budget reached; skipped @{})",
+                    mention.path
+                ));
                 break;
             }
             let path = match agent::within(&self.explorer.root, &mention.path) {
@@ -2166,8 +2191,12 @@ impl App {
         let mut out = Vec::new();
         for editor in &self.editors {
             for tab in editor.tabs() {
-                let Some(path) = tab.path.as_ref() else { continue };
-                let Ok(rel) = path.strip_prefix(root) else { continue };
+                let Some(path) = tab.path.as_ref() else {
+                    continue;
+                };
+                let Ok(rel) = path.strip_prefix(root) else {
+                    continue;
+                };
                 let s = rel.to_string_lossy().replace('\\', "/");
                 if !s.is_empty() && !out.contains(&s) {
                     out.push(s);
@@ -2429,8 +2458,7 @@ fn budget_memory(
         .saturating_sub(system_reserve)
         .saturating_sub(prompt_tokens)
         .max(256);
-    while !out.is_empty()
-        && out.iter().map(estimate_message_tokens).sum::<usize>() > history_budget
+    while !out.is_empty() && out.iter().map(estimate_message_tokens).sum::<usize>() > history_budget
     {
         out.remove(0);
         reconcile_tool_pairs(&mut out);
@@ -2582,7 +2610,10 @@ fn summarize_tool_result(content: &str) -> String {
         return trimmed.to_string();
     }
     // Prefer a short head that still names the outcome.
-    let head: String = trimmed.chars().take(MEMORY_TOOL_CLIP.saturating_sub(20)).collect();
+    let head: String = trimmed
+        .chars()
+        .take(MEMORY_TOOL_CLIP.saturating_sub(20))
+        .collect();
     format!("{head}… (truncated)")
 }
 
@@ -2752,7 +2783,10 @@ fn loose_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool,
         serde_json::Value::Bool(flag) => flag,
         serde_json::Value::Number(number) => number.as_u64().unwrap_or(0) != 0,
         serde_json::Value::String(text) => {
-            matches!(text.trim().to_ascii_lowercase().as_str(), "true" | "yes" | "1")
+            matches!(
+                text.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "1"
+            )
         }
         _ => false,
     })
@@ -3193,15 +3227,29 @@ mod editor_first_tests {
         let root = workspace("keep-cursor");
         let (mut app, mut rx) = typing_app(&root, "one\ntwo\nthree\n");
         app.buffer_mut().move_to(10, false);
-        tool(&mut app, "apply_edit", json!({"path": "a.txt", "find": "one", "replace": "first"}));
+        tool(
+            &mut app,
+            "apply_edit",
+            json!({"path": "a.txt", "find": "one", "replace": "first"}),
+        );
         let content = reply(&mut rx);
         assert!(content.contains("unsaved"), "{content}");
-        assert!(content.contains("first"), "the edit echoes its lines: {content}");
+        assert!(
+            content.contains("first"),
+            "the edit echoes its lines: {content}"
+        );
         assert_eq!(app.buffer().rope().to_string(), "first\ntwo\nthree\n");
-        assert_eq!(app.buffer().selection().head, 12, "the cursor stays on `three`");
+        assert_eq!(
+            app.buffer().selection().head,
+            12,
+            "the cursor stays on `three`"
+        );
         assert_eq!(app.focus(), Focus::Editor);
         assert!(!app.agent.focused);
-        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "one\ntwo\nthree\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "one\ntwo\nthree\n"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3237,17 +3285,35 @@ mod editor_first_tests {
         let (mut app, mut rx) = typing_app(&root, "alpha\n");
         let other = root.join("b.txt");
         std::fs::write(&other, "beta\n").unwrap();
-        tool(&mut app, "apply_edit", json!({"path": "b.txt", "find": "beta", "replace": "BETA"}));
-        assert!(rx.try_recv().is_err(), "the reply waits for the file to load");
+        tool(
+            &mut app,
+            "apply_edit",
+            json!({"path": "b.txt", "find": "beta", "replace": "BETA"}),
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the reply waits for the file to load"
+        );
         run_jobs(&mut app);
         let content = reply(&mut rx);
         assert!(content.contains("unsaved"), "{content}");
-        assert_eq!(app.path(), Some(root.join("a.txt").as_path()), "the visible tab stays");
+        assert_eq!(
+            app.path(),
+            Some(root.join("a.txt").as_path()),
+            "the visible tab stays"
+        );
         assert_eq!(app.focus(), Focus::Editor);
-        let tab = app.tab_with_path(&other).and_then(|id| app.find_tab(id)).unwrap();
+        let tab = app
+            .tab_with_path(&other)
+            .and_then(|id| app.find_tab(id))
+            .unwrap();
         assert_eq!(tab.buffer.rope().to_string(), "BETA\n");
         assert!(tab.dirty);
-        assert_eq!(std::fs::read_to_string(&other).unwrap(), "beta\n", "nothing is written");
+        assert_eq!(
+            std::fs::read_to_string(&other).unwrap(),
+            "beta\n",
+            "nothing is written"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3257,15 +3323,27 @@ mod editor_first_tests {
         let (mut app, mut rx) = typing_app(&root, "one\n");
         slash(&mut app, "/plan");
         assert_eq!(app.agent.mode, AgentMode::Plan);
-        tool(&mut app, "apply_edit", json!({"path": "a.txt", "find": "one", "replace": "1"}));
+        tool(
+            &mut app,
+            "apply_edit",
+            json!({"path": "a.txt", "find": "one", "replace": "1"}),
+        );
         assert!(reply(&mut rx).contains("not available in plan mode"));
         assert_eq!(app.buffer().rope().to_string(), "one\n");
 
         slash(&mut app, "/ask");
         assert_eq!(app.agent.mode, AgentMode::Ask);
         slash(&mut app, "/ask");
-        assert_eq!(app.agent.mode, AgentMode::Agent, "the same mode again turns it off");
-        tool(&mut app, "apply_edit", json!({"path": "a.txt", "find": "one", "replace": "1"}));
+        assert_eq!(
+            app.agent.mode,
+            AgentMode::Agent,
+            "the same mode again turns it off"
+        );
+        tool(
+            &mut app,
+            "apply_edit",
+            json!({"path": "a.txt", "find": "one", "replace": "1"}),
+        );
         reply(&mut rx);
         assert_eq!(app.buffer().rope().to_string(), "1\n");
         let _ = std::fs::remove_dir_all(&root);
@@ -3276,14 +3354,26 @@ mod editor_first_tests {
         let root = workspace("approval-focus");
         let (mut app, mut rx) = typing_app(&root, "one\n");
         app.ai.auto_approve = false;
-        tool(&mut app, "apply_edit", json!({"path": "a.txt", "find": "one", "replace": "1"}));
+        tool(
+            &mut app,
+            "apply_edit",
+            json!({"path": "a.txt", "find": "one", "replace": "1"}),
+        );
         assert!(app.agent.pending.is_some());
         assert!(rx.try_recv().is_err());
         assert!(!app.agent.focused);
         assert_eq!(app.focus(), Focus::Editor);
-        assert!(app.message.as_deref().is_some_and(|text| text.contains("F6")));
+        assert!(
+            app.message
+                .as_deref()
+                .is_some_and(|text| text.contains("F6"))
+        );
         app.handle(SemanticAction::InsertChar('y'));
-        assert_eq!(app.buffer().rope().to_string(), "yone\n", "typing still goes to the file");
+        assert_eq!(
+            app.buffer().rope().to_string(),
+            "yone\n",
+            "typing still goes to the file"
+        );
         assert!(app.agent.pending.is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3304,7 +3394,11 @@ mod editor_first_tests {
         app.agent.focused = true;
         tool(&mut app, "goto", json!({"line": 2}));
         reply(&mut rx);
-        assert_eq!(app.buffer().selection().head, 4, "in the panel, goto moves the cursor");
+        assert_eq!(
+            app.buffer().selection().head,
+            4,
+            "in the panel, goto moves the cursor"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3313,8 +3407,19 @@ mod editor_first_tests {
         let root = workspace("changes");
         let (mut app, mut rx) = typing_app(&root, "one\ntwo\n");
         slash(&mut app, "/changes");
-        assert!(app.agent.transcript.last().unwrap().text.contains("has not changed"));
-        tool(&mut app, "apply_edit", json!({"path": "a.txt", "find": "two", "replace": "2"}));
+        assert!(
+            app.agent
+                .transcript
+                .last()
+                .unwrap()
+                .text
+                .contains("has not changed")
+        );
+        tool(
+            &mut app,
+            "apply_edit",
+            json!({"path": "a.txt", "find": "two", "replace": "2"}),
+        );
         reply(&mut rx);
         slash(&mut app, "/changes");
         let text = &app.agent.transcript.last().unwrap().text;

@@ -4,19 +4,20 @@
 mod disk;
 mod edit;
 mod mention;
+mod paste;
 mod path;
 mod provider;
 mod slash;
 mod worker;
-mod paste;
 mod wrap;
 
 pub use disk::{DiskTask, MAX_BYTES, check_file_size, create_parent_plan, perform as perform_disk};
 pub use edit::{EditOutcome, FileEdit, apply_to_buffer, read_lines, read_lines_rope};
 pub use mention::{
-    ATTACH_BUDGET, ATTACH_FILE_CAP, ActiveMention, MentionSpan, active_mention, format_mention_token,
-    insert_mention, mention_trigger_at, parse_mentions, suggest_files,
+    ATTACH_BUDGET, ATTACH_FILE_CAP, ActiveMention, MentionSpan, active_mention,
+    format_mention_token, insert_mention, mention_trigger_at, parse_mentions, suggest_files,
 };
+pub use paste::{PasteBurst, normalize_paste};
 pub use path::{canonicalize, strip_verbatim, within};
 pub use provider::{
     ToolsMode, Tuning, capability_key_for, content_looks_like_tool_prefix, forget_detected,
@@ -27,7 +28,6 @@ pub use slash::{
     parse_slash, slash_filter,
 };
 pub use worker::spawn;
-pub use paste::{PasteBurst, normalize_paste};
 pub use wrap::{column_at, index_at, next_boundary, prev_boundary, rows as wrap_rows};
 
 use serde_json::{Value, json};
@@ -125,10 +125,7 @@ pub enum WaitKind {
         report: String,
     },
     /// A language server query with this token.
-    Lsp {
-        token: u64,
-        op: LspOp,
-    },
+    Lsp { token: u64, op: LspOp },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,9 +144,7 @@ pub enum LspOp {
 impl LspOp {
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
-            "definition" | "goto_definition" | "go_to_definition" | "def" => {
-                Some(Self::Definition)
-            }
+            "definition" | "goto_definition" | "go_to_definition" | "def" => Some(Self::Definition),
             "references" | "find_references" | "refs" => Some(Self::References),
             "hover" | "type" | "docs" => Some(Self::Hover),
             _ => None,
@@ -188,7 +183,11 @@ impl PendingTool {
     /// Buttons shown, left to right.
     pub fn choices(&self) -> &'static [ApprovalChoice] {
         if self.offers_session() {
-            &[ApprovalChoice::Yes, ApprovalChoice::Session, ApprovalChoice::No]
+            &[
+                ApprovalChoice::Yes,
+                ApprovalChoice::Session,
+                ApprovalChoice::No,
+            ]
         } else {
             &[ApprovalChoice::Yes, ApprovalChoice::No]
         }
@@ -803,13 +802,16 @@ mod tests {
 
     #[test]
     fn lsp_aliases_keep_the_operation() {
-        let (name, arguments) =
-            normalize_call("goto_definition", r#"{"path":"a.rs","line":3,"name":"foo"}"#);
+        let (name, arguments) = normalize_call(
+            "goto_definition",
+            r#"{"path":"a.rs","line":3,"name":"foo"}"#,
+        );
         assert_eq!(name, "lsp");
         let value: Value = serde_json::from_str(&arguments).unwrap();
         assert_eq!(value["op"], "definition");
         assert_eq!(value["symbol"], "foo");
-        let (_, arguments) = normalize_call("apply_edit", r#"{"path":"a","find":"x","replaceAll":true}"#);
+        let (_, arguments) =
+            normalize_call("apply_edit", r#"{"path":"a","find":"x","replaceAll":true}"#);
         let value: Value = serde_json::from_str(&arguments).unwrap();
         assert_eq!(value["replace_all"], true);
     }

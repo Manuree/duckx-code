@@ -597,8 +597,16 @@ mod tests {
         app.agent.focused = true;
         app.set_screen_size(80, 24);
         for (mode, title, color) in [
-            (crate::agent::AgentMode::Plan, "ready : plan", app.styles().diagnostic_warning),
-            (crate::agent::AgentMode::Ask, "ready : ask", app.styles().diagnostic_info),
+            (
+                crate::agent::AgentMode::Plan,
+                "ready : plan",
+                app.styles().diagnostic_warning,
+            ),
+            (
+                crate::agent::AgentMode::Ask,
+                "ready : ask",
+                app.styles().diagnostic_info,
+            ),
         ] {
             app.agent.mode = mode;
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -637,8 +645,16 @@ mod tests {
             })
             .expect("rounded note");
         assert!(corner.0 > 40, "the note sits on the right, at {corner:?}");
-        assert!(corner.1 < 23, "the note sits above the status bar, at {corner:?}");
-        assert!(screen.lines().last().is_some_and(|row| !row.contains("Sorted")));
+        assert!(
+            corner.1 < 23,
+            "the note sits above the status bar, at {corner:?}"
+        );
+        assert!(
+            screen
+                .lines()
+                .last()
+                .is_some_and(|row| !row.contains("Sorted"))
+        );
     }
 
     #[test]
@@ -725,7 +741,10 @@ mod tests {
         app.set_screen_size(80, 24);
         app.handle(SemanticAction::Agent(AgentAction::Insert("/".into())));
         assert!(
-            matches!(app.agent.popup, Some(crate::agent::AgentPopup::Slash { .. })),
+            matches!(
+                app.agent.popup,
+                Some(crate::agent::AgentPopup::Slash { .. })
+            ),
             "popup state missing after typing /"
         );
         let screen = draw(&app, 80, 24);

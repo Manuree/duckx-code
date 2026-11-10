@@ -100,7 +100,11 @@ fn search(root: &Path, query: &str, glob: Option<&str>, open: &[(PathBuf, Rope)]
         return "query is empty".to_string();
     }
     let fold = !query.chars().any(char::is_uppercase);
-    let needle = if fold { query.to_lowercase() } else { query.to_string() };
+    let needle = if fold {
+        query.to_lowercase()
+    } else {
+        query.to_string()
+    };
     let mut builder = ignore::WalkBuilder::new(root);
     builder.hidden(true).git_ignore(true).require_git(false);
     if let Some(glob) = glob.map(str::trim).filter(|glob| !glob.is_empty()) {
@@ -143,7 +147,9 @@ fn search(root: &Path, query: &str, glob: Option<&str>, open: &[(PathBuf, Rope)]
                     continue;
                 }
                 match std::fs::read(path) {
-                    Ok(bytes) if !bytes.contains(&0) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Ok(bytes) if !bytes.contains(&0) => {
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    }
                     _ => continue,
                 }
             }
@@ -177,16 +183,17 @@ fn search(root: &Path, query: &str, glob: Option<&str>, open: &[(PathBuf, Rope)]
         return format!("No matches for {query}");
     }
     if more {
-        hits.push(format!("… (stopped at {MAX_HITS} matches; narrow the query or glob)"));
+        hits.push(format!(
+            "… (stopped at {MAX_HITS} matches; narrow the query or glob)"
+        ));
     }
     hits.join("\n")
 }
 
 /// Refuse oversized files before loading them into memory.
 pub fn check_file_size(path: &Path) -> Result<(), String> {
-    let meta = std::fs::metadata(path).map_err(|err| {
-        format!("Cannot read {}: {err}", path.display())
-    })?;
+    let meta =
+        std::fs::metadata(path).map_err(|err| format!("Cannot read {}: {err}", path.display()))?;
     let len = meta.len();
     if len > MAX_BYTES as u64 {
         return Err(format!(
@@ -301,10 +308,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "duckx-disk-{label}-{}-{nanos}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("duckx-disk-{label}-{}-{nanos}", std::process::id()))
     }
 
     #[test]
@@ -354,11 +358,7 @@ mod tests {
             start: 1,
             end: 10,
         });
-        assert!(
-            report.message.contains("too large"),
-            "{}",
-            report.message
-        );
+        assert!(report.message.contains("too large"), "{}", report.message);
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&over);
     }
@@ -370,7 +370,10 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let deep = root.join("a").join("b").join("c").join("file.txt");
         let err = create_parent_plan(&deep).unwrap_err();
-        assert!(err.contains("deep path") || err.contains("does not exist"), "{err}");
+        assert!(
+            err.contains("deep path") || err.contains("does not exist"),
+            "{err}"
+        );
         let report = perform(DiskTask::Create {
             path: deep,
             text: "nope".into(),
@@ -405,7 +408,10 @@ mod tests {
         assert!(report.message.contains("2|two"), "{}", report.message);
         let (seen, hash) = report.read.expect("read mark");
         assert_eq!(seen, path);
-        assert_eq!(hash, crate::buffer::Buffer::from_text("one\ntwo\n").fingerprint());
+        assert_eq!(
+            hash,
+            crate::buffer::Buffer::from_text("one\ntwo\n").fingerprint()
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -414,7 +420,11 @@ mod tests {
         let root = temp_file("search-root");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("src").join("a.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
+        fs::write(
+            root.join("src").join("a.rs"),
+            "fn alpha() {}\nfn beta() {}\n",
+        )
+        .unwrap();
         fs::write(root.join("notes.md"), "Alpha notes\n").unwrap();
         let found = perform(DiskTask::Search {
             root: root.clone(),
@@ -424,7 +434,10 @@ mod tests {
         })
         .message;
         assert!(found.contains("src/a.rs:1: fn alpha() {}"), "{found}");
-        assert!(found.contains("notes.md:1: Alpha notes"), "lowercase ignores case: {found}");
+        assert!(
+            found.contains("notes.md:1: Alpha notes"),
+            "lowercase ignores case: {found}"
+        );
 
         let only_rs = perform(DiskTask::Search {
             root: root.clone(),
