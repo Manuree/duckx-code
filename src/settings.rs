@@ -1,5 +1,7 @@
 /// Settings page and the `settings.json` document.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub use crate::agent::ToolsMode;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -73,6 +75,10 @@ pub enum SettingId {
     AiCompactKeep,
     /// Percent of the context size kept free before auto compact starts.
     AiCompactBuffer,
+    /// Native tools for the current model: Auto, On, or Off.
+    AiModelTools,
+    /// What the server said the current model cannot do. `Enter` forgets it.
+    AiDetected,
 }
 
 /// How a new line is ended. `Auto` keeps the ending detected in the file.
@@ -524,6 +530,36 @@ pub struct AiPrefs {
     /// A model without an entry uses Context size and Max tokens.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_limits: BTreeMap<String, ModelLimits>,
+    /// Native tools per model, keyed `"<provider> <model>"`. A model without an
+    /// entry is `Auto`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_tools: BTreeMap<String, ToolsMode>,
+    /// Models a server rejected `tools` or `think` for, so the next session does
+    /// not ask again.
+    #[serde(default, skip_serializing_if = "Detected::is_empty")]
+    pub detected: Detected,
+}
+
+/// Keys are `"<chat url> <model>"`, the same ones the worker learns with.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Detected {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub no_tools: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub no_think: BTreeSet<String>,
+}
+
+impl Detected {
+    pub fn is_empty(&self) -> bool {
+        self.no_tools.is_empty() && self.no_think.is_empty()
+    }
+
+    /// Adds what was learned for `key`. Returns whether anything is new.
+    pub fn learn(&mut self, key: &str, no_tools: bool, no_think: bool) -> bool {
+        let tools = no_tools && self.no_tools.insert(key.to_string());
+        let think = no_think && self.no_think.insert(key.to_string());
+        tools || think
+    }
 }
 
 fn default_compact_keep() -> u32 {
@@ -598,6 +634,8 @@ impl Default for AiPrefs {
             compact_keep: DEFAULT_COMPACT_KEEP,
             compact_buffer: DEFAULT_COMPACT_BUFFER,
             model_limits: BTreeMap::new(),
+            model_tools: BTreeMap::new(),
+            detected: Detected::default(),
         }
     }
 }
@@ -876,6 +914,7 @@ impl AiPrefs {
                 .iter()
                 .map(|provider| provider.label().to_string())
                 .collect(),
+            SettingId::AiModelTools => vec!["Auto".into(), "On".into(), "Off".into()],
             _ => Vec::new(),
         }
     }
@@ -888,6 +927,7 @@ impl AiPrefs {
             SettingId::AiThink => usize::from(!self.think),
             SettingId::AiAutoCompact => usize::from(!self.auto_compact),
             SettingId::AiProvider => self.provider.index(),
+            SettingId::AiModelTools => self.model_tools_mode() as usize,
             _ => 0,
         }
     }
@@ -900,6 +940,7 @@ impl AiPrefs {
             SettingId::AiThink => on_off(self.think),
             SettingId::AiAutoCompact => on_off(self.auto_compact),
             SettingId::AiProvider => self.provider.as_str().to_string(),
+            SettingId::AiModelTools => tools_token(self.model_tools_mode()).to_string(),
             _ => String::new(),
         }
     }
@@ -919,6 +960,14 @@ impl AiPrefs {
             SettingId::AiThink => self.think = index == 0,
             SettingId::AiAutoCompact => self.auto_compact = index == 0,
             SettingId::AiProvider => self.switch_provider(AiProvider::from_index(index)),
+            SettingId::AiModelTools => {
+                let mode = match index {
+                    1 => ToolsMode::On,
+                    2 => ToolsMode::Off,
+                    _ => ToolsMode::Auto,
+                };
+                self.set_model_tools(mode);
+            }
             _ => {}
         }
     }
@@ -932,6 +981,14 @@ impl AiPrefs {
             SettingId::AiAutoCompact => self.auto_compact = token != "off",
             SettingId::AiProvider => {
                 self.switch_provider(AiProvider::parse(token).unwrap_or_default());
+            }
+            SettingId::AiModelTools => {
+                let mode = match token {
+                    "on" => ToolsMode::On,
+                    "off" => ToolsMode::Off,
+                    _ => ToolsMode::Auto,
+                };
+                self.set_model_tools(mode);
             }
             _ => {}
         }
@@ -971,8 +1028,69 @@ impl AiPrefs {
             SettingId::AiAutoCompact => self.auto_compact = true,
             SettingId::AiCompactKeep => self.compact_keep = DEFAULT_COMPACT_KEEP,
             SettingId::AiCompactBuffer => self.compact_buffer = DEFAULT_COMPACT_BUFFER,
+            SettingId::AiModelTools => self.set_model_tools(ToolsMode::Auto),
+            SettingId::AiDetected => {
+                let keys = self.detected_keys();
+                for key in &keys {
+                    self.detected.no_tools.remove(key);
+                    self.detected.no_think.remove(key);
+                }
+            }
             _ => {}
         }
+    }
+
+    /// `"<provider> <model>"`, the key of this model's tools mode. `None` without a model.
+    pub fn model_tools_key(&self) -> Option<String> {
+        let model = self.model.trim();
+        (!model.is_empty()).then(|| format!("{} {model}", self.provider.as_str()))
+    }
+
+    /// Native tools for the current model. `Auto` without an entry.
+    pub fn model_tools_mode(&self) -> ToolsMode {
+        self.model_tools_key()
+            .and_then(|key| self.model_tools.get(&key).copied())
+            .unwrap_or_default()
+    }
+
+    /// Sets the current model's tools mode. `Auto` removes the entry.
+    pub fn set_model_tools(&mut self, mode: ToolsMode) {
+        let Some(key) = self.model_tools_key() else {
+            return;
+        };
+        if mode == ToolsMode::Auto {
+            self.model_tools.remove(&key);
+        } else {
+            self.model_tools.insert(key, mode);
+        }
+    }
+
+    /// Saved detection keys that belong to the current server and model (either
+    /// chat URL: Ollama native or `/v1`).
+    pub fn detected_keys(&self) -> Vec<String> {
+        let model = self.model.trim();
+        if model.is_empty() {
+            return Vec::new();
+        }
+        let server = self.endpoint();
+        let mine = [
+            crate::agent::capability_key_for(&server, model, true),
+            crate::agent::capability_key_for(&server, model, false),
+        ];
+        mine.into_iter()
+            .filter(|key| {
+                self.detected.no_tools.contains(key) || self.detected.no_think.contains(key)
+            })
+            .collect()
+    }
+
+    /// `(no tools, no think)` saved for the current server and model.
+    pub fn detected_now(&self) -> (bool, bool) {
+        let keys = self.detected_keys();
+        (
+            keys.iter().any(|key| self.detected.no_tools.contains(key)),
+            keys.iter().any(|key| self.detected.no_think.contains(key)),
+        )
     }
 
     /// True when the context window is a number the user set, or Ollama, which is
@@ -1004,6 +1122,14 @@ impl AiPrefs {
             .ok()
             .filter(|n| (1024..=262_144).contains(n))
             .unwrap_or(16384)
+    }
+}
+
+fn tools_token(mode: ToolsMode) -> &'static str {
+    match mode {
+        ToolsMode::Auto => "auto",
+        ToolsMode::On => "on",
+        ToolsMode::Off => "off",
     }
 }
 
@@ -1596,6 +1722,16 @@ pub fn sections() -> &'static [Section] {
                             id: SettingId::AiThink,
                         },
                         Item {
+                            label: "Model tools",
+                            detail: "Native tools for this model. Auto detects; On always sends them; Off uses the text tool prompt.",
+                            id: SettingId::AiModelTools,
+                        },
+                        Item {
+                            label: "Detected limits",
+                            detail: "What the server said this model cannot do, kept across restarts. Enter forgets it.",
+                            id: SettingId::AiDetected,
+                        },
+                        Item {
                             label: "Context size",
                             detail: "Token window. Sent to Ollama as num_ctx; for every provider the budget auto compact works to. auto = 16384.",
                             id: SettingId::AiContextSize,
@@ -1871,6 +2007,45 @@ mod tests {
         assert_eq!(
             ai.resolved_api_key_with(all),
             (String::new(), KeySource::None)
+        );
+    }
+
+    #[test]
+    fn tools_modes_and_detections_round_trip_and_stay_out_of_an_older_file() {
+        let text = r#"{"ai":{"provider":"ollama","model":"gemma3"}}"#;
+        let file: SettingsFile = serde_json::from_str(text).unwrap();
+        assert!(file.ai.model_tools.is_empty() && file.ai.detected.is_empty());
+        let saved = serde_json::to_string(&file.ai).unwrap();
+        assert!(
+            !saved.contains("model_tools") && !saved.contains("detected"),
+            "{saved}"
+        );
+
+        let mut ai = file.ai;
+        ai.set_model_tools(ToolsMode::On);
+        let key = crate::agent::capability_key_for(&ai.endpoint(), "gemma3", true);
+        assert!(ai.detected.learn(&key, false, true));
+        assert!(!ai.detected.learn(&key, false, true), "already known");
+        let saved = serde_json::to_string(&ai).unwrap();
+        assert!(
+            saved.contains(r#""model_tools":{"ollama gemma3":"on"}"#),
+            "{saved}"
+        );
+        assert!(
+            saved.contains(r#""detected":{"no_think":["http://127.0.0.1:11434/api/chat gemma3"]}"#),
+            "{saved}"
+        );
+        let back: AiPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, ai);
+        assert_eq!(back.detected_now(), (false, true));
+        ai.model = "other".into();
+        assert_eq!(ai.detected_now(), (false, false));
+        ai.model = "gemma3".into();
+        ai.reset(SettingId::AiDetected);
+        assert!(ai.detected.is_empty());
+        assert_eq!(
+            AiPrefs::choice_names(SettingId::AiModelTools),
+            ["Auto", "On", "Off"]
         );
     }
 
