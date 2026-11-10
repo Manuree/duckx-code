@@ -63,6 +63,12 @@ pub enum SettingId {
     AiReferer,
     /// Forget every remembered server and model.
     AiClearRecent,
+    /// Fold older turns into a summary when the prompt nears the context size.
+    AiAutoCompact,
+    /// Tokens of the newest turns auto compact keeps word for word.
+    AiCompactKeep,
+    /// Percent of the context size kept free before auto compact starts.
+    AiCompactBuffer,
 }
 
 /// How a new line is ended. `Auto` keeps the ending detected in the file.
@@ -437,6 +443,12 @@ pub const DEFAULT_TIMEOUT_SECS: u32 = 1800;
 pub const TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 10..=7200;
 pub const DEFAULT_RETRIES: u32 = 3;
 pub const MAX_RETRIES: u32 = 10;
+/// Newest tokens auto compact keeps verbatim, unless the context is too small for that.
+pub const DEFAULT_COMPACT_KEEP: u32 = 15_000;
+pub const COMPACT_KEEP_RANGE: std::ops::RangeInclusive<u32> = 1_000..=200_000;
+/// Percent of the context size left free for the answer before compacting.
+pub const DEFAULT_COMPACT_BUFFER: u32 = 15;
+pub const COMPACT_BUFFER_RANGE: std::ops::RangeInclusive<u32> = 5..=50;
 /// Cap sent to Ollama and LM Studio when Max tokens is blank, as before this setting.
 pub const LOCAL_MAX_TOKENS: u32 = 16384;
 pub const MAX_TOKENS_LIMIT: u32 = 1_000_000;
@@ -495,6 +507,23 @@ pub struct AiPrefs {
     /// The last servers and models, for the list under the Server and Model rows.
     #[serde(default, skip_serializing_if = "AiRecent::is_empty")]
     pub recent: AiRecent,
+    /// Summarize older turns when the prompt would pass the context size minus the buffer.
+    #[serde(default = "enabled")]
+    pub auto_compact: bool,
+    /// Tokens of the newest turns kept word for word when compacting.
+    #[serde(default = "default_compact_keep")]
+    pub compact_keep: u32,
+    /// Percent of the context size kept free before compacting.
+    #[serde(default = "default_compact_buffer")]
+    pub compact_buffer: u32,
+}
+
+fn default_compact_keep() -> u32 {
+    DEFAULT_COMPACT_KEEP
+}
+
+fn default_compact_buffer() -> u32 {
+    DEFAULT_COMPACT_BUFFER
 }
 
 fn default_context_size() -> String {
@@ -536,6 +565,9 @@ impl Default for AiPrefs {
             openrouter_referer: default_referer(),
             profiles: BTreeMap::new(),
             recent: AiRecent::default(),
+            auto_compact: true,
+            compact_keep: DEFAULT_COMPACT_KEEP,
+            compact_buffer: DEFAULT_COMPACT_BUFFER,
         }
     }
 }
@@ -553,6 +585,8 @@ impl AiPrefs {
                 | SettingId::AiRetries
                 | SettingId::AiAppName
                 | SettingId::AiReferer
+                | SettingId::AiCompactKeep
+                | SettingId::AiCompactBuffer
         )
     }
 
@@ -726,6 +760,16 @@ impl AiPrefs {
         self.retries.min(MAX_RETRIES)
     }
 
+    pub fn resolved_compact_keep(&self) -> u32 {
+        self.compact_keep
+            .clamp(*COMPACT_KEEP_RANGE.start(), *COMPACT_KEEP_RANGE.end())
+    }
+
+    pub fn resolved_compact_buffer(&self) -> u32 {
+        self.compact_buffer
+            .clamp(*COMPACT_BUFFER_RANGE.start(), *COMPACT_BUFFER_RANGE.end())
+    }
+
     /// OpenRouter's attribution headers. Other providers get none.
     pub fn extra_headers(&self) -> Vec<(String, String)> {
         if self.provider != AiProvider::OpenRouter {
@@ -746,7 +790,7 @@ impl AiPrefs {
     /// Context size and Thinking only reach Ollama's native API.
     pub fn applies(&self, id: SettingId) -> bool {
         match id {
-            SettingId::AiContextSize | SettingId::AiThink => self.provider == AiProvider::Ollama,
+            SettingId::AiThink => self.provider == AiProvider::Ollama,
             SettingId::AiAppName | SettingId::AiReferer => self.provider == AiProvider::OpenRouter,
             _ => true,
         }
@@ -757,7 +801,8 @@ impl AiPrefs {
             SettingId::AiEnabled
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
-            | SettingId::AiThink => vec!["On".into(), "Off".into()],
+            | SettingId::AiThink
+            | SettingId::AiAutoCompact => vec!["On".into(), "Off".into()],
             SettingId::AiProvider => AiProvider::ALL
                 .iter()
                 .map(|provider| provider.label().to_string())
@@ -772,6 +817,7 @@ impl AiPrefs {
             SettingId::AiAutoApprove => usize::from(!self.auto_approve),
             SettingId::AiStreaming => usize::from(!self.streaming),
             SettingId::AiThink => usize::from(!self.think),
+            SettingId::AiAutoCompact => usize::from(!self.auto_compact),
             SettingId::AiProvider => self.provider.index(),
             _ => 0,
         }
@@ -783,6 +829,7 @@ impl AiPrefs {
             SettingId::AiAutoApprove => on_off(self.auto_approve),
             SettingId::AiStreaming => on_off(self.streaming),
             SettingId::AiThink => on_off(self.think),
+            SettingId::AiAutoCompact => on_off(self.auto_compact),
             SettingId::AiProvider => self.provider.as_str().to_string(),
             _ => String::new(),
         }
@@ -801,6 +848,7 @@ impl AiPrefs {
             SettingId::AiAutoApprove => self.auto_approve = index == 0,
             SettingId::AiStreaming => self.streaming = index == 0,
             SettingId::AiThink => self.think = index == 0,
+            SettingId::AiAutoCompact => self.auto_compact = index == 0,
             SettingId::AiProvider => self.switch_provider(AiProvider::from_index(index)),
             _ => {}
         }
@@ -812,6 +860,7 @@ impl AiPrefs {
             SettingId::AiAutoApprove => self.auto_approve = token != "off",
             SettingId::AiStreaming => self.streaming = token != "off",
             SettingId::AiThink => self.think = token != "off",
+            SettingId::AiAutoCompact => self.auto_compact = token != "off",
             SettingId::AiProvider => {
                 self.switch_provider(AiProvider::parse(token).unwrap_or_default());
             }
@@ -836,11 +885,24 @@ impl AiPrefs {
             SettingId::AiAppName => self.openrouter_app_name = default_app_name(),
             SettingId::AiReferer => self.openrouter_referer = default_referer(),
             SettingId::AiClearRecent => self.recent = AiRecent::default(),
+            SettingId::AiAutoCompact => self.auto_compact = true,
+            SettingId::AiCompactKeep => self.compact_keep = DEFAULT_COMPACT_KEEP,
+            SettingId::AiCompactBuffer => self.compact_buffer = DEFAULT_COMPACT_BUFFER,
             _ => {}
         }
     }
 
     /// Tokens for the prompt window. `auto` / empty / invalid → 16384.
+    /// True when the context window is a number the user set, or Ollama, which is
+    /// sent `num_ctx` and so really uses it. Otherwise the status line shows `?`.
+    pub fn context_size_known(&self) -> bool {
+        let raw = self.context_size.trim();
+        self.provider == AiProvider::Ollama
+            || raw
+                .parse::<u32>()
+                .is_ok_and(|n| (1024..=262_144).contains(&n))
+    }
+
     pub fn resolved_context_size(&self) -> u32 {
         let raw = self.context_size.trim();
         if raw.is_empty() || raw.eq_ignore_ascii_case("auto") {
@@ -1433,8 +1495,23 @@ pub fn sections() -> &'static [Section] {
                         },
                         Item {
                             label: "Context size",
-                            detail: "Ollama only: token window (num_ctx). Default 16384. Type auto or a number.",
+                            detail: "Token window. Sent to Ollama as num_ctx; for every provider the budget auto compact works to. auto = 16384.",
                             id: SettingId::AiContextSize,
+                        },
+                        Item {
+                            label: "Auto compact",
+                            detail: "Near the context size, summarize older turns with the same model and keep the newest ones.",
+                            id: SettingId::AiAutoCompact,
+                        },
+                        Item {
+                            label: "Keep tokens",
+                            detail: "Newest tokens kept word for word when compacting (less on a small context). 1000 to 200000.",
+                            id: SettingId::AiCompactKeep,
+                        },
+                        Item {
+                            label: "Compact buffer",
+                            detail: "Percent of the context size left free for the answer before compacting. 5 to 50.",
+                            id: SettingId::AiCompactBuffer,
                         },
                         Item {
                             label: "OpenRouter app name",
@@ -1578,6 +1655,32 @@ mod tests {
             Some("ctrl+shift+s")
         );
         assert!(!saved.contains("\"keybindings\": {}"));
+    }
+
+    #[test]
+    fn settings_without_compact_keys_load_with_auto_compact_on() {
+        let text = r#"{"ai":{"provider":"ollama","model":"qwen3:8b","context_size":"8192"}}"#;
+        let file: SettingsFile = serde_json::from_str(text).unwrap();
+        assert!(file.ai.auto_compact);
+        assert_eq!(file.ai.compact_keep, DEFAULT_COMPACT_KEEP);
+        assert_eq!(file.ai.compact_buffer, DEFAULT_COMPACT_BUFFER);
+        let mut ai = file.ai;
+        ai.auto_compact = false;
+        ai.compact_keep = 4_000;
+        ai.compact_buffer = 25;
+        let back: AiPrefs = serde_json::from_str(&serde_json::to_string(&ai).unwrap()).unwrap();
+        assert_eq!(back, ai);
+        ai.compact_keep = 5;
+        ai.compact_buffer = 99;
+        assert_eq!(ai.resolved_compact_keep(), *COMPACT_KEEP_RANGE.start());
+        assert_eq!(ai.resolved_compact_buffer(), *COMPACT_BUFFER_RANGE.end());
+        assert!(ai.applies(SettingId::AiContextSize));
+        ai.switch_provider(AiProvider::OpenRouter);
+        assert!(
+            ai.applies(SettingId::AiContextSize),
+            "the compact budget everywhere"
+        );
+        assert!(ai.applies(SettingId::AiAutoCompact));
     }
 
     #[test]

@@ -840,7 +840,7 @@ mod tests {
         assert!(screen.contains("duckx-code · OpenRouter only"), "{screen}");
         app.ai.switch_provider(AiProvider::OpenRouter);
         let screen = draw(&app, 110, 40);
-        assert!(screen.contains("16384 · Ollama only"), "{screen}");
+        assert!(!screen.contains("16384 · Ollama only"), "{screen}");
         assert!(screen.contains("On · Ollama only"), "{screen}");
         assert!(!screen.contains("· OpenRouter only"), "{screen}");
         assert!(screen.contains("OpenRouter ▾"), "{screen}");
@@ -1399,6 +1399,90 @@ mod tests {
         assert!(status.find("master") < status.find("DESIGN.md"));
         assert!(status.find("8%") < status.find("4 LF"));
         assert!(!status.contains("[+]"));
+    }
+
+    fn agent_status(width: u16, used: u32, limit: &str) -> (App, String) {
+        let mut app = App::new(Buffer::new(), None);
+        app.ai.context_size = limit.into();
+        app.agent.open = true;
+        app.agent.focused = true;
+        app.agent.context_used = Some((used, true));
+        let screen = draw(&app, width, 12);
+        let status = screen.lines().last().unwrap().to_string();
+        (app, status)
+    }
+
+    #[test]
+    fn the_agent_status_line_shows_context_use_before_the_position() {
+        let (_, status) = agent_status(110, 12_400, "32768");
+        assert!(status.contains(" ctx 12.4k/32k 37% "), "{status:?}");
+        assert!(status.find("ctx") < status.find("1:1"), "{status:?}");
+        assert!(status.contains("4 LF UTF-8"), "{status:?}");
+        let mut app = App::new(Buffer::new(), None);
+        let status = draw(&app, 110, 12).lines().last().unwrap().to_string();
+        assert!(!status.contains("ctx"), "no session, no gauge: {status:?}");
+        app.agent.open = true;
+        app.agent.focused = true;
+        let status = draw(&app, 110, 12).lines().last().unwrap().to_string();
+        assert!(
+            status.contains(" ctx "),
+            "an estimate before the first turn: {status:?}"
+        );
+    }
+
+    #[test]
+    fn context_use_turns_warning_then_error_colored() {
+        let color = |used: u32| {
+            let (app, _) = agent_status(110, used, "10000");
+            let mut terminal = Terminal::new(TestBackend::new(110, 12)).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let row: String = (0..110)
+                .map(|x| buffer[(x, 11)].symbol().to_string())
+                .collect();
+            let x = row.find("ctx").unwrap();
+            let x = row[..x].chars().count() as u16;
+            (buffer[(x, 11)].fg, *app.styles())
+        };
+        let (fg, theme) = color(5_000);
+        assert_eq!(Some(fg), theme.status_c.fg);
+        let (fg, theme) = color(7_500);
+        assert_eq!(fg, theme.diagnostic_warning);
+        let (fg, theme) = color(9_500);
+        assert_eq!(fg, theme.diagnostic_error);
+    }
+
+    #[test]
+    fn a_narrow_status_line_shortens_then_drops_context_use() {
+        let (_, wide) = agent_status(110, 900, "auto");
+        assert!(wide.contains(" ctx 900/16k 5% "), "{wide:?}");
+        let (_, short) = agent_status(60, 900, "auto");
+        assert!(
+            short.contains(" 900/16k ") && !short.contains("ctx"),
+            "{short:?}"
+        );
+        assert!(short.contains("4 LF UTF-8"), "{short:?}");
+        let (_, narrow) = agent_status(52, 900, "auto");
+        assert!(!narrow.contains("900/"), "{narrow:?}");
+        assert!(narrow.contains("4 LF UTF-8"), "{narrow:?}");
+        assert!(narrow.contains("AGENT"), "{narrow:?}");
+    }
+
+    #[test]
+    fn token_counts_read_short() {
+        use super::status_bar::{context_text, short_tokens};
+        assert_eq!(short_tokens(950), "950");
+        assert_eq!(short_tokens(12_400), "12.4k");
+        assert_eq!(short_tokens(32_768), "32k");
+        assert_eq!(short_tokens(131_072), "128k");
+        assert_eq!(short_tokens(150_400), "150k");
+        assert_eq!(short_tokens(2_000), "2k");
+        assert_eq!(
+            context_text(1_200, None, 40).as_deref(),
+            Some(" ctx 1.2k/? ")
+        );
+        assert_eq!(context_text(1_200, None, 9).as_deref(), Some(" 1.2k/? "));
+        assert_eq!(context_text(1_200, None, 3), None);
     }
 
     #[test]

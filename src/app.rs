@@ -2866,6 +2866,8 @@ impl App {
             SettingId::AiRetries => self.ai.resolved_retries().to_string(),
             SettingId::AiAppName => self.ai.openrouter_app_name.clone(),
             SettingId::AiReferer => self.ai.openrouter_referer.clone(),
+            SettingId::AiCompactKeep => self.ai.resolved_compact_keep().to_string(),
+            SettingId::AiCompactBuffer => self.ai.resolved_compact_buffer().to_string(),
             _ => return,
         };
         if let Some(page) = self.settings.as_mut() {
@@ -3003,6 +3005,42 @@ impl App {
             }
             SettingId::AiAppName => put(&mut self.ai.openrouter_app_name, value),
             SettingId::AiReferer => put(&mut self.ai.openrouter_referer, value),
+            SettingId::AiCompactKeep => {
+                use crate::settings::{COMPACT_KEEP_RANGE, DEFAULT_COMPACT_KEEP};
+                let keep = if value.is_empty() {
+                    DEFAULT_COMPACT_KEEP
+                } else {
+                    match value.replace(['_', ','], "").parse::<u32>() {
+                        Ok(n) if COMPACT_KEEP_RANGE.contains(&n) => n,
+                        _ => {
+                            return Err(format!(
+                                "Keep tokens is {} to {}",
+                                COMPACT_KEEP_RANGE.start(),
+                                COMPACT_KEEP_RANGE.end()
+                            ));
+                        }
+                    }
+                };
+                put(&mut self.ai.compact_keep, keep)
+            }
+            SettingId::AiCompactBuffer => {
+                use crate::settings::{COMPACT_BUFFER_RANGE, DEFAULT_COMPACT_BUFFER};
+                let buffer = if value.is_empty() {
+                    DEFAULT_COMPACT_BUFFER
+                } else {
+                    match value.trim_end_matches('%').trim().parse::<u32>() {
+                        Ok(n) if COMPACT_BUFFER_RANGE.contains(&n) => n,
+                        _ => {
+                            return Err(format!(
+                                "Compact buffer is {} to {} percent",
+                                COMPACT_BUFFER_RANGE.start(),
+                                COMPACT_BUFFER_RANGE.end()
+                            ));
+                        }
+                    }
+                };
+                put(&mut self.ai.compact_buffer, buffer)
+            }
             _ => false,
         })
     }
@@ -3033,7 +3071,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => {
+            | SettingId::AiThink
+            | SettingId::AiAutoCompact) => {
                 self.ai.set_choice(id, index);
             }
             SettingId::AiServer
@@ -3046,6 +3085,8 @@ impl App {
             | SettingId::AiAppName
             | SettingId::AiReferer
             | SettingId::AiClearRecent
+            | SettingId::AiCompactKeep
+            | SettingId::AiCompactBuffer
             | SettingId::Binding(_) => return,
         }
         if let Some(menu) = self.settings.as_mut().and_then(|page| page.menu.as_mut()) {
@@ -3079,7 +3120,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => {
+            | SettingId::AiThink
+            | SettingId::AiAutoCompact) => {
                 self.ai.restore_choice(id, origin);
             }
             SettingId::AiServer
@@ -3092,6 +3134,8 @@ impl App {
             | SettingId::AiAppName
             | SettingId::AiReferer
             | SettingId::AiClearRecent
+            | SettingId::AiCompactKeep
+            | SettingId::AiCompactBuffer
             | SettingId::Binding(_) => {}
         }
     }
@@ -3115,7 +3159,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => self.ai.choice_token(id),
+            | SettingId::AiThink
+            | SettingId::AiAutoCompact) => self.ai.choice_token(id),
             SettingId::AiServer
             | SettingId::AiModel
             | SettingId::AiApiKey
@@ -3126,6 +3171,8 @@ impl App {
             | SettingId::AiAppName
             | SettingId::AiReferer
             | SettingId::AiClearRecent
+            | SettingId::AiCompactKeep
+            | SettingId::AiCompactBuffer
             | SettingId::Binding(_) => String::new(),
         }
     }
@@ -3165,7 +3212,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => (
+            | SettingId::AiThink
+            | SettingId::AiAutoCompact) => (
                 self.ai.choice_index(id),
                 self.ai.choice_token(id),
                 AiPrefs::choice_names(id).len(),
@@ -3180,6 +3228,8 @@ impl App {
             | SettingId::AiAppName
             | SettingId::AiReferer
             | SettingId::AiClearRecent
+            | SettingId::AiCompactKeep
+            | SettingId::AiCompactBuffer
             | SettingId::Binding(_) => return None,
         };
         Some((index, token, len))
@@ -3267,7 +3317,10 @@ impl App {
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
-            | SettingId::AiClearRecent) => self.ai.reset(id),
+            | SettingId::AiClearRecent
+            | SettingId::AiCompactKeep
+            | SettingId::AiCompactBuffer
+            | SettingId::AiAutoCompact) => self.ai.reset(id),
         }
     }
 
@@ -10717,6 +10770,9 @@ mod tests {
                 "Auto-approve tools",
                 "Thinking",
                 "Context size",
+                "Auto compact",
+                "Keep tokens",
+                "Compact buffer",
                 "OpenRouter app name",
                 "OpenRouter referer",
                 "Clear recent history",
@@ -10731,6 +10787,42 @@ mod tests {
             let choices = !crate::settings::AiPrefs::choice_names(item.id).is_empty();
             assert!(text != choices, "{} is either typed or picked", item.label);
         }
+    }
+
+    #[test]
+    fn keep_tokens_and_compact_buffer_are_typed_and_checked() {
+        use crate::settings::SettingId;
+        let mut app = App::new(Buffer::new(), None);
+        let retype = |app: &mut App, text: &str| {
+            for _ in 0..12 {
+                settings(app, SettingsAction::DeleteChar);
+            }
+            settings(app, SettingsAction::Insert(text.into()));
+            settings(app, SettingsAction::Enter);
+        };
+        ai_row(&mut app, SettingId::AiCompactKeep);
+        settings(&mut app, SettingsAction::Enter);
+        retype(&mut app, "8_000");
+        assert_eq!(app.ai.compact_keep, 8_000);
+        settings(&mut app, SettingsAction::Enter);
+        retype(&mut app, "12");
+        assert_eq!(app.ai.compact_keep, 8_000);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Keep tokens is 1000 to 200000")
+        );
+        settings(&mut app, SettingsAction::Back);
+        ai_row(&mut app, SettingId::AiCompactBuffer);
+        settings(&mut app, SettingsAction::Enter);
+        retype(&mut app, "20%");
+        assert_eq!(app.ai.compact_buffer, 20);
+        settings(&mut app, SettingsAction::Enter);
+        retype(&mut app, "80");
+        assert_eq!(app.ai.compact_buffer, 20);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Compact buffer is 5 to 50 percent")
+        );
     }
 
     #[test]
@@ -10865,13 +10957,10 @@ mod tests {
         settings(&mut app, SettingsAction::Enter);
         assert!(app.settings.as_ref().unwrap().text.is_some());
         settings(&mut app, SettingsAction::Back);
+        // Context size is the auto compact budget for every provider.
         ai_row(&mut app, SettingId::AiContextSize);
         settings(&mut app, SettingsAction::Enter);
-        assert!(app.settings.as_ref().unwrap().text.is_none());
-        assert_eq!(
-            app.message.as_deref(),
-            Some("Only used when the provider is Ollama")
-        );
+        assert!(app.settings.as_ref().unwrap().text.is_some());
     }
 
     #[test]

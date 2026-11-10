@@ -28,6 +28,33 @@ pub struct Reply {
     pub message: Value,
     /// True when this completion retried after flattening poisoned tool history.
     pub history_flattened: bool,
+    /// Tokens the server says the request and answer used (`usage`, or Ollama's
+    /// `prompt_eval_count` + `eval_count`). `None` when it did not say.
+    pub usage: Option<u32>,
+}
+
+/// Context tokens a response reports: OpenAI `usage.total_tokens` (or prompt +
+/// completion), or Ollama `prompt_eval_count` + `eval_count`.
+pub fn usage_of(value: &Value) -> Option<u32> {
+    let number = |pointer: &str| value.pointer(pointer).and_then(Value::as_u64);
+    let total = number("/usage/total_tokens").or_else(|| {
+        let prompt = number("/usage/prompt_tokens")?;
+        Some(prompt + number("/usage/completion_tokens").unwrap_or(0))
+    });
+    let total = total.or_else(|| {
+        let prompt = number("/prompt_eval_count")?;
+        Some(prompt + number("/eval_count").unwrap_or(0))
+    })?;
+    u32::try_from(total).ok().filter(|tokens| *tokens > 0)
+}
+
+/// `usage_of` for one SSE line, parsed only when it mentions usage.
+fn sse_usage(line: &str) -> Option<u32> {
+    if !line.contains("\"usage\"") {
+        return None;
+    }
+    let data = line.trim().strip_prefix("data:")?.trim();
+    usage_of(&serde_json::from_str(data).ok()?)
 }
 
 /// Streamed piece: visible answer text, or reasoning for the title only.
@@ -599,6 +626,7 @@ fn reply_from_parts(content: String, thinking: String, calls: Vec<ToolCall>) -> 
         calls,
         message,
         history_flattened: false,
+        usage: None,
     }
 }
 
@@ -1816,6 +1844,81 @@ fn fatal_stream_status(status: reqwest::StatusCode) -> bool {
     !capability_status(status) && !status.is_success()
 }
 
+/// Asks for a summary of the conversation in `transcript` and returns its text.
+/// One plain request: no tools, no streaming, no thinking. Ollama native gets
+/// `num_ctx`; everything else gets the usual OpenAI body. Used by auto compact.
+pub async fn summarize(
+    client: &reqwest::Client,
+    server: &str,
+    model: &str,
+    transcript: &str,
+    options: CompleteOptions<'_>,
+) -> Result<String, String> {
+    let messages = vec![
+        json!({"role": "system", "content": SUMMARY_PROMPT}),
+        json!({"role": "user", "content": transcript}),
+    ];
+    let native = options.ollama_native;
+    let url = if native {
+        ollama_chat_url(server)
+    } else {
+        completions_url(server)
+    };
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": false,
+        "temperature": 0.2,
+    });
+    if native {
+        let mut extra = serde_json::Map::new();
+        if let Some(num_ctx) = options.num_ctx {
+            extra.insert("num_ctx".into(), json!(num_ctx));
+        }
+        extra.insert("temperature".into(), json!(0.2));
+        body["options"] = Value::Object(extra);
+        body.as_object_mut()
+            .map(|object| object.remove("temperature"));
+        body["think"] = json!(false);
+    } else if let Some(max) = options.tuning.max_tokens {
+        body["max_tokens"] = json!(max.min(SUMMARY_MAX_TOKENS));
+    }
+    let tuning = options.tuning;
+    let api_key = options.api_key;
+    let response = send_with_retry(
+        || prepare(client.post(&url).json(&body), api_key, tuning),
+        &url,
+        tuning,
+    )
+    .await?;
+    let status = response.status();
+    let text = response.text().await.map_err(|err| http_err(&url, err))?;
+    if !status.is_success() {
+        return Err(status_error(status, &text));
+    }
+    let value: Value =
+        serde_json::from_str(&text).map_err(|err| format!("Bad summary reply: {err}"))?;
+    if let Some(problem) = stream_error(&value) {
+        return Err(problem);
+    }
+    let content = value
+        .pointer("/choices/0/message/content")
+        .or_else(|| value.pointer("/message/content"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let (content, _) = split_think_tags(content);
+    if content.trim().is_empty() {
+        return Err("The summary came back empty".to_string());
+    }
+    Ok(content.trim().to_string())
+}
+
+/// What the model is asked to keep when older turns are folded into a summary.
+pub const SUMMARY_PROMPT: &str = "You compact a coding assistant's conversation so it can continue with less context. Write a short summary of the conversation below: the user's goals and constraints, decisions made, files read or changed (with paths), tool results that still matter, errors seen, and what was about to happen next. Plain text or short bullets, no preamble, at most 400 words. Do not call tools.";
+
+/// Upper bound for a summary answer on providers that take `max_tokens`.
+const SUMMARY_MAX_TOKENS: u32 = 2048;
+
 pub async fn complete(
     client: &reqwest::Client,
     server: &str,
@@ -1950,6 +2053,9 @@ async fn complete_once(
             parse_reply(&text)?
         };
         reply.history_flattened = flattened;
+        reply.usage = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|value| usage_of(&value));
         return Ok(reply);
     }
 }
@@ -2024,6 +2130,7 @@ where
     };
     // Stash flattened flag for after assembly.
     let history_flattened = flattened;
+    let mut usage: Option<u32> = None;
     let mut assembler = StreamAssembler::default();
     let mut think_split = ContentThinkSplit::default();
     // Byte buffer so a multi-byte UTF-8 char split across TCP chunks is not lossy-decoded.
@@ -2084,6 +2191,9 @@ where
             if line.ends_with('\r') {
                 line.pop();
             }
+            if let Some(tokens) = sse_usage(&line) {
+                usage = Some(tokens);
+            }
             let Some(delta) = sse_event(&line)? else {
                 continue;
             };
@@ -2131,6 +2241,7 @@ where
     }
     let mut reply = assembler.into_reply()?;
     reply.history_flattened = history_flattened;
+    reply.usage = usage;
     if hold_deltas {
         if reply.calls.is_empty() {
             if !held.is_empty() {
@@ -2220,6 +2331,7 @@ where
         });
     };
     let history_flattened = flattened;
+    let mut usage: Option<u32> = None;
     let mut content = String::new();
     let mut thinking = String::new();
     let mut tool_calls = Value::Null;
@@ -2257,6 +2369,9 @@ where
                 return Err(StreamFailure::Fatal(error));
             }
             saw_event = true;
+            if let Some(tokens) = usage_of(&value) {
+                usage = Some(tokens);
+            }
             if let Some(message) = value.get("message") {
                 for key in ["thinking", "reasoning", "reasoning_content"] {
                     if let Some(piece) = message.get(key).and_then(|v| v.as_str()) {
@@ -2328,6 +2443,7 @@ where
     }
     let mut reply = reply_from_parts(content, thinking, calls);
     reply.history_flattened = history_flattened;
+    reply.usage = usage;
     if hold_deltas {
         if reply.calls.is_empty() {
             if !held.is_empty() {
@@ -3876,5 +3992,87 @@ mod tests {
 
     fn ok_json_raw(body: &str) -> String {
         http("200 OK", "application/json", "", body)
+    }
+
+    #[test]
+    fn usage_reads_openai_and_ollama_counts() {
+        assert_eq!(
+            usage_of(&json!({"usage": {"prompt_tokens": 900, "completion_tokens": 100}})),
+            Some(1000)
+        );
+        assert_eq!(usage_of(&json!({"usage": {"total_tokens": 42}})), Some(42));
+        assert_eq!(
+            usage_of(&json!({"prompt_eval_count": 300, "eval_count": 20, "done": true})),
+            Some(320)
+        );
+        assert_eq!(usage_of(&json!({"choices": []})), None);
+        assert_eq!(
+            sse_usage(r#"data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#),
+            Some(10)
+        );
+        assert_eq!(sse_usage(r#"data: {"choices":[{"delta":{}}]}"#), None);
+    }
+
+    #[tokio::test]
+    async fn a_completion_carries_the_usage_the_server_reported() {
+        let (url, server) = spawn_rounds(1, |_, _| {
+            ok_json_raw(
+                r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":120,"completion_tokens":5}}"#,
+            )
+        });
+        let client = reqwest::Client::new();
+        let messages = [json!({"role":"user","content":"hi"})];
+        let reply = complete(&client, &url, "m", &messages, CompleteOptions::default())
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply.usage, Some(125));
+    }
+
+    #[tokio::test]
+    async fn summarize_sends_one_plain_request_and_returns_the_text() {
+        let (url, server) = spawn_rounds(1, |_, _| {
+            ok_json("<think>hm</think>User is fixing the parser.")
+        });
+        let client = reqwest::Client::new();
+        let summary = summarize(
+            &client,
+            &url,
+            "m",
+            "user: fix the parser",
+            CompleteOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary, "User is fixing the parser.");
+        let seen = server.join().unwrap();
+        let body = body_of(&seen[0]);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["content"], "user: fix the parser");
+        assert!(body.get("tools").is_none(), "{body}");
+        assert_ne!(body["stream"], json!(true), "{body}");
+    }
+
+    #[tokio::test]
+    async fn summarize_reports_a_server_error_instead_of_an_empty_summary() {
+        let (url, server) = spawn_rounds(1, |_, _| {
+            http(
+                "400 Bad Request",
+                "application/json",
+                "",
+                r#"{"error":{"message":"context too long"}}"#,
+            )
+        });
+        let client = reqwest::Client::new();
+        let tuning = quick(0);
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let err = summarize(&client, &url, "m", "user: hi", options)
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(err.contains("context too long"), "{err}");
     }
 }

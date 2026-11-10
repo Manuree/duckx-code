@@ -28,6 +28,19 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             right = Line::default();
         }
     }
+    if app.command_bar.is_none()
+        && app.pane_select.is_none()
+        && let Some((used, limit)) = app.context_gauge()
+    {
+        // Only when it fits beside everything else: the long form, else the short one.
+        let left_width = Line::from(left_line(app, area.width as usize).0).width();
+        let room = (area.width as usize).saturating_sub(left_width + right.width() + 1);
+        if let Some(text) = context_text(used, limit, room) {
+            let mut spans = vec![Span::styled(text, context_style(app, used, limit))];
+            spans.append(&mut right.spans);
+            right = Line::from(spans);
+        }
+    }
     let right_width = (right.width() as u16).min(area.width);
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
@@ -416,6 +429,52 @@ fn right_spans(app: &App) -> Vec<Span<'static>> {
         theme.status_a,
     ));
     spans
+}
+
+/// `12.4k`; a limit that is a multiple of 1024 reads as `32k`, the way models list it.
+pub(crate) fn short_tokens(tokens: u32) -> String {
+    if tokens < 1000 {
+        return tokens.to_string();
+    }
+    if tokens.is_multiple_of(1024) {
+        return format!("{}k", tokens / 1024);
+    }
+    if tokens >= 100_000 {
+        return format!("{}k", (tokens + 500) / 1000);
+    }
+    let tenths = (tokens + 50) / 100;
+    if tenths.is_multiple_of(10) {
+        format!("{}k", tenths / 10)
+    } else {
+        format!("{}.{}k", tenths / 10, tenths % 10)
+    }
+}
+
+/// ` ctx 12.4k/32k 38% `, or ` 12.4k/32k ` when that is all `room` allows, or nothing.
+pub(crate) fn context_text(used: u32, limit: Option<u32>, room: usize) -> Option<String> {
+    let limit_text = limit.map_or_else(|| "?".to_string(), short_tokens);
+    let pair = format!("{}/{limit_text}", short_tokens(used));
+    let long = match limit {
+        Some(limit) if limit > 0 => {
+            format!(" ctx {pair} {}% ", u64::from(used) * 100 / u64::from(limit))
+        }
+        _ => format!(" ctx {pair} "),
+    };
+    let short = format!(" {pair} ");
+    [long, short].into_iter().find(|text| text.width() <= room)
+}
+
+/// Normal below 70 % of the limit, warning to 90 %, error from there on.
+fn context_style(app: &App, used: u32, limit: Option<u32>) -> Style {
+    let theme = *app.styles();
+    let percent = limit
+        .filter(|limit| *limit > 0)
+        .map_or(0, |limit| u64::from(used) * 100 / u64::from(limit));
+    match percent {
+        90.. => theme.status_c.fg(theme.diagnostic_error),
+        70.. => theme.status_c.fg(theme.diagnostic_warning),
+        _ => theme.status_c,
+    }
 }
 
 /// Indent the next Tab inserts, the line ending new breaks use, then the file encoding.

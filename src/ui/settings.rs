@@ -349,7 +349,8 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         | SettingId::AiAutoApprove
         | SettingId::AiStreaming
         | SettingId::AiProvider
-        | SettingId::AiThink) => {
+        | SettingId::AiThink
+        | SettingId::AiAutoCompact) => {
             format!("{} {mark}", app.ai.choice_label(id))
         }
         SettingId::AiServer => {
@@ -396,6 +397,8 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         },
         SettingId::AiAppName => text_or_none(&app.ai.openrouter_app_name),
         SettingId::AiReferer => text_or_none(&app.ai.openrouter_referer),
+        SettingId::AiCompactKeep => format!("{} tokens", app.ai.resolved_compact_keep()),
+        SettingId::AiCompactBuffer => format!("{} %", app.ai.resolved_compact_buffer()),
     }
 }
 
@@ -526,7 +529,8 @@ fn paint_menu(
         | SettingId::AiAutoApprove
         | SettingId::AiStreaming
         | SettingId::AiProvider
-        | SettingId::AiThink) => crate::settings::AiPrefs::choice_names(id),
+        | SettingId::AiThink
+        | SettingId::AiAutoCompact) => crate::settings::AiPrefs::choice_names(id),
         SettingId::AiServer
         | SettingId::AiModel
         | SettingId::AiApiKey
@@ -537,6 +541,8 @@ fn paint_menu(
         | SettingId::AiAppName
         | SettingId::AiReferer
         | SettingId::AiClearRecent
+        | SettingId::AiCompactKeep
+        | SettingId::AiCompactBuffer
         | SettingId::Binding(_) => return,
     };
     if names.is_empty() {

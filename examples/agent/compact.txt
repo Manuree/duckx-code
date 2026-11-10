@@ -1,0 +1,11 @@
+# Long chats fold themselves. Open the assistant with F6 and keep talking.
+# Settings -> AI -> Auto compact is On by default.
+# When the next request would pass Context size less Compact buffer (15 %),
+# older turns become one short summary written by the same model.
+# The newest Keep tokens (15000, or less for a small window) stay word for word.
+# A tool call and its result always stay together.
+# The transcript says "Compacted 12 older messages into a summary".
+# Type /compact to fold everything before the latest turn right now.
+# /new forgets the summary with the rest of the chat.
+# The status line shows ctx 12.4k/32k 37% while the assistant is focused.
+# It turns the warning color at 70 % and the error color at 90 %.

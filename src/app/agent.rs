@@ -15,6 +15,11 @@ const MEMORY_BUDGET: usize = 2_500;
 const MEMORY_TOOL_CLIP: usize = 180;
 /// Conservative chars/token for Thai/CJK-heavy prompts.
 const CHARS_PER_TOKEN: f64 = 3.5;
+/// With auto compact on, memory holds this many characters before the oldest
+/// messages fall off without a summary. Compaction normally folds them first.
+const MEMORY_STORE: usize = 1_000_000;
+/// Longest summary kept, in characters.
+const SUMMARY_CLIP: usize = 12_000;
 
 impl App {
     /// Next frame of the wait spinner. Idle turns stay on the current frame.
@@ -33,6 +38,9 @@ impl App {
                 self.agent.stream_draft = None;
                 self.agent.thinking_draft = None;
                 self.remember_assistant(&text);
+                if !matches!(self.agent.context_used, Some((_, true))) {
+                    self.agent.context_used = Some((self.estimate_context(""), false));
+                }
                 self.push_line(false, text);
                 self.remember_working_target();
                 self.agent.busy = false;
@@ -80,6 +88,47 @@ impl App {
                     return;
                 }
                 self.agent.memory.clear();
+            }
+            AgentEvent::Compacted {
+                id,
+                summary,
+                dropped,
+            } => {
+                if id != self.agent.turn {
+                    return;
+                }
+                match summary {
+                    Ok(text) => {
+                        let text = clip(text.trim(), SUMMARY_CLIP);
+                        let tokens = estimate_tokens(&text);
+                        self.agent.summary = Some(text);
+                        self.push_line(
+                            false,
+                            format!(
+                                "Compacted {dropped} older messages into a summary (~{tokens} tokens)."
+                            ),
+                        );
+                    }
+                    Err(err) => self.push_line(
+                        false,
+                        format!(
+                            "Auto compact could not summarize ({}); dropped {dropped} older messages instead.",
+                            clip(&err, 120)
+                        ),
+                    ),
+                }
+                if self.agent.compacting.take().is_some() {
+                    self.agent.busy = false;
+                    self.agent.busy_started = None;
+                    self.agent.status = "ready".to_string();
+                }
+                self.agent.context_used = Some((self.estimate_context(""), false));
+            }
+            AgentEvent::Usage { id, tokens } => {
+                if id != self.agent.turn {
+                    return;
+                }
+                self.agent.context_used = Some((tokens, true));
             }
             AgentEvent::Tool {
                 id,
@@ -310,6 +359,8 @@ impl App {
         self.agent.pending = None;
         self.agent.session_allow.clear();
         self.agent.memory.clear();
+        self.agent.summary = None;
+        self.agent.context_used = None;
         self.agent.transcript.clear();
         self.agent.stream_draft = None;
         self.agent.thinking_draft = None;
@@ -366,7 +417,27 @@ impl App {
             self.tool_state()
         );
         self.remember_user(&model_prompt);
-        let history = budget_memory(&self.agent.memory, ctx, &model_prompt);
+        let (history, compact) = if self.ai.auto_compact {
+            let (history, split) = compact_plan(
+                &self.agent.memory,
+                ctx,
+                self.ai.resolved_compact_buffer(),
+                self.ai.resolved_compact_keep(),
+                &model_prompt,
+                self.agent.summary.as_deref(),
+            );
+            let older = (split > 0).then(|| {
+                self.agent
+                    .memory
+                    .drain(..split)
+                    .map(|message| sanitize_memory_message(&message))
+                    .collect::<Vec<_>>()
+            });
+            (history, older)
+        } else {
+            (budget_memory(&self.agent.memory, ctx, &model_prompt), None)
+        };
+        let compacting = compact.is_some();
         self.agent.prompt.clear();
         self.agent.cursor = 0;
         self.agent.anchor = 0;
@@ -374,7 +445,15 @@ impl App {
         self.agent.busy_started = Some(std::time::Instant::now());
         self.agent.stream_draft = None;
         self.agent.thinking_draft = None;
-        self.agent.status = "waiting".to_string();
+        self.agent.status = if compacting {
+            "compacting".to_string()
+        } else {
+            "waiting".to_string()
+        };
+        self.agent.context_used = Some((
+            estimate_request(self.agent.summary.as_deref(), &history, &model_prompt),
+            false,
+        ));
         let ollama_native = self.ai.provider == crate::settings::AiProvider::Ollama;
         let (api_key, _) = self.ai.resolved_api_key();
         self.agent_target = Some((
@@ -394,6 +473,93 @@ impl App {
             tuning: ai_tuning(&self.ai),
             history,
             prompt: model_prompt,
+            summary: self.agent.summary.clone(),
+            compact,
+        });
+    }
+
+    /// `(used, limit)` for the status line's `ctx` segment: while the assistant is
+    /// focused, or open with a session going. `limit` is `None` when unknown.
+    pub fn context_gauge(&self) -> Option<(u32, Option<u32>)> {
+        let session = self.agent.context_used.is_some();
+        if !(self.agent.open && (self.agent.focused || session)) {
+            return None;
+        }
+        let used = match self.agent.context_used {
+            Some((tokens, _)) => tokens,
+            None => self.estimate_context(&self.agent.prompt.to_string()),
+        };
+        let limit = self
+            .ai
+            .context_size_known()
+            .then(|| self.ai.resolved_context_size());
+        Some((used, limit))
+    }
+
+    /// Context tokens the next request would use, by the same estimate auto compact uses.
+    pub(crate) fn estimate_context(&self, prompt: &str) -> u32 {
+        let mut history: Vec<_> = self
+            .agent
+            .memory
+            .iter()
+            .map(sanitize_memory_message)
+            .collect();
+        reconcile_tool_pairs(&mut history);
+        estimate_request(self.agent.summary.as_deref(), &history, prompt)
+    }
+
+    /// `/compact`: fold everything before the latest turn into a summary now.
+    fn compact_now(&mut self) {
+        let before = self.agent.memory.len();
+        let Some(split) = self
+            .agent
+            .memory
+            .iter()
+            .rposition(|message| message.get("role").and_then(|r| r.as_str()) == Some("user"))
+            .filter(|split| *split > 0)
+        else {
+            self.push_line(false, "Nothing to compact yet.".to_string());
+            return;
+        };
+        let tx = self.agent_tx.clone();
+        let Some(tx) = tx.filter(|_| self.ai.enabled && !self.ai.model.trim().is_empty()) else {
+            // No model to summarize with: plain truncation, as before.
+            self.agent.memory.drain(..split);
+            reconcile_tool_pairs(&mut self.agent.memory);
+            self.push_line(
+                false,
+                format!(
+                    "Compacted history ({} → {} messages, no model to summarize).",
+                    before,
+                    self.agent.memory.len()
+                ),
+            );
+            self.agent.context_used = Some((self.estimate_context(""), false));
+            return;
+        };
+        let older: Vec<_> = self
+            .agent
+            .memory
+            .drain(..split)
+            .map(|message| sanitize_memory_message(&message))
+            .collect();
+        reconcile_tool_pairs(&mut self.agent.memory);
+        self.agent.turn = self.agent.turn.saturating_add(1);
+        self.agent.compacting = Some(older.len());
+        self.agent.busy = true;
+        self.agent.busy_started = Some(std::time::Instant::now());
+        self.agent.status = "compacting".to_string();
+        let (api_key, _) = self.ai.resolved_api_key();
+        let _ = tx.send(AgentCommand::Compact {
+            id: self.agent.turn,
+            server: self.ai.endpoint(),
+            model: self.ai.model.trim().to_string(),
+            api_key,
+            num_ctx: Some(self.ai.resolved_context_size()),
+            ollama_native: self.ai.provider == crate::settings::AiProvider::Ollama,
+            tuning: ai_tuning(&self.ai),
+            summary: self.agent.summary.clone(),
+            older,
         });
     }
 
@@ -403,6 +569,7 @@ impl App {
         self.agent.busy = false;
         self.agent.busy_started = None;
         self.agent.pending = None;
+        self.agent.compacting = None;
         self.agent.stream_draft = None;
         self.agent.thinking_draft = None;
         self.agent.status = "ready".to_string();
@@ -1058,22 +1225,7 @@ impl App {
                     self.push_line(false, "No previous prompt to retry.".into());
                 }
             }
-            "compact" => {
-                let before = self.agent.memory.len();
-                let keep = 4.min(before);
-                if before > keep {
-                    let drain = before - keep;
-                    self.agent.memory.drain(0..drain);
-                }
-                self.push_line(
-                    false,
-                    format!(
-                        "Compacted history ({} → {} messages).",
-                        before,
-                        self.agent.memory.len()
-                    ),
-                );
-            }
+            "compact" => self.compact_now(),
             "settings" => {
                 self.close_picker();
                 self.about = false;
@@ -1481,12 +1633,22 @@ impl App {
         self.refresh_agent_popup();
     }
 
+    /// Characters memory keeps: small without auto compact, as before; large with it.
+    fn memory_cap(&self) -> usize {
+        if self.ai.auto_compact {
+            MEMORY_STORE
+        } else {
+            MEMORY_BUDGET
+        }
+    }
+
     fn remember_user(&mut self, content: &str) {
         self.agent.memory.push(serde_json::json!({
             "role": "user",
             "content": clip(content, MEMORY_BUDGET)
         }));
-        trim_memory(&mut self.agent.memory);
+        let cap = self.memory_cap();
+        trim_memory(&mut self.agent.memory, cap);
     }
 
     fn remember_assistant(&mut self, content: &str) {
@@ -1497,7 +1659,8 @@ impl App {
             "role": "assistant",
             "content": clip(content, MEMORY_TOOL_CLIP * 4)
         }));
-        trim_memory(&mut self.agent.memory);
+        let cap = self.memory_cap();
+        trim_memory(&mut self.agent.memory, cap);
     }
 
     fn remember_tool_call(&mut self, call_id: &str, name: &str, arguments: &str) {
@@ -1516,7 +1679,8 @@ impl App {
                 "function": { "name": name, "arguments": args }
             }]
         }));
-        trim_memory(&mut self.agent.memory);
+        let cap = self.memory_cap();
+        trim_memory(&mut self.agent.memory, cap);
     }
 
     fn remember_tool_result(&mut self, call_id: &str, content: &str) {
@@ -1525,7 +1689,8 @@ impl App {
             "tool_call_id": call_id,
             "content": summarize_tool_result(content)
         }));
-        trim_memory(&mut self.agent.memory);
+        let cap = self.memory_cap();
+        trim_memory(&mut self.agent.memory, cap);
     }
 }
 
@@ -1554,7 +1719,7 @@ fn budget_memory(
     {
         out.pop();
     }
-    trim_memory(&mut out);
+    trim_memory(&mut out, MEMORY_BUDGET);
     let keep = HISTORY.saturating_mul(2).max(4);
     if out.len() > keep {
         out.drain(0..out.len() - keep);
@@ -1574,6 +1739,69 @@ fn budget_memory(
         reconcile_tool_pairs(&mut out);
     }
     out
+}
+
+/// Tokens one request takes: system prompt (with summary), tool and reply margin,
+/// history, and the prompt.
+fn estimate_request(summary: Option<&str>, history: &[serde_json::Value], prompt: &str) -> u32 {
+    let tokens = estimate_tokens(agent::SYSTEM)
+        + 900
+        + summary.map_or(0, estimate_tokens)
+        + history.iter().map(estimate_message_tokens).sum::<usize>()
+        + estimate_tokens(prompt);
+    u32::try_from(tokens).unwrap_or(u32::MAX)
+}
+
+/// Auto compact: the history to send and how many leading memory messages to fold
+/// into the summary (0 = none). Nothing is folded while the request fits in the
+/// context less `buffer_percent`. Past that, the newest messages up to `keep`
+/// tokens (at most half the budget) stay verbatim, and the cut moves forward to
+/// the next user message, so a tool call is never separated from its result.
+fn compact_plan(
+    memory: &[serde_json::Value],
+    context_tokens: u32,
+    buffer_percent: u32,
+    keep: u32,
+    current_prompt: &str,
+    summary: Option<&str>,
+) -> (Vec<serde_json::Value>, usize) {
+    let mut out: Vec<_> = memory.iter().map(sanitize_memory_message).collect();
+    if out
+        .last()
+        .and_then(|last| last.get("role"))
+        .and_then(|r| r.as_str())
+        == Some("user")
+    {
+        out.pop();
+    }
+    let limit = context_tokens as usize * (100 - buffer_percent.min(90) as usize) / 100;
+    let reserve = estimate_tokens(agent::SYSTEM)
+        + 900
+        + summary.map_or(0, estimate_tokens)
+        + estimate_tokens(current_prompt);
+    let budget = limit.saturating_sub(reserve).max(256);
+    let total: usize = out.iter().map(estimate_message_tokens).sum();
+    if total <= budget {
+        reconcile_tool_pairs(&mut out);
+        return (out, 0);
+    }
+    let keep = (keep as usize).min(budget / 2);
+    let mut kept = 0;
+    let mut start = out.len();
+    while start > 0 {
+        let tokens = estimate_message_tokens(&out[start - 1]);
+        if kept + tokens > keep {
+            break;
+        }
+        kept += tokens;
+        start -= 1;
+    }
+    while start < out.len() && out[start].get("role").and_then(|r| r.as_str()) != Some("user") {
+        start += 1;
+    }
+    let mut history = out.split_off(start);
+    reconcile_tool_pairs(&mut history);
+    (history, start)
 }
 
 fn sanitize_memory_message(message: &serde_json::Value) -> serde_json::Value {
@@ -1660,8 +1888,8 @@ fn summarize_tool_result(content: &str) -> String {
     format!("{head}… (truncated)")
 }
 
-fn trim_memory(memory: &mut Vec<serde_json::Value>) {
-    while memory_chars(memory) > MEMORY_BUDGET && !memory.is_empty() {
+fn trim_memory(memory: &mut Vec<serde_json::Value>, cap: usize) {
+    while memory_chars(memory) > cap && !memory.is_empty() {
         memory.remove(0);
     }
     reconcile_tool_pairs(memory);
@@ -1851,5 +2079,279 @@ mod provider_tests {
                 Some(std::time::Duration::from_secs(60 * 30))
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        App, MEMORY_BUDGET, budget_memory, compact_plan, estimate_message_tokens, trim_memory,
+    };
+    use crate::agent::{AgentCommand, AgentEvent};
+    use crate::buffer::Buffer;
+    use serde_json::{Value, json};
+
+    fn user(text: &str) -> Value {
+        json!({"role": "user", "content": text})
+    }
+
+    fn assistant(text: &str) -> Value {
+        json!({"role": "assistant", "content": text})
+    }
+
+    fn call(id: &str) -> Value {
+        json!({"role": "assistant", "content": null, "tool_calls": [{
+            "id": id, "type": "function",
+            "function": {"name": "read_file", "arguments": "{\"path\":\"a\"}"}
+        }]})
+    }
+
+    fn result(id: &str, text: &str) -> Value {
+        json!({"role": "tool", "tool_call_id": id, "content": text})
+    }
+
+    /// `turns` turns of user, tool call, tool result, answer; each about 300 tokens.
+    fn long_memory(turns: usize) -> Vec<Value> {
+        let filler = "x".repeat(900);
+        let mut memory = Vec::new();
+        for turn in 0..turns {
+            memory.push(user(&format!("question {turn} {filler}")));
+            memory.push(call(&format!("c{turn}")));
+            memory.push(result(&format!("c{turn}"), "ok"));
+            memory.push(assistant(&format!("answer {turn}")));
+        }
+        memory.push(user("current"));
+        memory
+    }
+
+    #[test]
+    fn nothing_is_folded_while_the_request_fits() {
+        let memory = long_memory(3);
+        let (history, split) = compact_plan(&memory, 16384, 15, 15_000, "current", None);
+        assert_eq!(split, 0);
+        assert_eq!(
+            history.len(),
+            memory.len() - 1,
+            "the current prompt is sent apart"
+        );
+    }
+
+    #[test]
+    fn past_the_budget_older_turns_fold_at_a_user_message() {
+        let memory = long_memory(40);
+        let (history, split) = compact_plan(&memory, 8192, 15, 2_000, "current", None);
+        assert!(split > 0);
+        assert_eq!(
+            memory[split]["role"], "user",
+            "the cut lands on a turn start"
+        );
+        assert_eq!(history[0], memory[split]);
+        assert_eq!(history.len(), memory.len() - 1 - split);
+        let kept: usize = history.iter().map(estimate_message_tokens).sum();
+        assert!(kept <= 2_000, "{kept}");
+        // Every tool result still follows its call.
+        for (index, message) in history.iter().enumerate() {
+            if message["role"] == "tool" {
+                assert!(history[index - 1].get("tool_calls").is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn keep_is_capped_at_half_the_budget_for_a_small_window() {
+        let memory = long_memory(40);
+        let (history, split) = compact_plan(&memory, 4096, 15, 200_000, "current", None);
+        assert!(split > 0);
+        let kept: usize = history.iter().map(estimate_message_tokens).sum();
+        assert!(kept <= 4096 / 2, "{kept}");
+    }
+
+    #[test]
+    fn a_summary_counts_against_the_budget() {
+        let memory = long_memory(8);
+        let (_, without) = compact_plan(&memory, 4096, 15, 1_000, "current", None);
+        let summary = "s".repeat(6_000);
+        let (_, with) = compact_plan(&memory, 4096, 15, 1_000, "current", Some(&summary));
+        assert!(with >= without);
+        assert!(with > 0);
+    }
+
+    #[test]
+    fn auto_compact_off_keeps_the_old_history_selection() {
+        let mut memory = long_memory(6);
+        trim_memory(&mut memory, MEMORY_BUDGET);
+        let history = budget_memory(&memory, 16384, "current");
+        assert!(super::memory_chars(&history) <= MEMORY_BUDGET);
+        assert!(history.len() <= 16);
+    }
+
+    fn app_with_worker() -> (App, tokio::sync::mpsc::UnboundedReceiver<AgentCommand>) {
+        let mut app = App::new(Buffer::new(), None);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.agent_tx = Some(tx);
+        app.ai.model = "m".into();
+        app.agent.open = true;
+        app.agent.focused = true;
+        (app, rx)
+    }
+
+    #[test]
+    fn a_long_chat_sends_its_older_turns_to_be_folded() {
+        let (mut app, mut rx) = app_with_worker();
+        app.ai.context_size = "4096".into();
+        app.agent.memory = long_memory(30);
+        app.agent.memory.pop();
+        app.agent.prompt = "go on".into();
+        app.submit_agent();
+        let Ok(AgentCommand::Turn {
+            compact, history, ..
+        }) = rx.try_recv()
+        else {
+            panic!("no turn sent");
+        };
+        let older = compact.expect("older turns folded");
+        assert!(!older.is_empty());
+        assert_eq!(older[0]["role"], "user");
+        assert_eq!(
+            history.first().map(|m| m["role"].clone()),
+            Some(json!("user"))
+        );
+        assert_eq!(app.agent.status, "compacting");
+        // App's memory already dropped what went to the summary.
+        assert_eq!(app.agent.memory.len(), history.len() + 1);
+    }
+
+    #[test]
+    fn with_auto_compact_off_nothing_is_folded() {
+        let (mut app, mut rx) = app_with_worker();
+        app.ai.auto_compact = false;
+        app.ai.context_size = "4096".into();
+        app.agent.memory = long_memory(30);
+        app.agent.memory.pop();
+        app.agent.prompt = "go on".into();
+        app.submit_agent();
+        let Ok(AgentCommand::Turn {
+            compact, history, ..
+        }) = rx.try_recv()
+        else {
+            panic!("no turn sent");
+        };
+        assert!(compact.is_none());
+        assert!(super::memory_chars(&history) <= MEMORY_BUDGET);
+    }
+
+    #[test]
+    fn a_summary_is_kept_and_sent_with_the_next_turn() {
+        let (mut app, mut rx) = app_with_worker();
+        app.agent.turn = 3;
+        app.agent.busy = true;
+        app.handle_agent(AgentEvent::Compacted {
+            id: 3,
+            summary: Ok("Earlier: renamed foo.".into()),
+            dropped: 5,
+        });
+        assert_eq!(app.agent.summary.as_deref(), Some("Earlier: renamed foo."));
+        assert!(app.agent.busy, "auto compact does not end the turn");
+        let line = &app.agent.transcript.last().unwrap().text;
+        assert!(line.contains("Compacted 5 older messages"), "{line}");
+        app.handle_agent(AgentEvent::Reply {
+            id: 3,
+            text: "done".into(),
+        });
+        app.agent.prompt = "more".into();
+        app.submit_agent();
+        let Ok(AgentCommand::Turn { summary, .. }) = rx.try_recv() else {
+            panic!("no turn sent");
+        };
+        assert_eq!(summary.as_deref(), Some("Earlier: renamed foo."));
+        app.clear_agent_chat();
+        assert_eq!(app.agent.summary, None);
+    }
+
+    #[test]
+    fn a_failed_summary_says_the_messages_were_dropped() {
+        let (mut app, _rx) = app_with_worker();
+        app.agent.turn = 2;
+        app.handle_agent(AgentEvent::Compacted {
+            id: 2,
+            summary: Err("Server error 500".into()),
+            dropped: 4,
+        });
+        assert_eq!(app.agent.summary, None);
+        let line = &app.agent.transcript.last().unwrap().text;
+        assert!(line.contains("dropped 4 older messages"), "{line}");
+    }
+
+    #[test]
+    fn slash_compact_asks_the_worker_for_a_summary() {
+        let (mut app, mut rx) = app_with_worker();
+        app.agent.memory = long_memory(3);
+        app.agent.memory.push(assistant("last answer"));
+        app.agent.prompt = "/compact".into();
+        app.submit_agent();
+        let Ok(AgentCommand::Compact { older, id, .. }) = rx.try_recv() else {
+            panic!("no compact sent");
+        };
+        assert_eq!(older.len(), 12);
+        assert_eq!(
+            app.agent.memory,
+            vec![user("current"), assistant("last answer")]
+        );
+        assert!(app.agent.busy);
+        app.handle_agent(AgentEvent::Compacted {
+            id,
+            summary: Ok("sum".into()),
+            dropped: older.len(),
+        });
+        assert!(!app.agent.busy);
+        assert_eq!(app.agent.status, "ready");
+        assert_eq!(app.agent.summary.as_deref(), Some("sum"));
+    }
+
+    #[test]
+    fn slash_compact_without_a_model_truncates() {
+        let (mut app, mut rx) = app_with_worker();
+        app.ai.model.clear();
+        app.agent.memory = long_memory(2);
+        app.agent.prompt = "/compact".into();
+        app.submit_agent();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.agent.memory, vec![user("current")]);
+        let line = &app.agent.transcript.last().unwrap().text;
+        assert!(line.contains("no model to summarize"), "{line}");
+    }
+
+    #[test]
+    fn the_gauge_prefers_what_the_server_reported() {
+        let (mut app, _rx) = app_with_worker();
+        app.ai.context_size = "32768".into();
+        let (estimate, limit) = app.context_gauge().unwrap();
+        assert!(estimate > 0);
+        assert_eq!(limit, Some(32768));
+        app.agent.turn = 1;
+        app.handle_agent(AgentEvent::Usage {
+            id: 1,
+            tokens: 12_400,
+        });
+        assert_eq!(app.context_gauge(), Some((12_400, Some(32768))));
+        app.agent.focused = false;
+        assert!(
+            app.context_gauge().is_some(),
+            "a session keeps it on screen"
+        );
+        app.agent.open = false;
+        assert_eq!(app.context_gauge(), None);
+    }
+
+    #[test]
+    fn an_unknown_window_shows_no_limit() {
+        let (mut app, _rx) = app_with_worker();
+        app.ai
+            .switch_provider(crate::settings::AiProvider::OpenRouter);
+        app.ai.context_size = "auto".into();
+        assert_eq!(app.context_gauge().unwrap().1, None);
+        app.ai.switch_provider(crate::settings::AiProvider::Ollama);
+        app.ai.context_size = "auto".into();
+        assert_eq!(app.context_gauge().unwrap().1, Some(16384));
     }
 }

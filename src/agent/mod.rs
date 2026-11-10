@@ -171,6 +171,13 @@ pub struct Panel {
     pub last_prompt: Option<String>,
     /// `/model` asked this URL for its models and is waiting for the answer.
     pub listing_models: Option<String>,
+    /// Summary of turns auto compact or `/compact` folded away. Sent with the system prompt.
+    pub summary: Option<String>,
+    /// `/compact` is waiting for the summary of this many messages.
+    pub compacting: Option<usize>,
+    /// Context tokens in use: `(tokens, true)` when the server reported them,
+    /// `(estimate, false)` otherwise. `None` before the first turn.
+    pub context_used: Option<(u32, bool)>,
 }
 
 impl Default for Panel {
@@ -197,6 +204,9 @@ impl Default for Panel {
             popup: None,
             listing_models: None,
             last_prompt: None,
+            summary: None,
+            compacting: None,
+            context_used: None,
         }
     }
 }
@@ -223,6 +233,23 @@ pub enum AgentCommand {
         /// Prior OpenAI-compatible messages (user / assistant / tool), already budgeted.
         history: Vec<serde_json::Value>,
         prompt: String,
+        /// Summary of turns folded away by auto compact, added to the system prompt.
+        summary: Option<String>,
+        /// Older messages to fold into a new summary before this turn is sent.
+        /// `App` has already dropped them from its memory.
+        compact: Option<Vec<serde_json::Value>>,
+    },
+    /// `/compact`: fold `older` (and the current summary) into a new summary now.
+    Compact {
+        id: u64,
+        server: String,
+        model: String,
+        api_key: String,
+        num_ctx: Option<u32>,
+        ollama_native: bool,
+        tuning: provider::Tuning,
+        summary: Option<String>,
+        older: Vec<serde_json::Value>,
     },
     ToolResult {
         id: u64,
@@ -264,6 +291,18 @@ pub enum AgentEvent {
     /// Drop poisoned tool history so the next turn does not keep failing with 400.
     ResetMemory {
         id: u64,
+    },
+    /// Older turns were folded into `summary`, or summarizing failed and they were
+    /// only dropped (`Err` carries why).
+    Compacted {
+        id: u64,
+        summary: Result<String, String>,
+        dropped: usize,
+    },
+    /// Context tokens the server reported for the latest request of a turn.
+    Usage {
+        id: u64,
+        tokens: u32,
     },
 }
 
