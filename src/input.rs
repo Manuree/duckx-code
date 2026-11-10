@@ -41,6 +41,7 @@ pub fn route_flags(
         Focus::Agent => route_agent(event, keys, burst),
         Focus::About => route_about(event),
         Focus::PreviewSide => route_preview_side(event),
+        Focus::LayoutMenu => route_layout_menu(event, keys),
         Focus::Find => route_find(event),
         Focus::Replace => route_replace(event),
         Focus::FilePicker => route_picker(event),
@@ -274,6 +275,35 @@ fn route_picker(event: &Event) -> Option<SemanticAction> {
 
 /// Arrows pick a side at once. `Enter` takes the highlighted side, `Tab` moves it,
 /// and `Esc` cancels. `u` / `d` / `l` / `r` mirror the arrows.
+/// The `convert-keyboard` layout list. `Up` / `Down` (or `Tab`) move, `Enter`
+/// or the convert key again converts, `Esc` closes. Other keys, paste included,
+/// are swallowed so nothing is typed behind the list.
+fn route_layout_menu(event: &Event, keys: &crate::keys::KeyMap) -> Option<SemanticAction> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    if crate::keys::dispatch(key, keys) == Some(SemanticAction::ConvertKeyboard) {
+        return Some(SemanticAction::LayoutMenu(CompletionAction::Accept));
+    }
+    let plain = !key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    let action = match key.code {
+        KeyCode::Up | KeyCode::BackTab if plain => CompletionAction::Prev,
+        KeyCode::Tab if plain && key.modifiers.contains(KeyModifiers::SHIFT) => {
+            CompletionAction::Prev
+        }
+        KeyCode::Down | KeyCode::Tab if plain => CompletionAction::Next,
+        KeyCode::Enter if plain => CompletionAction::Accept,
+        KeyCode::Esc => CompletionAction::Close,
+        _ => return None,
+    };
+    Some(SemanticAction::LayoutMenu(action))
+}
+
 fn route_preview_side(event: &Event) -> Option<SemanticAction> {
     use crate::action::{PreviewSideAction, Side};
     let key = match event {
@@ -661,6 +691,46 @@ mod tests {
 
     fn editor(event: Event) -> Option<SemanticAction> {
         route(&event, Focus::Editor, false)
+    }
+
+    #[test]
+    fn alt_backtick_converts_the_keyboard_and_the_list_swallows_typing() {
+        let convert = Some(SemanticAction::ConvertKeyboard);
+        assert_eq!(editor(key(KeyCode::Char('`'), KeyModifiers::ALT)), convert);
+        // The same key on the Thai layout types `_`.
+        assert_eq!(editor(key(KeyCode::Char('_'), KeyModifiers::ALT)), convert);
+        assert_eq!(
+            route(
+                &key(KeyCode::Char('`'), KeyModifiers::ALT),
+                Focus::Agent,
+                false
+            ),
+            convert
+        );
+        assert_eq!(
+            editor(key(KeyCode::Char('`'), KeyModifiers::NONE)),
+            Some(SemanticAction::InsertChar('`')),
+            "a plain backtick still types"
+        );
+        let menu = |event| route(&event, Focus::LayoutMenu, false);
+        assert_eq!(
+            menu(key(KeyCode::Down, KeyModifiers::NONE)),
+            Some(SemanticAction::LayoutMenu(CompletionAction::Next))
+        );
+        assert_eq!(
+            menu(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SemanticAction::LayoutMenu(CompletionAction::Accept))
+        );
+        assert_eq!(
+            menu(key(KeyCode::Char('`'), KeyModifiers::ALT)),
+            Some(SemanticAction::LayoutMenu(CompletionAction::Accept))
+        );
+        assert_eq!(
+            menu(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(SemanticAction::LayoutMenu(CompletionAction::Close))
+        );
+        assert_eq!(menu(key(KeyCode::Char('a'), KeyModifiers::NONE)), None);
+        assert_eq!(menu(Event::Paste("x".into())), None);
     }
 
     #[test]

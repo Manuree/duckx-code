@@ -6,6 +6,7 @@ pub mod command;
 pub mod explorer;
 pub mod input;
 pub mod jobs;
+pub mod keyboard_layout;
 pub mod keys;
 pub mod layout;
 pub mod line_edit;

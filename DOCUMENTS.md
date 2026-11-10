@@ -76,8 +76,22 @@ Behavior while a selection is active:
 | `Ctrl + X` | Cut | Cuts the same text `Ctrl + C` would copy, as one undo step. |
 | `Ctrl + V` | Paste | Inserts the OS clipboard at the cursor, replacing any selection. |
 | `Ctrl + S` | Save | Writes the file atomically and clears the modified marker. See [Saving](#saving). |
+| ``Alt + ` `` or `convert-keyboard` | Fix the keyboard layout | Retypes the selection as the same keys give on the other layout, so `ouj8nv8ezbf` becomes `นี่คือคำผิด`, and back. See [Wrong keyboard layout](#wrong-keyboard-layout). One undo step. |
 
 `Ctrl + C`, `Ctrl + X`, `Ctrl + V`, and `Ctrl + S` also work while the sidebar is focused. They act on the focused editor. In a terminal that cannot read the OS clipboard, copy and paste use an internal clipboard that only works inside duckx-code.
+
+### Wrong keyboard layout
+
+Typed a line with the wrong layout on? Select it and press ``Alt + ` `` (or run `convert-keyboard`).
+
+* **What changes:** every character is looked up on the layout it was typed on and replaced by the character the same key gives on the other layout, Shift included. US QWERTY ↔ Thai Kedmanee is built in: `ouj8nv8ezbf` → `นี่คือคำผิด`, `ทำหะ` → `mest`. Thai vowels above or below a letter and tone marks are their own keys, so each one converts on its own. Spaces, new lines, and characters neither layout types stay as they are.
+* **Which way:** decided from the text. Mostly Thai letters convert to English; Latin letters, digits, or nothing either layout owns (`/-`) convert to Thai.
+* **No selection:** the word right before the cursor (back to the previous space on that line) is converted and the cursor stays after it, so you can keep typing. With a space or the line start before the cursor, the status bar says `Select the text to convert first`.
+* **After converting:** a selection stays selected over the new text, so a second ``Alt + ` `` turns it back. The whole change is one undo step.
+* **Windows:** the installed input languages are read from Windows. When there are exactly two and they are US English (QWERTY) and Thai (Kedmanee), the text converts at once and Windows is asked to switch the terminal to the target layout, so you keep typing in the right language. The status bar says `keyboard switched to …`, or `could not switch the keyboard` when Windows refused. Other keyboards for the same language (US Dvorak, Thai Pattachote) are not treated as these two.
+* **Elsewhere, or more layouts:** on Linux and macOS, or on Windows with more than two layouts or one duckx-code has no table for, a `Convert to` list opens under the selection. Each row shows a layout and what the text becomes on it. `Up` / `Down` move, `Enter` (or ``Alt + ` `` again) converts, `Esc` closes. Other keys are ignored while it is open. On Windows the keyboard still switches when the chosen layout is installed.
+* **Assistant prompt:** the same key works on the selection, or the word before the cursor, in the assistant prompt.
+* **Keys:** on the Thai layout the backtick key types `_`, so `Alt + _` does the same. Some setups use the backtick key (Grave accent) as the Windows language-switch hotkey; if ``Alt + ` `` never reaches duckx-code, change it under Settings → Keybindings → Convert keyboard.
 
 ---
 
@@ -301,6 +315,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 | `match-bracket` | — | Jump to the matching bracket | `Ctrl + ]` |
 | `complete` | — | Open completions at the cursor | `Ctrl + Space` |
 | `comment` | — | Add or remove a line comment | `F4` |
+| `convert-keyboard` | — | Retype the selection, or the word before the cursor, as the other keyboard layout (US QWERTY ↔ Thai Kedmanee). See [Wrong keyboard layout](#wrong-keyboard-layout). | ``Alt + ` `` |
 | `move-line-up` | — | Move the current line or selection up | `Alt + Up` |
 | `move-line-down` | — | Move the current line or selection down | `Alt + Down` |
 | `delete-line` | — | Delete the current line, or every line the selection touches. See [Editing](#3-editing). | `Shift + Delete` |

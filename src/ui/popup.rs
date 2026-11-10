@@ -39,6 +39,49 @@ pub fn render(frame: &mut Frame, app: &App, text: Option<Rect>, theme: &UiStyles
 }
 
 const LIST_KEYS: &str = "↑↓ enter esc";
+
+/// The `convert-keyboard` dropdown: each layout with what the text becomes on it.
+/// It drops under the cursor in the editor, or sits just above the assistant
+/// panel when the text is the assistant prompt.
+pub fn render_layout_menu(
+    frame: &mut Frame,
+    app: &App,
+    text: Option<Rect>,
+    agent: Rect,
+    theme: &UiStyles,
+) {
+    let Some(view) = app.layout_menu_view() else {
+        return;
+    };
+    let rows: Vec<Row> = view
+        .rows
+        .iter()
+        .map(|(name, preview)| Row::new(name.clone()).tag(preview.clone()))
+        .collect();
+    let list = List::new("Convert to", LIST_KEYS, &rows).selected(Some(view.selected));
+    let height = rows.len() as u16 + 2;
+    let area = match (view.target, text) {
+        (crate::app::ConvertTarget::Agent, _) if agent.height > 0 => {
+            let full = frame.area();
+            let width = list.natural_width().min(full.width);
+            Rect {
+                x: agent
+                    .x
+                    .saturating_add(1)
+                    .min(full.width.saturating_sub(width)),
+                y: agent.y.saturating_sub(height),
+                width,
+                height: height.min(agent.y.max(1)),
+            }
+        }
+        (_, Some(text)) if text.width > 4 && text.height > 2 => {
+            let width = list.natural_width().min(text.width);
+            place(text, width, height.min(text.height), app)
+        }
+        _ => return,
+    };
+    super::dropdown::render(frame, area, &list, theme);
+}
 const COMPLETION_KEYS: &str = "↑↓ tab enter esc";
 
 fn render_references(
