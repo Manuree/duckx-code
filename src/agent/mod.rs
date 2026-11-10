@@ -18,7 +18,7 @@ pub use mention::{
     insert_mention, mention_trigger_at, parse_mentions, suggest_files,
 };
 pub use path::{canonicalize, strip_verbatim, within};
-pub use provider::{content_looks_like_tool_prefix, normalize_tool_arguments};
+pub use provider::{Tuning, content_looks_like_tool_prefix, normalize_tool_arguments};
 pub use slash::{
     COMMANDS, ParsedSlash, SlashCommand, filter_commands, help_text, is_slash_prompt, lookup,
     parse_slash, slash_filter,
@@ -213,6 +213,8 @@ pub enum AgentCommand {
         ollama_native: bool,
         /// Prefer Ollama `think: true` when supported.
         think: bool,
+        /// Max tokens, extra headers, timeout, and retries from Settings → AI.
+        tuning: provider::Tuning,
         /// Prior OpenAI-compatible messages (user / assistant / tool), already budgeted.
         history: Vec<serde_json::Value>,
         prompt: String,

@@ -597,7 +597,7 @@ The choice is written to `settings.json`:
   "editor": { "tab_width": 4, "indent_with_spaces": true, "line_ending": "auto" },
   "files": { "trim_trailing_space": false, "final_newline": false },
   "lsp": { "enabled": true, "check_on_save": true, "format_on_save": false, "python": "basic" },
-  "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "", "auto_approve": false, "streaming": true, "context_size": "16384", "think": true }
+  "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "", "auto_approve": false, "streaming": true, "context_size": "16384", "think": true, "max_tokens": "", "request_timeout": 1800, "retries": 3, "openrouter_app_name": "duckx-code", "openrouter_referer": "https://github.com/Manuree/duckx-code" }
 }
 ```
 
@@ -628,10 +628,10 @@ A color theme may add a `diagnostics` section with `error`, `warning`, `info`, a
 | Row | Values | Effect |
 | :--- | :--- | :--- |
 | Assistant | On, Off | Off refuses to send a prompt. |
-| Provider | Ollama, OpenAI-compatible / LM Studio | Ollama defaults to `http://127.0.0.1:11434/v1`. OpenAI-compatible / LM Studio defaults to `http://127.0.0.1:1234/v1`. The stored value stays `openai` for older settings files. |
+| Provider | Ollama, LM Studio, OpenAI-compatible, OpenRouter | Ollama defaults to `http://127.0.0.1:11434/v1`, LM Studio to `http://127.0.0.1:1234/v1`, OpenAI-compatible to `https://api.openai.com/v1`, and OpenRouter to `https://openrouter.ai/api/v1`. Each provider keeps its own Server, Model, and API key: switching away saves them under `ai.profiles` and switching back restores them. An older file's `"openai"` loads as LM Studio and is saved as `"lmstudio"`. |
 | Server | text | Base address, including `/v1`. Ollama talks to native `/api/chat` (derived from this URL) so Context size works. LM Studio stays on `/v1/chat/completions`. |
 | Model | text | Model name sent as `model`. |
-| API key | text | Optional Bearer token. Empty (default) sends no Authorization header — right for local Ollama and LM Studio. |
+| API key | text | Optional Bearer token. Empty (default) sends no Authorization header — right for local Ollama and LM Studio. `OPENROUTER_API_KEY` (OpenRouter) or `OPENAI_API_KEY` (OpenAI-compatible) wins over the saved key when it is set. The key is also sent when listing models. |
 | Streaming | On, Off | On (default) streams tokens (SSE on LM Studio; NDJSON on Ollama native) and shows text as it arrives; falls back to one JSON reply if streaming fails. Off always uses one JSON reply. |
 | Auto-approve tools | On, Off | On runs `apply_edit`, `create_file`, and `save` without asking. Off (default) shows Yes/No buttons in the assistant panel. |
 | Context size | text (`16384`, `auto`, or a number) | Token window for Ollama (`options.num_ctx`). Default `16384`. `auto` uses 16384. OpenAI-compat `/v1` ignores `num_ctx` on current Ollama — that is why the Ollama provider uses native `/api/chat`. LM Studio: set context in LM Studio; this row only budgets client history. You can also set host env `OLLAMA_CONTEXT_LENGTH` as a fallback. |
@@ -660,7 +660,7 @@ A line is a slash command only when `/` is the first character of the prompt (po
 | `/clear` | Same as `/new`. |
 | `/help` | List slash commands and key hints. |
 | `/model [name]` | Show the current model, list models from the server (`/api/tags` or `/v1/models`), or switch to `name`. |
-| `/provider [ollama or openai]` | Show or switch the AI provider. |
+| `/provider [ollama, lmstudio, openai-compatible, or openrouter]` | Show or switch the AI provider. Each provider keeps its own server, model, and key. |
 | `/context [n or auto]` | Show or set context size (`num_ctx`). |
 | `/stream on or off` | Toggle response streaming. |
 | `/auto-approve on or off` | Toggle tool auto-approve. |

@@ -1,8 +1,10 @@
-//! OpenAI-compatible chat completions. Ollama and LM Studio both speak this.
+//! OpenAI-compatible chat completions. Ollama, LM Studio, OpenRouter, and any
+//! OpenAI-compatible server speak this; Ollama also has a native `/api/chat` path.
 //! Streaming uses SSE (`data:` lines); a failed stream falls back to one JSON body.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -35,6 +37,40 @@ pub enum DeltaKind {
     Thinking,
 }
 
+/// Request knobs from Settings → AI that do not change which endpoint is used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tuning {
+    /// `max_tokens` (OpenAI) or `options.num_predict` (Ollama native). `None` leaves it out.
+    pub max_tokens: Option<u32>,
+    /// Extra headers on every chat request, e.g. OpenRouter `HTTP-Referer` and `X-Title`.
+    pub headers: Vec<(String, String)>,
+    /// Time limit for one request. `None` keeps the client's own limit.
+    pub timeout: Option<Duration>,
+    /// Extra attempts after a 408, 429, or 5xx answer. A refused connection is not retried.
+    pub retries: u32,
+    /// Wait before the first retry. Doubles each time, capped at [`MAX_BACKOFF`].
+    pub backoff: Duration,
+}
+
+/// The longest wait between two attempts, including a server's `Retry-After`.
+pub const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// What a request used before these knobs existed: a 16384-token cap, no extra
+/// headers, the client's timeout, and no retries.
+pub static DEFAULT_TUNING: Tuning = Tuning {
+    max_tokens: Some(16384),
+    headers: Vec::new(),
+    timeout: None,
+    retries: 0,
+    backoff: Duration::from_millis(1000),
+};
+
+impl Default for Tuning {
+    fn default() -> Self {
+        DEFAULT_TUNING.clone()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CompleteOptions<'a> {
     pub api_key: &'a str,
@@ -45,6 +81,7 @@ pub struct CompleteOptions<'a> {
     pub ollama_native: bool,
     /// When true (and native), try `think: true` with per-model fallback.
     pub think: bool,
+    pub tuning: &'a Tuning,
 }
 
 impl Default for CompleteOptions<'static> {
@@ -55,6 +92,7 @@ impl Default for CompleteOptions<'static> {
             num_ctx: None,
             ollama_native: false,
             think: true,
+            tuning: &DEFAULT_TUNING,
         }
     }
 }
@@ -87,13 +125,27 @@ pub fn ollama_chat_url(server: &str) -> String {
     format!("{base}/api/chat")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn request_body(model: &str, messages: &[Value], tools: &[Value], stream: bool) -> Value {
+    request_body_with(model, messages, tools, stream, Some(16384))
+}
+
+/// [`request_body`] with the `max_tokens` cap chosen in Settings. `None` leaves it out.
+pub fn request_body_with(
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    stream: bool,
+    max_tokens: Option<u32>,
+) -> Value {
     let mut body = json!({
         "model": model,
         "messages": messages,
-        "temperature": 0.2,
-        "max_tokens": 16384
+        "temperature": 0.2
     });
+    if let Some(max_tokens) = max_tokens {
+        body["max_tokens"] = json!(max_tokens);
+    }
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
     }
@@ -103,6 +155,7 @@ pub fn request_body(model: &str, messages: &[Value], tools: &[Value], stream: bo
     body
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn ollama_request_body(
     model: &str,
     messages: &[Value],
@@ -111,10 +164,25 @@ pub fn ollama_request_body(
     num_ctx: Option<u32>,
     think: bool,
 ) -> Value {
+    ollama_request_body_with(model, messages, tools, stream, num_ctx, think, Some(16384))
+}
+
+/// [`ollama_request_body`] with the `num_predict` cap chosen in Settings. `None` leaves it out.
+pub fn ollama_request_body_with(
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    stream: bool,
+    num_ctx: Option<u32>,
+    think: bool,
+    num_predict: Option<u32>,
+) -> Value {
     let mut options = json!({
-        "temperature": 0.2,
-        "num_predict": 16384
+        "temperature": 0.2
     });
+    if let Some(num_predict) = num_predict {
+        options["num_predict"] = json!(num_predict);
+    }
     if let Some(n) = num_ctx {
         options["num_ctx"] = json!(n);
     }
@@ -194,6 +262,12 @@ fn models_without_tools() -> &'static Mutex<HashSet<String>> {
     CELL.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// One model on one server. The same model name on another provider is a different
+/// deployment, so what one rejected says nothing about the other.
+fn capability_key(server: &str, model: &str) -> String {
+    format!("{}\n{model}", server.trim().trim_end_matches('/'))
+}
+
 fn model_skips_tools(model: &str) -> bool {
     models_without_tools()
         .lock()
@@ -225,11 +299,15 @@ fn remember_model_without_think(model: &str) {
     }
 }
 
+/// Only a plain client error can say "this model cannot do that". 401 / 402 / 403
+/// (key, credits, access), 408 / 429 (timeout, rate limit), and every 5xx are about
+/// the account or the server, so they must never mark a model as lacking tools or think.
+fn capability_status(status: reqwest::StatusCode) -> bool {
+    status.is_client_error() && !matches!(status.as_u16(), 401 | 402 | 403 | 408 | 429)
+}
+
 fn think_not_supported(status: reqwest::StatusCode, body: &str) -> bool {
-    if !status.is_client_error() && !status.is_server_error() {
-        // Ollama may still 400
-    }
-    if status.is_success() {
+    if !capability_status(status) {
         return false;
     }
     let lower = body.to_ascii_lowercase();
@@ -244,13 +322,15 @@ fn think_not_supported(status: reqwest::StatusCode, body: &str) -> bool {
 }
 
 fn tools_not_supported(status: reqwest::StatusCode, body: &str) -> bool {
-    if !status.is_client_error() {
+    if !capability_status(status) {
         return false;
     }
     let lower = body.to_ascii_lowercase();
     lower.contains("does not support tools")
         || lower.contains("does not support tool")
         || lower.contains("tool use is not supported")
+        // OpenRouter: "No endpoints found that support tool use."
+        || lower.contains("support tool use")
         || (lower.contains("tool")
             && (lower.contains("unsupported")
                 || lower.contains("not support")
@@ -305,6 +385,93 @@ fn apply_auth(request: reqwest::RequestBuilder, api_key: &str) -> reqwest::Reque
     } else {
         request.header("Authorization", format!("Bearer {key}"))
     }
+}
+
+/// Bearer token plus the extra headers and the per-request timeout from [`Tuning`].
+fn prepare(
+    request: reqwest::RequestBuilder,
+    api_key: &str,
+    tuning: &Tuning,
+) -> reqwest::RequestBuilder {
+    let mut request = apply_auth(request, api_key);
+    for (name, value) in &tuning.headers {
+        if !name.trim().is_empty() && !value.trim().is_empty() {
+            request = request.header(name.trim(), value.trim());
+        }
+    }
+    if let Some(timeout) = tuning.timeout {
+        request = request.timeout(timeout);
+    }
+    request
+}
+
+/// 408, 429, and 5xx are worth another try. Anything else is the final answer.
+fn retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 429) || status.is_server_error()
+}
+
+/// `Retry-After` in whole seconds, capped at [`MAX_BACKOFF`]. An HTTP date is ignored.
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    let value = response.headers().get(reqwest::header::RETRY_AFTER)?;
+    let seconds: u64 = value.to_str().ok()?.trim().parse().ok()?;
+    Some(Duration::from_secs(seconds).min(MAX_BACKOFF))
+}
+
+fn backoff_for(tuning: &Tuning, attempt: u32) -> Duration {
+    let factor = 1u32.checked_shl(attempt.min(16)).unwrap_or(u32::MAX);
+    tuning.backoff.saturating_mul(factor).min(MAX_BACKOFF)
+}
+
+/// Sends `build()` and retries a 408 / 429 / 5xx answer up to `tuning.retries` times,
+/// waiting `Retry-After` when the server gives one and an exponential backoff otherwise.
+/// The last answer is returned whatever its status, so callers keep their error text.
+async fn send_with_retry<B>(
+    build: B,
+    url: &str,
+    tuning: &Tuning,
+) -> Result<reqwest::Response, String>
+where
+    B: Fn() -> reqwest::RequestBuilder,
+{
+    let mut attempt = 0u32;
+    loop {
+        let response = build().send().await.map_err(|err| http_err(url, err))?;
+        let status = response.status();
+        if !retryable_status(status) || attempt >= tuning.retries {
+            return Ok(response);
+        }
+        let wait = retry_after(&response).unwrap_or_else(|| backoff_for(tuning, attempt));
+        drop(response);
+        tokio::time::sleep(wait).await;
+        attempt += 1;
+    }
+}
+
+/// `Server returned 401 Unauthorized: ...` with a hint for the answers a cloud
+/// provider gives when the key, credits, or rate limit is the problem.
+fn status_error(status: reqwest::StatusCode, text: &str) -> String {
+    let snippet: String = error_text(text).chars().take(300).collect();
+    let hint = match status.as_u16() {
+        401 => " (check the API key in Settings → AI)",
+        402 => " (the account is out of credits)",
+        403 => " (this key cannot use that model)",
+        429 => " (rate limited; raise Retries in Settings → AI or wait)",
+        _ => "",
+    };
+    format!("Server returned {status}{hint}: {snippet}")
+}
+
+/// `{"error":{"message":"..."}}` → that message. Anything else stays as it is.
+fn error_text(text: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return text.to_string();
+    };
+    value
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("error").and_then(Value::as_str))
+        .map(str::to_string)
+        .unwrap_or_else(|| text.to_string())
 }
 
 pub fn parse_reply(text: &str) -> Result<Reply, String> {
@@ -1512,8 +1679,53 @@ impl StreamAssembler {
     }
 }
 
+/// Why a stream stopped. `Fallback` retries the same turn without streaming;
+/// `Fatal` is the answer (a bad key, no credits, a rate limit, an outage, or an
+/// error the server sent inside the stream) and a second request would not help.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StreamFailure {
+    Fallback(String),
+    Fatal(String),
+}
+
+impl From<String> for StreamFailure {
+    fn from(text: String) -> Self {
+        Self::Fallback(text)
+    }
+}
+
+/// An error object sent inside a stream: OpenRouter's `{"error":{"message":..}}`,
+/// Ollama's `{"error":"..."}`, or a choice that finished with `finish_reason: "error"`.
+fn stream_error(value: &Value) -> Option<String> {
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| error.to_string());
+        let code = error
+            .get("code")
+            .filter(|code| !code.is_null())
+            .map(|code| match code {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            });
+        return Some(match code {
+            Some(code) => format!("Stream error {code}: {message}"),
+            None => format!("Stream error: {message}"),
+        });
+    }
+    (value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        == Some("error"))
+    .then(|| "Stream error: the provider ended the answer with an error".to_string())
+}
+
 /// Parses one SSE payload line (`data: ...`) into a delta value when present.
-pub fn sse_data_delta(line: &str) -> Result<Option<Value>, String> {
+/// An error object in the stream ends it as [`StreamFailure::Fatal`].
+fn sse_event(line: &str) -> Result<Option<Value>, StreamFailure> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with(':') {
         return Ok(None);
@@ -1525,9 +1737,17 @@ pub fn sse_data_delta(line: &str) -> Result<Option<Value>, String> {
     if data.is_empty() || data == "[DONE]" {
         return Ok(None);
     }
-    let value: Value =
-        serde_json::from_str(data).map_err(|err| format!("Bad stream chunk: {err}"))?;
+    let value: Value = serde_json::from_str(data)
+        .map_err(|err| StreamFailure::Fallback(format!("Bad stream chunk: {err}")))?;
+    if let Some(error) = stream_error(&value) {
+        return Err(StreamFailure::Fatal(error));
+    }
     Ok(value.pointer("/choices/0/delta").cloned())
+}
+
+/// A stream whose request failed with one of these will not do better without streaming.
+fn fatal_stream_status(status: reqwest::StatusCode) -> bool {
+    !capability_status(status) && !status.is_success()
 }
 
 pub async fn complete(
@@ -1537,10 +1757,12 @@ pub async fn complete(
     messages: &[Value],
     options: CompleteOptions<'_>,
 ) -> Result<Reply, String> {
-    if options.stream
-        && let Ok(reply) = complete_stream(client, server, model, messages, options, |_, _| {}).await
-    {
-        return Ok(reply);
+    if options.stream {
+        match complete_stream(client, server, model, messages, options, |_, _| {}).await {
+            Ok(reply) => return Ok(reply),
+            Err(StreamFailure::Fatal(text)) => return Err(text),
+            Err(StreamFailure::Fallback(_)) => {}
+        }
     }
     let mut options = options;
     options.stream = false;
@@ -1561,7 +1783,8 @@ where
     if options.stream {
         match complete_stream(client, server, model, messages, options, &mut on_delta).await {
             Ok(reply) => return Ok(reply),
-            Err(_) => {}
+            Err(StreamFailure::Fatal(text)) => return Err(text),
+            Err(StreamFailure::Fallback(_)) => {}
         }
     }
     let mut options = options;
@@ -1584,14 +1807,16 @@ async fn complete_once(
         completions_url(server)
     };
     let api_key = options.api_key;
+    let tuning = options.tuning;
     let stream = options.stream;
+    let key = capability_key(&url, model);
     let mut allow_tools = allow_tools;
-    let mut allow_think = native && options.think && !model_skips_think(model);
+    let mut allow_think = native && options.think && !model_skips_think(&key);
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     loop {
-        let use_tools = allow_tools && !model_skips_tools(model);
-        let use_think = allow_think && !model_skips_think(model);
+        let use_tools = allow_tools && !model_skips_tools(&key);
+        let use_think = allow_think && !model_skips_think(&key);
         let tools = if use_tools {
             tool_specs()
         } else {
@@ -1607,15 +1832,24 @@ async fn complete_once(
         let ollama_msgs;
         let body = if native {
             ollama_msgs = messages_for_ollama_native(msgs);
-            ollama_request_body(model, &ollama_msgs, &tools, stream, options.num_ctx, use_think)
+            ollama_request_body_with(
+                model,
+                &ollama_msgs,
+                &tools,
+                stream,
+                options.num_ctx,
+                use_think,
+                tuning.max_tokens,
+            )
         } else {
-            request_body(model, msgs, &tools, stream)
+            request_body_with(model, msgs, &tools, stream, tuning.max_tokens)
         };
-        let request = apply_auth(client.post(&url), api_key).json(&body);
-        let response = request
-            .send()
-            .await
-            .map_err(|err| http_err(&url, err))?;
+        let response = send_with_retry(
+            || prepare(client.post(&url), api_key, tuning).json(&body),
+            &url,
+            tuning,
+        )
+        .await?;
         let status = response.status();
         let text = response
             .text()
@@ -1623,12 +1857,12 @@ async fn complete_once(
             .map_err(|err| format!("Cannot read the response: {err}"))?;
         if !status.is_success() {
             if use_think && think_not_supported(status, &text) {
-                remember_model_without_think(model);
+                remember_model_without_think(&key);
                 allow_think = false;
                 continue;
             }
             if use_tools && tools_not_supported(status, &text) {
-                remember_model_without_tools(model);
+                remember_model_without_tools(&key);
                 allow_tools = false;
                 continue;
             }
@@ -1637,8 +1871,12 @@ async fn complete_once(
                 flattened = true;
                 continue;
             }
-            let snippet: String = text.chars().take(300).collect();
-            return Err(format!("Server returned {status}: {snippet}"));
+            return Err(status_error(status, &text));
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(&text)
+            && let Some(error) = stream_error(&value)
+        {
+            return Err(error.replacen("Stream error", "Server error", 1));
         }
         let mut reply = if native {
             parse_ollama_reply(&text)?
@@ -1657,7 +1895,7 @@ async fn complete_stream<F>(
     messages: &[Value],
     options: CompleteOptions<'_>,
     mut on_delta: F,
-) -> Result<Reply, String>
+) -> Result<Reply, StreamFailure>
 where
     F: FnMut(DeltaKind, &str),
 {
@@ -1666,11 +1904,13 @@ where
     }
     let url = completions_url(server);
     let api_key = options.api_key;
+    let tuning = options.tuning;
+    let key = capability_key(&url, model);
     let mut allow_tools = true;
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     let response = loop {
-        let use_tools = allow_tools && !model_skips_tools(model);
+        let use_tools = allow_tools && !model_skips_tools(&key);
         let tools = if use_tools {
             tool_specs()
         } else {
@@ -1683,20 +1923,24 @@ where
             owned = messages_with_tool_prompt(&working);
             owned.as_slice()
         };
-        let request = apply_auth(client.post(&url), api_key)
-            .header("Accept", "text/event-stream")
-            .json(&request_body(model, msgs, &tools, true));
-        let response = request
-            .send()
-            .await
-            .map_err(|err| http_err(&url, err))?;
+        let body = request_body_with(model, msgs, &tools, true, tuning.max_tokens);
+        let response = send_with_retry(
+            || {
+                prepare(client.post(&url), api_key, tuning)
+                    .header("Accept", "text/event-stream")
+                    .json(&body)
+            },
+            &url,
+            tuning,
+        )
+        .await?;
         let status = response.status();
         if status.is_success() {
             break response;
         }
         let text = response.text().await.unwrap_or_default();
         if use_tools && tools_not_supported(status, &text) {
-            remember_model_without_tools(model);
+            remember_model_without_tools(&key);
             allow_tools = false;
             continue;
         }
@@ -1705,8 +1949,12 @@ where
             flattened = true;
             continue;
         }
-        let snippet: String = text.chars().take(300).collect();
-        return Err(format!("Server returned {status}: {snippet}"));
+        let error = status_error(status, &text);
+        return Err(if fatal_stream_status(status) {
+            StreamFailure::Fatal(error)
+        } else {
+            StreamFailure::Fallback(error)
+        });
     };
     // Stash flattened flag for after assembly.
     let history_flattened = flattened;
@@ -1770,7 +2018,7 @@ where
             if line.ends_with('\r') {
                 line.pop();
             }
-            let Some(delta) = sse_data_delta(&line)? else {
+            let Some(delta) = sse_event(&line)? else {
                 continue;
             };
             saw_event = true;
@@ -1790,7 +2038,7 @@ where
         byte_buf.clear();
     }
     if !line_buf.trim().is_empty() {
-        if let Some(delta) = sse_data_delta(line_buf.trim())? {
+        if let Some(delta) = sse_event(line_buf.trim())? {
             saw_event = true;
             handle_delta(
                 &delta,
@@ -1813,7 +2061,7 @@ where
         }
     });
     if !saw_event {
-        return Err("Stream produced no events".to_string());
+        return Err("Stream produced no events".to_string().into());
     }
     let mut reply = assembler.into_reply()?;
     reply.history_flattened = history_flattened;
@@ -1836,18 +2084,20 @@ async fn complete_ollama_stream<F>(
     messages: &[Value],
     options: CompleteOptions<'_>,
     mut on_delta: F,
-) -> Result<Reply, String>
+) -> Result<Reply, StreamFailure>
 where
     F: FnMut(DeltaKind, &str),
 {
     let url = ollama_chat_url(server);
+    let tuning = options.tuning;
+    let key = capability_key(&url, model);
     let mut allow_tools = true;
-    let mut allow_think = options.think && !model_skips_think(model);
+    let mut allow_think = options.think && !model_skips_think(&key);
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     let response = loop {
-        let use_tools = allow_tools && !model_skips_tools(model);
-        let use_think = allow_think && !model_skips_think(model);
+        let use_tools = allow_tools && !model_skips_tools(&key);
+        let use_think = allow_think && !model_skips_think(&key);
         let tools = if use_tools {
             tool_specs()
         } else {
@@ -1861,24 +2111,33 @@ where
             owned.as_slice()
         };
         let ollama_msgs = messages_for_ollama_native(msgs);
-        let body = ollama_request_body(model, &ollama_msgs, &tools, true, options.num_ctx, use_think);
-        let request = apply_auth(client.post(&url), options.api_key).json(&body);
-        let response = request
-            .send()
-            .await
-            .map_err(|err| http_err(&url, err))?;
+        let body = ollama_request_body_with(
+            model,
+            &ollama_msgs,
+            &tools,
+            true,
+            options.num_ctx,
+            use_think,
+            tuning.max_tokens,
+        );
+        let response = send_with_retry(
+            || prepare(client.post(&url), options.api_key, tuning).json(&body),
+            &url,
+            tuning,
+        )
+        .await?;
         let status = response.status();
         if status.is_success() {
             break response;
         }
         let text = response.text().await.unwrap_or_default();
         if use_think && think_not_supported(status, &text) {
-            remember_model_without_think(model);
+            remember_model_without_think(&key);
             allow_think = false;
             continue;
         }
         if use_tools && tools_not_supported(status, &text) {
-            remember_model_without_tools(model);
+            remember_model_without_tools(&key);
             allow_tools = false;
             continue;
         }
@@ -1887,8 +2146,12 @@ where
             flattened = true;
             continue;
         }
-        let snippet: String = text.chars().take(300).collect();
-        return Err(format!("Server returned {status}: {snippet}"));
+        let error = status_error(status, &text);
+        return Err(if fatal_stream_status(status) {
+            StreamFailure::Fatal(error)
+        } else {
+            StreamFailure::Fallback(error)
+        });
     };
     let history_flattened = flattened;
     let mut content = String::new();
@@ -1924,6 +2187,9 @@ where
             let Ok(value) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
+            if let Some(error) = stream_error(&value) {
+                return Err(StreamFailure::Fatal(error));
+            }
             saw_event = true;
             if let Some(message) = value.get("message") {
                 for key in ["thinking", "reasoning", "reasoning_content"] {
@@ -1977,7 +2243,7 @@ where
         }
     });
     if !saw_event {
-        return Err("Stream produced no events".to_string());
+        return Err("Stream produced no events".to_string().into());
     }
     // Tags were already routed into `thinking` via ContentThinkSplit; strip only.
     let (visible, _) = split_think_tags(&content);
@@ -2298,7 +2564,14 @@ mod tests {
             &server_url,
             "qwen",
             &messages,
-            CompleteOptions { api_key: "secret-key", stream: false, num_ctx: None, ollama_native: false, think: true },
+            CompleteOptions {
+                api_key: "secret-key",
+                stream: false,
+                num_ctx: None,
+                ollama_native: false,
+                think: true,
+                tuning: &DEFAULT_TUNING,
+            },
         )
         .await
         .unwrap();
@@ -2331,7 +2604,14 @@ mod tests {
             &server_url,
             "qwen",
             &messages,
-            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false, think: true },
+            CompleteOptions {
+                api_key: "",
+                stream: true,
+                num_ctx: None,
+                ollama_native: false,
+                think: true,
+                tuning: &DEFAULT_TUNING,
+            },
             |kind, text| {
                 if kind == DeltaKind::Content {
                     pieces.push(text.to_string());
@@ -2372,7 +2652,14 @@ mod tests {
             &server_url,
             "qwen2.5-coder:7b",
             &messages,
-            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false, think: true },
+            CompleteOptions {
+                api_key: "",
+                stream: true,
+                num_ctx: None,
+                ollama_native: false,
+                think: true,
+                tuning: &DEFAULT_TUNING,
+            },
             |kind, text| {
                 if kind == DeltaKind::Content {
                     pieces.push(text.to_string());
@@ -2457,7 +2744,14 @@ mod tests {
             &server_url,
             "qwen",
             &messages,
-            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false, think: true },
+            CompleteOptions {
+                api_key: "",
+                stream: true,
+                num_ctx: None,
+                ollama_native: false,
+                think: true,
+                tuning: &DEFAULT_TUNING,
+            },
         )
         .await
         .unwrap();
@@ -2921,7 +3215,9 @@ mod tests {
                 stream: true,
                 num_ctx: Some(2048),
                 ollama_native: true,
-             think: true },
+                think: true,
+                tuning: &DEFAULT_TUNING,
+            },
             |kind, text| match kind {
                 DeltaKind::Thinking => thinking.push_str(text),
                 DeltaKind::Content => content.push_str(text),
@@ -2972,7 +3268,14 @@ mod tests {
             "http://127.0.0.1:11434/v1",
             "qwen2.5-coder:0.5b",
             &messages,
-            CompleteOptions { api_key: "", stream: true, num_ctx: None, ollama_native: false, think: true },
+            CompleteOptions {
+                api_key: "",
+                stream: true,
+                num_ctx: None,
+                ollama_native: false,
+                think: true,
+                tuning: &DEFAULT_TUNING,
+            },
             |kind, text| {
                 if kind == DeltaKind::Content {
                     pieces.push(text.to_string());
@@ -3000,5 +3303,449 @@ mod tests {
                 "{reply:?}"
             );
         }
+    }
+
+    /// Accepts `rounds` connections in order. `handler(round, request)` writes the answer.
+    /// The join handle returns every request it saw.
+    fn spawn_rounds<F>(rounds: usize, handler: F) -> (String, thread::JoinHandle<Vec<String>>)
+    where
+        F: Fn(usize, &str) -> String + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut seen = Vec::new();
+            for round in 0..rounds {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream);
+                let answer = handler(round, &request);
+                stream.write_all(answer.as_bytes()).unwrap();
+                seen.push(request);
+            }
+            seen
+        });
+        (format!("http://{addr}/v1"), server)
+    }
+
+    /// Headers plus the whole `Content-Length` body, however many reads that takes.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut buf = [0u8; 16384];
+        loop {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&bytes);
+            if let Some(head_end) = text.find("\r\n\r\n") {
+                let length = text[..head_end]
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if bytes.len() >= head_end + 4 + length {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    fn http(status: &str, content_type: &str, extra: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn ok_json(content: &str) -> String {
+        let body =
+            json!({"choices":[{"message":{"role":"assistant","content":content}}]}).to_string();
+        http("200 OK", "application/json", "", &body)
+    }
+
+    fn body_of(request: &str) -> Value {
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str(body).unwrap()
+    }
+
+    fn quick(retries: u32) -> Tuning {
+        Tuning {
+            retries,
+            backoff: Duration::from_millis(1),
+            ..Tuning::default()
+        }
+    }
+
+    #[test]
+    fn default_tuning_keeps_the_lm_studio_and_ollama_bodies_byte_for_byte() {
+        let messages = [json!({"role":"user","content":"hi"})];
+        // The exact bytes the client sent before Max tokens existed.
+        assert_eq!(
+            request_body_with("qwen", &messages, &[], true, DEFAULT_TUNING.max_tokens).to_string(),
+            r#"{"max_tokens":16384,"messages":[{"content":"hi","role":"user"}],"model":"qwen","stream":true,"temperature":0.2}"#
+        );
+        assert_eq!(
+            ollama_request_body_with(
+                "qwen",
+                &messages,
+                &[],
+                true,
+                Some(16384),
+                true,
+                DEFAULT_TUNING.max_tokens
+            )
+            .to_string(),
+            r#"{"messages":[{"content":"hi","role":"user"}],"model":"qwen","options":{"num_ctx":16384,"num_predict":16384,"temperature":0.2},"stream":true,"think":true}"#
+        );
+        assert_eq!(
+            request_body("qwen", &messages, &[], false),
+            request_body_with("qwen", &messages, &[], false, Some(16384))
+        );
+        let omitted = request_body_with("qwen", &messages, &[], false, None);
+        assert!(omitted.get("max_tokens").is_none(), "{omitted}");
+        let omitted = ollama_request_body_with("qwen", &messages, &[], false, None, false, None);
+        assert!(omitted["options"].get("num_predict").is_none(), "{omitted}");
+    }
+
+    #[tokio::test]
+    async fn default_tuning_sends_no_extra_headers() {
+        let (url, server) = spawn_rounds(1, |_, _| ok_json("ok"));
+        let client = reqwest::Client::new();
+        let messages = [json!({"role":"user","content":"hi"})];
+        let reply = complete(&client, &url, "qwen", &messages, CompleteOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(reply.content, "ok");
+        let request = server.join().unwrap().remove(0).to_ascii_lowercase();
+        assert!(!request.contains("http-referer"), "{request}");
+        assert!(!request.contains("x-title"), "{request}");
+        assert!(!request.contains("authorization"), "{request}");
+        assert_eq!(body_of(&request)["max_tokens"], json!(16384));
+    }
+
+    #[tokio::test]
+    async fn openrouter_tuning_sends_its_headers_and_leaves_out_max_tokens() {
+        let (url, server) = spawn_rounds(1, |_, _| ok_json("routed"));
+        let client = reqwest::Client::new();
+        let tuning = Tuning {
+            max_tokens: None,
+            headers: vec![
+                (
+                    "HTTP-Referer".into(),
+                    "https://github.com/Manuree/duckx-code".into(),
+                ),
+                ("X-Title".into(), "duckx-code".into()),
+            ],
+            ..quick(0)
+        };
+        let options = CompleteOptions {
+            api_key: "sk-or-test",
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        let reply = complete(
+            &client,
+            &url,
+            "anthropic/claude-sonnet-4",
+            &messages,
+            options,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.content, "routed");
+        let request = server.join().unwrap().remove(0);
+        let lower = request.to_ascii_lowercase();
+        assert!(
+            lower.contains("authorization: bearer sk-or-test"),
+            "{request}"
+        );
+        assert!(
+            lower.contains("http-referer: https://github.com/manuree/duckx-code"),
+            "{request}"
+        );
+        assert!(lower.contains("x-title: duckx-code"), "{request}");
+        let body = body_of(&request);
+        assert!(body.get("max_tokens").is_none(), "{body}");
+        assert_eq!(body["model"], json!("anthropic/claude-sonnet-4"));
+    }
+
+    #[tokio::test]
+    async fn a_429_is_retried_after_retry_after_and_then_succeeds() {
+        let (url, server) = spawn_rounds(3, |round, _| match round {
+            0 => http(
+                "429 Too Many Requests",
+                "application/json",
+                "Retry-After: 0\r\n",
+                r#"{"error":{"message":"slow down"}}"#,
+            ),
+            1 => http("503 Service Unavailable", "text/plain", "", "busy"),
+            _ => ok_json("third time"),
+        });
+        let client = reqwest::Client::new();
+        let tuning = quick(2);
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        let reply = complete(&client, &url, "retry-model", &messages, options)
+            .await
+            .unwrap();
+        assert_eq!(reply.content, "third time");
+        let seen = server.join().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(
+            body_of(&seen[0]),
+            body_of(&seen[2]),
+            "a retry resends the same body"
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_stop_at_the_setting_and_report_the_last_status() {
+        let (url, server) = spawn_rounds(2, |_, _| {
+            http(
+                "500 Internal Server Error",
+                "application/json",
+                "",
+                r#"{"error":{"message":"upstream exploded"}}"#,
+            )
+        });
+        let client = reqwest::Client::new();
+        let tuning = quick(1);
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        let err = complete(&client, &url, "flaky", &messages, options)
+            .await
+            .unwrap_err();
+        assert!(err.contains("500"), "{err}");
+        assert!(err.contains("upstream exploded"), "{err}");
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn auth_credit_rate_and_server_errors_never_mean_a_model_lacks_tools_or_think() {
+        let body = "tool use is not supported; think is not supported; unknown field tools";
+        for code in [401u16, 402, 403, 408, 429, 500, 502, 503] {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert!(!tools_not_supported(status, body), "{code}");
+            assert!(!think_not_supported(status, body), "{code}");
+        }
+        for code in [400u16, 404, 422] {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert!(tools_not_supported(status, body), "{code}");
+            assert!(think_not_supported(status, body), "{code}");
+        }
+        let openrouter =
+            r#"{"error":{"message":"No endpoints found that support tool use.","code":404}}"#;
+        assert!(tools_not_supported(
+            reqwest::StatusCode::NOT_FOUND,
+            openrouter
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_401_with_tool_words_keeps_tools_for_the_next_turn() {
+        let (url, server) = spawn_rounds(2, |round, _| match round {
+            0 => http(
+                "401 Unauthorized",
+                "application/json",
+                "",
+                r#"{"error":{"message":"invalid key: tool use is not supported for anonymous users"}}"#,
+            ),
+            _ => ok_json("ok"),
+        });
+        let client = reqwest::Client::new();
+        let messages = [json!({"role":"user","content":"hi"})];
+        let model = "cloud-401-model";
+        let err = complete(&client, &url, model, &messages, CompleteOptions::default())
+            .await
+            .unwrap_err();
+        assert!(err.contains("401"), "{err}");
+        assert!(err.contains("API key"), "{err}");
+        assert!(!model_skips_tools(&capability_key(
+            &completions_url(&url),
+            model
+        )));
+        complete(&client, &url, model, &messages, CompleteOptions::default())
+            .await
+            .unwrap();
+        let seen = server.join().unwrap();
+        assert!(
+            body_of(&seen[1]).get("tools").is_some(),
+            "tools must still be sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_streamed_402_is_final_and_does_not_fall_back() {
+        let (url, server) = spawn_rounds(1, |_, request| {
+            assert!(request.contains("\"stream\":true"), "{request}");
+            http(
+                "402 Payment Required",
+                "application/json",
+                "",
+                r#"{"error":{"message":"Insufficient credits"}}"#,
+            )
+        });
+        let client = reqwest::Client::new();
+        let options = CompleteOptions {
+            stream: true,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        let err = complete_with_delta(&client, &url, "paid", &messages, options, |_, _| {})
+            .await
+            .unwrap_err();
+        assert!(err.contains("402"), "{err}");
+        assert!(err.contains("Insufficient credits"), "{err}");
+        assert_eq!(
+            server.join().unwrap().len(),
+            1,
+            "no second, non-streaming request"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_event_inside_the_stream_is_reported() {
+        let (url, server) = spawn_rounds(1, |_, _| {
+            let events = concat!(
+                ": OPENROUTER PROCESSING\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+                "data: {\"error\":{\"message\":\"Provider returned error\",\"code\":502}}\n\n",
+            );
+            http("200 OK", "text/event-stream", "", events)
+        });
+        let client = reqwest::Client::new();
+        let options = CompleteOptions {
+            stream: true,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        let mut shown = String::new();
+        let err = complete_with_delta(
+            &client,
+            &url,
+            "mid-stream",
+            &messages,
+            options,
+            |_, text| shown.push_str(text),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "Stream error 502: Provider returned error");
+        assert_eq!(shown, "Hel");
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_ollama_error_line_ends_the_native_stream() {
+        let (url, server) = spawn_rounds(1, |_, request| {
+            assert!(request.starts_with("POST /api/chat"), "{request}");
+            http(
+                "200 OK",
+                "application/x-ndjson",
+                "",
+                "{\"error\":\"model runner has unexpectedly stopped\"}\n",
+            )
+        });
+        let client = reqwest::Client::new();
+        let options = CompleteOptions {
+            stream: true,
+            ollama_native: true,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        let err = complete_with_delta(&client, &url, "ollama-crash", &messages, options, |_, _| {})
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("model runner has unexpectedly stopped"),
+            "{err}"
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_200_with_an_error_object_is_an_error() {
+        let (url, server) = spawn_rounds(1, |_, _| {
+            http(
+                "200 OK",
+                "application/json",
+                "",
+                r#"{"error":{"message":"Model is overloaded","code":503}}"#,
+            )
+        });
+        let client = reqwest::Client::new();
+        let messages = [json!({"role":"user","content":"hi"})];
+        let err = complete(
+            &client,
+            &url,
+            "overloaded",
+            &messages,
+            CompleteOptions::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "Server error 503: Model is overloaded");
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn openrouter_no_tool_endpoint_falls_back_to_the_tool_prompt() {
+        let (url, server) = spawn_rounds(2, |round, _| match round {
+            0 => http(
+                "404 Not Found",
+                "application/json",
+                "",
+                r#"{"error":{"message":"No endpoints found that support tool use.","code":404}}"#,
+            ),
+            _ => ok_json("plain"),
+        });
+        let client = reqwest::Client::new();
+        let messages = [
+            json!({"role":"system","content":"sys"}),
+            json!({"role":"user","content":"hi"}),
+        ];
+        let reply = complete(
+            &client,
+            &url,
+            "no-tools/model",
+            &messages,
+            CompleteOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.content, "plain");
+        let seen = server.join().unwrap();
+        let second = body_of(&seen[1]);
+        assert!(second.get("tools").is_none(), "{second}");
+        assert!(
+            second["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Available tools:")
+        );
+    }
+
+    #[test]
+    fn backoff_doubles_and_is_capped() {
+        let tuning = Tuning {
+            backoff: Duration::from_secs(1),
+            ..Tuning::default()
+        };
+        assert_eq!(backoff_for(&tuning, 0), Duration::from_secs(1));
+        assert_eq!(backoff_for(&tuning, 2), Duration::from_secs(4));
+        assert_eq!(backoff_for(&tuning, 20), MAX_BACKOFF);
     }
 }
