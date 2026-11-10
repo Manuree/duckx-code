@@ -23,6 +23,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     };
     let theme = *app.styles();
     let block = panel(" Files ")
+        .title_bottom(Line::from(" ↑↓ move  enter open  esc ").right_aligned())
         .border_style(theme.command_border)
         .style(Style::new().bg(theme.editor_bg));
     let inner = block.inner(rect);
@@ -89,13 +90,14 @@ fn file_line(
     theme: &UiStyles,
 ) -> Line<'static> {
     let selected = row == picker.selected;
+    // The same bar as every other list: the editor selection color, full width.
     let row_bg = if selected {
-        theme.hint_active.bg.unwrap_or(theme.editor_bg)
+        theme.selection.bg.unwrap_or(theme.editor_bg)
     } else {
         theme.editor_bg
     };
     let base = if selected {
-        theme.hint_active
+        Style::new().fg(theme.hint_active_name.fg.unwrap_or(theme.editor_fg))
     } else {
         Style::new().fg(theme.editor_fg)
     };

@@ -266,7 +266,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 | `Backspace` | Delete the last input character |
 
 * **Where it sits:** the bar is the status line. The badge reads `COMMAND` and you type after `❯`. The file name is hidden until the bar closes.
-* **Hints:** matching commands stack upward from the status line, one command per row, in list order. `Up` moves the highlight to the row above and `Down` to the row below. The highlighted row shows `↑↓  tab  enter  esc` on the right. The list disappears when the bar closes.
+* **Hints:** matching commands sit in a rounded `Commands` list just above the status line, one command per row, in list order. `Up` moves the highlight to the row above and `Down` to the row below. The highlighted row is a full-width bar marked `›`. `↑↓  tab  enter  esc` sits in the list's bottom border, and `n/len` in the top border when there are more matches than rows. The list disappears when the bar closes.
 * **Focus context:** the list is only the commands for the surface that was focused when the bar opened. From an editor, file commands (`select`, `move`, `delete`, `rename`) are absent. From the explorer, editing commands (`goto`, `save`, `undo`, …) are absent, and `move`, `delete`, and `rename` appear only in FILE mode. `file-picker`, `workspace`, `reveal`, `explorer`, `setting`, `about`, and `quit` are in both. Typing a command from the other surface reports where it applies and does not run it. Typing `move`, `delete`, or `rename` outside FILE mode reports that it applies in FILE mode.
 * **Terminals that hide `Shift + Space`:** some terminals, including some integrated editor terminals, send `Shift + Space` as a plain space. If the bar doesn't open, use `F1`.
 * **Space inside the bar:** pressing `Shift + Space` while the bar is open types a normal space.
@@ -282,7 +282,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 ### 6.3 Running Commands
 
 * **Arguments:** put them after the command name, separated by a space, e.g. `goto 42`.
-* **File and folder names:** `move`, `rename`, `save`, and `workspace` draw the rest of the closest matching name in dim text after what you typed. The block cursor sits on the first character of that hint, and `Right` accepts the whole hint. The highlighted row shows `→` while the hint is visible. The closest name is the shortest match, then A–Z, ignoring case and treating `\` like `/`. A name you have already finished is left alone, so `move src` does not grow into `move src/ui`. `move`, `rename`, and `save` take names from the workspace tree the explorer has scanned. `move` hints folders. `rename` hints names in the same folder as the focused row. `save` hints files and folders. `workspace` hints folders saved in `session.json`. `Right` does nothing when there is no hint.
+* **File and folder names:** `move`, `rename`, `save`, and `workspace` draw the rest of the closest matching name in dim text after what you typed. The block cursor sits on the first character of that hint, and `Right` accepts the whole hint. The keys in the list's border show `→` while the hint is visible. The closest name is the shortest match, then A–Z, ignoring case and treating `\` like `/`. A name you have already finished is left alone, so `move src` does not grow into `move src/ui`. `move`, `rename`, and `save` take names from the workspace tree the explorer has scanned. `move` hints folders. `rename` hints names in the same folder as the focused row. `save` hints files and folders. `workspace` hints folders saved in `session.json`. `Right` does nothing when there is no hint.
 * **Exact names win:** a fully typed command name runs even if another suggestion is highlighted.
 * **Missing arguments:** pressing `Enter` on a command that needs an argument fills in `goto ` and waits for you to type it. `find` and `replace` take no argument: `Enter` opens FIND or REPLACE mode. `replace kitten` opens REPLACE mode with that new word already typed.
 * **Errors:** messages such as `Unknown command` or `Invalid line number` appear in yellow in the status bar until the next key press.
@@ -512,8 +512,10 @@ The layout follows Neovim's lualine (Tokyo Night colors), with powerline separat
 While the Command Bar is open the file name is hidden, and matching commands stack above the status line:
 
 ```text
- split-right   Open an empty editor to the right
- split-down    Open an empty editor below            ↑↓  tab  enter  esc
+ ╭ Commands ─────────────────────────────────────────────────╮
+ │› split-right      Open an empty editor to the right       │
+ │  split-down       Open an empty editor below              │
+ ╰─────────────────────────────────── ↑↓  tab  enter  esc ───╯
  COMMAND  ❯ spli                                     12 selected   8%   8:209   4 LF
 ```
 
@@ -558,7 +560,7 @@ These keys stay where they are, so the editor can always be used and closed:
 * `F1` and `Ctrl + ;` still open the command bar, even when the Command bar row is a different chord.
 * `Ctrl + Q` still quits.
 
-Appearance is saved. **Color theme** is the interface. **Syntax colors** is the code. The value on the right is the theme name, with `▾` to show that the row opens a list. The open list uses the command-bar rows: the highlighted name is the accent color, the other names are dim, and `↑↓  enter  esc` sits at the right of the highlighted row. There is no border around the list. The syntax row also draws `fn main() { "hi" }` in the keyword, function, punctuation, and string colors of the selected syntax theme.
+Appearance is saved. **Color theme** is the interface. **Syntax colors** is the code. The value on the right is the theme name, with `▾` to show that the row opens a list. The open list is a rounded panel right under the row, aligned to the value: the highlighted name is a full-width bar in the accent color marked `›`, and `↑↓ move  enter select  esc` sits in the bottom border. Every other list in the app (recent values, command matches, the assistant's `/` and `@` lists, completion, references, actions) looks the same. The syntax row also draws `fn main() { "hi" }` in the keyword, function, punctuation, and string colors of the selected syntax theme.
 
 | Keys | Action |
 | :--- | :--- |
@@ -643,7 +645,7 @@ A color theme may add a `diagnostics` section with `error`, `warning`, `info`, a
 | OpenRouter referer | text | OpenRouter only. Sent as `HTTP-Referer`. Default `https://github.com/Manuree/duckx-code`. Empty sends none. |
 | Clear recent history | `Enter` | Forgets every remembered server and model, for all providers. The row shows how many are saved. Current values stay. |
 
-**Recent values.** Server and Model each keep the last 10 values, newest first: a value goes to the front when you save the row, when `/model name` switches to it, and when a turn with it gets an answer. Servers are kept per provider, and models per provider and server, so OpenRouter's list never shows Ollama tags. While typing one of these rows, a list opens under it: `Down` / `Up` walk it and put the highlighted value in the row (past either end returns to what you typed), typing filters it by any part of the name in any case, `Delete` on a highlighted recent value forgets it, and `Enter` keeps the row. The Model list also shows the models the server reports (`server` on the right, after the `recent` ones); they are fetched in the background when the row opens. API keys are never remembered. The lists are saved under `ai.recent` in `settings.json`; a hand-edited list is trimmed to 10 without repeats when it loads.
+**Recent values.** Server and Model each keep the last 10 values, newest first: a value goes to the front when you save the row, when `/model name` switches to it, and when a turn with it gets an answer. Servers are kept per provider, and models per provider and server, so OpenRouter's list never shows Ollama tags. While typing one of these rows, a rounded `Recent` list opens under it, with `recent` or `server` at the right of each entry and `↑↓ pick  del forget  enter save` in its border: `Down` / `Up` walk it and put the highlighted value in the row (past either end returns to what you typed), typing filters it by any part of the name in any case, `Delete` on a highlighted recent value forgets it, and `Enter` keeps the row. The Model list also shows the models the server reports (`server` on the right, after the `recent` ones); they are fetched in the background when the row opens. API keys are never remembered. The lists are saved under `ai.recent` in `settings.json`; a hand-edited list is trimmed to 10 without repeats when it loads.
 
 A model the server rejects `tools` or `think` for is remembered for that server and model only. A 401, 402, 403, 408, 429, or 5xx answer never marks a model that way, whatever its text says.
 
