@@ -61,6 +61,8 @@ pub enum SettingId {
     AiAppName,
     /// OpenRouter `HTTP-Referer`.
     AiReferer,
+    /// Forget every remembered server and model.
+    AiClearRecent,
 }
 
 /// How a new line is ended. `Auto` keeps the ending detected in the file.
@@ -357,6 +359,71 @@ impl ProviderProfile {
     }
 }
 
+/// How many values each recent list keeps.
+pub const RECENT_LIMIT: usize = 10;
+
+/// Servers and models typed or used before, newest first, at most [`RECENT_LIMIT`]
+/// each. API keys are never kept here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiRecent {
+    /// Base URLs per provider.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub servers: BTreeMap<AiProvider, Vec<String>>,
+    /// Model names per provider and server, keyed by [`AiRecent::model_key`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, Vec<String>>,
+}
+
+impl AiRecent {
+    pub fn is_empty(&self) -> bool {
+        self.servers.values().all(Vec::is_empty) && self.models.values().all(Vec::is_empty)
+    }
+
+    /// Every remembered value, across all providers.
+    pub fn len(&self) -> usize {
+        self.servers.values().map(Vec::len).sum::<usize>()
+            + self.models.values().map(Vec::len).sum::<usize>()
+    }
+
+    /// `ollama http://127.0.0.1:11434/v1`: one provider on one server.
+    pub fn model_key(provider: AiProvider, server: &str) -> String {
+        format!(
+            "{} {}",
+            provider.as_str(),
+            server.trim().trim_end_matches('/')
+        )
+    }
+
+    /// Moves `value` to the front. Returns true when the list changed.
+    fn push(list: &mut Vec<String>, value: &str) -> bool {
+        let value = value.trim();
+        if value.is_empty() || list.first().is_some_and(|first| first == value) {
+            return false;
+        }
+        list.retain(|item| item != value);
+        list.insert(0, value.to_string());
+        list.truncate(RECENT_LIMIT);
+        true
+    }
+
+    fn remove(list: &mut Vec<String>, value: &str) -> bool {
+        let before = list.len();
+        list.retain(|item| item != value);
+        list.len() != before
+    }
+
+    /// Drops empty lists and anything past [`RECENT_LIMIT`] from a hand-edited file.
+    fn tidy(&mut self) {
+        for list in self.servers.values_mut().chain(self.models.values_mut()) {
+            let mut seen = std::collections::BTreeSet::new();
+            list.retain(|item| !item.trim().is_empty() && seen.insert(item.clone()));
+            list.truncate(RECENT_LIMIT);
+        }
+        self.servers.retain(|_, list| !list.is_empty());
+        self.models.retain(|_, list| !list.is_empty());
+    }
+}
+
 /// Where the key a request will send comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeySource {
@@ -425,6 +492,9 @@ pub struct AiPrefs {
     /// Server, model, and key of the providers that are not selected.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<AiProvider, ProviderProfile>,
+    /// The last servers and models, for the list under the Server and Model rows.
+    #[serde(default, skip_serializing_if = "AiRecent::is_empty")]
+    pub recent: AiRecent,
 }
 
 fn default_context_size() -> String {
@@ -465,6 +535,7 @@ impl Default for AiPrefs {
             openrouter_app_name: default_app_name(),
             openrouter_referer: default_referer(),
             profiles: BTreeMap::new(),
+            recent: AiRecent::default(),
         }
     }
 }
@@ -492,6 +563,72 @@ impl AiPrefs {
             self.provider.default_server().to_string()
         } else {
             server.to_string()
+        }
+    }
+
+    /// Recent servers for the selected provider, newest first.
+    pub fn recent_servers(&self) -> &[String] {
+        self.recent
+            .servers
+            .get(&self.provider)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Recent models for the selected provider on its current server, newest first.
+    pub fn recent_models(&self) -> &[String] {
+        self.recent
+            .models
+            .get(&AiRecent::model_key(self.provider, &self.endpoint()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Remembers the current server (when one is typed) and model. True when a list changed.
+    pub fn remember_current(&mut self) -> bool {
+        let mut changed = false;
+        if !self.server.trim().is_empty() {
+            let server = self.endpoint();
+            changed |= AiRecent::push(
+                self.recent.servers.entry(self.provider).or_default(),
+                &server,
+            );
+        }
+        if !self.model.trim().is_empty() {
+            let key = AiRecent::model_key(self.provider, &self.endpoint());
+            let model = self.model.clone();
+            changed |= AiRecent::push(self.recent.models.entry(key).or_default(), &model);
+        }
+        changed
+    }
+
+    /// Forgets one value from the Server or Model list. True when it was there.
+    pub fn forget_recent(&mut self, id: SettingId, value: &str) -> bool {
+        let removed = match id {
+            SettingId::AiServer => self
+                .recent
+                .servers
+                .get_mut(&self.provider)
+                .is_some_and(|list| AiRecent::remove(list, value)),
+            SettingId::AiModel => {
+                let key = AiRecent::model_key(self.provider, &self.endpoint());
+                self.recent
+                    .models
+                    .get_mut(&key)
+                    .is_some_and(|list| AiRecent::remove(list, value))
+            }
+            _ => false,
+        };
+        self.recent.tidy();
+        removed
+    }
+
+    /// Recent values for a text row. Only Server and Model keep a list.
+    pub fn recent_for(&self, id: SettingId) -> &[String] {
+        match id {
+            SettingId::AiServer => self.recent_servers(),
+            SettingId::AiModel => self.recent_models(),
+            _ => &[],
         }
     }
 
@@ -676,6 +813,7 @@ impl AiPrefs {
             SettingId::AiRetries => self.retries = DEFAULT_RETRIES,
             SettingId::AiAppName => self.openrouter_app_name = default_app_name(),
             SettingId::AiReferer => self.openrouter_referer = default_referer(),
+            SettingId::AiClearRecent => self.recent = AiRecent::default(),
             _ => {}
         }
     }
@@ -937,6 +1075,7 @@ impl SettingsFile {
     /// Drops a tab width or a chord the editor will not use, and says why.
     pub fn sanitize(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
+        self.ai.recent.tidy();
         if !matches!(self.editor.tab_width, 2 | 4 | 8) {
             warnings.push(format!(
                 "Tab width {} is not 2, 4, or 8",
@@ -1023,15 +1162,58 @@ pub struct Page {
 }
 
 /// Text being typed into a settings row. `Enter` keeps it. `Esc` drops it.
+/// Edited with the same line editor as the command bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextDraft {
-    pub value: String,
+    pub input: crate::line_edit::LineInput,
+    /// Highlighted entry in the list under the row. `None` while typing.
+    pub pick: Option<usize>,
+    /// What was typed last. The list shows entries that contain it.
+    pub filter: String,
 }
 
 impl TextDraft {
+    /// Longest value a row accepts, in characters.
+    pub const LIMIT: usize = 512;
+
     pub fn new(value: String) -> Self {
-        Self { value }
+        Self {
+            input: crate::line_edit::LineInput::new(value),
+            pick: None,
+            filter: String::new(),
+        }
     }
+
+    pub fn value(&self) -> &str {
+        self.input.text()
+    }
+}
+
+/// Where an entry in the list under the Server or Model row comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickSource {
+    /// Typed or used before. `Delete` forgets it.
+    Recent,
+    /// Listed by the server's `/models`.
+    Server,
+}
+
+/// Recent values first, then the server's models, without repeats, keeping the
+/// ones that contain `filter` (any case). An empty filter keeps everything.
+pub fn pick_list(recent: &[String], listed: &[String], filter: &str) -> Vec<(String, PickSource)> {
+    let needle = filter.trim().to_lowercase();
+    let keep = |value: &String| needle.is_empty() || value.to_lowercase().contains(&needle);
+    let mut out: Vec<(String, PickSource)> = recent
+        .iter()
+        .filter(|value| keep(value))
+        .map(|value| (value.clone(), PickSource::Recent))
+        .collect();
+    for value in listed.iter().filter(|value| keep(value)) {
+        if !recent.contains(value) {
+            out.push((value.clone(), PickSource::Server));
+        }
+    }
+    out
 }
 
 pub struct Section {
@@ -1155,23 +1337,38 @@ pub fn sections() -> &'static [Section] {
                         },
                         Item {
                             label: "Provider",
-                            detail: "Picks the default server address.",
+                            detail: "Ollama, LM Studio, OpenAI-compatible, or OpenRouter. Each keeps its own server, model, and key.",
                             id: SettingId::AiProvider,
                         },
                         Item {
                             label: "Server",
-                            detail: "OpenAI-compatible address, including /v1.",
+                            detail: "Base URL for this provider, including /v1. Empty uses the default.",
                             id: SettingId::AiServer,
                         },
                         Item {
                             label: "Model",
-                            detail: "Model name the server should run.",
+                            detail: "Model name for this provider, e.g. qwen3:8b or anthropic/claude-sonnet-4.",
                             id: SettingId::AiModel,
                         },
                         Item {
                             label: "API key",
-                            detail: "Optional Bearer token. Leave empty for local Ollama or LM Studio.",
+                            detail: "Bearer token for this provider. OPENROUTER_API_KEY or OPENAI_API_KEY wins when set.",
                             id: SettingId::AiApiKey,
+                        },
+                        Item {
+                            label: "Max tokens",
+                            detail: "Longest answer. Blank: 16384 on Ollama / LM Studio, left out on cloud. off leaves it out.",
+                            id: SettingId::AiMaxTokens,
+                        },
+                        Item {
+                            label: "Request timeout",
+                            detail: "Seconds one request may take, streaming included. 10 to 7200.",
+                            id: SettingId::AiTimeout,
+                        },
+                        Item {
+                            label: "Retries",
+                            detail: "Extra tries after 408, 429, or 5xx, waiting longer each time. 0 to 10.",
+                            id: SettingId::AiRetries,
                         },
                         Item {
                             label: "Streaming",
@@ -1184,9 +1381,29 @@ pub fn sections() -> &'static [Section] {
                             id: SettingId::AiAutoApprove,
                         },
                         Item {
+                            label: "Thinking",
+                            detail: "Ollama only: ask for think: true when the model supports it.",
+                            id: SettingId::AiThink,
+                        },
+                        Item {
                             label: "Context size",
-                            detail: "Token window for Ollama (num_ctx). Default 16384. Type auto or a number. LM Studio: set context there instead.",
+                            detail: "Ollama only: token window (num_ctx). Default 16384. Type auto or a number.",
                             id: SettingId::AiContextSize,
+                        },
+                        Item {
+                            label: "OpenRouter app name",
+                            detail: "OpenRouter only: sent as X-Title so the app shows on openrouter.ai.",
+                            id: SettingId::AiAppName,
+                        },
+                        Item {
+                            label: "OpenRouter referer",
+                            detail: "OpenRouter only: sent as HTTP-Referer. Empty sends none.",
+                            id: SettingId::AiReferer,
+                        },
+                        Item {
+                            label: "Clear recent history",
+                            detail: "Forget the last 10 servers and models kept for every provider.",
+                            id: SettingId::AiClearRecent,
                         },
                     ],
                 ),
@@ -1453,5 +1670,68 @@ mod tests {
         ai.retries = 99;
         assert_eq!(ai.resolved_timeout(), DEFAULT_TIMEOUT_SECS);
         assert_eq!(ai.resolved_retries(), MAX_RETRIES);
+    }
+
+    #[test]
+    fn recent_lists_keep_ten_newest_first_without_repeats() {
+        let mut ai = AiPrefs::default();
+        for n in 0..12 {
+            ai.model = format!("model-{n}");
+            assert!(ai.remember_current());
+        }
+        assert!(!ai.remember_current(), "same value again changes nothing");
+        ai.model = "model-5".into();
+        assert!(ai.remember_current());
+        let models = ai.recent_models();
+        assert_eq!(models.len(), RECENT_LIMIT);
+        assert_eq!(models[0], "model-5");
+        assert_eq!(models[1], "model-11");
+        assert_eq!(models.iter().filter(|m| *m == "model-5").count(), 1);
+        assert!(!models.contains(&"model-0".to_string()));
+        assert!(
+            ai.recent_servers().is_empty(),
+            "the default server is not typed"
+        );
+    }
+
+    #[test]
+    fn recent_models_belong_to_one_provider_and_server() {
+        let mut ai = AiPrefs::default();
+        ai.model = "qwen3:8b".into();
+        ai.remember_current();
+        ai.switch_provider(AiProvider::OpenRouter);
+        assert!(ai.recent_models().is_empty());
+        ai.model = "anthropic/claude-sonnet-4".into();
+        ai.server = "https://openrouter.ai/api/v1/".into();
+        ai.remember_current();
+        assert_eq!(ai.recent_servers(), ["https://openrouter.ai/api/v1/"]);
+        assert_eq!(ai.recent_models(), ["anthropic/claude-sonnet-4"]);
+        ai.switch_provider(AiProvider::Ollama);
+        assert_eq!(ai.recent_models(), ["qwen3:8b"]);
+        ai.server = "http://10.0.0.2:11434/v1".into();
+        assert!(
+            ai.recent_models().is_empty(),
+            "another server has its own models"
+        );
+        assert!(ai.forget_recent(SettingId::AiServer, "nothing") == false);
+        let text = serde_json::to_string(&ai).unwrap();
+        assert!(!text.contains("sk-"), "keys are never recent values");
+        let back: AiPrefs = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.recent, ai.recent);
+    }
+
+    #[test]
+    fn a_hand_edited_recent_list_is_tidied_on_load() {
+        let text = r#"{"ai":{"recent":{"models":{"ollama http://127.0.0.1:11434/v1":["a","a","","b","c","d","e","f","g","h","i","j","k","l"]}}}}"#;
+        let mut file: SettingsFile = serde_json::from_str(text).unwrap();
+        file.sanitize();
+        assert_eq!(
+            file.ai.recent_models(),
+            ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+        );
+        assert_eq!(file.ai.recent.len(), RECENT_LIMIT);
+        file.ai.reset(SettingId::AiClearRecent);
+        assert!(file.ai.recent.is_empty());
+        assert!(!file.to_pretty().contains("\"recent\""));
     }
 }

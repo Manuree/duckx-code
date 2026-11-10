@@ -623,18 +623,29 @@ A color theme may add a `diagnostics` section with `error`, `warning`, `info`, a
 | Format on save | On, Off | On asks the language server to format the file before it is written. |
 | Python checking | Off, Basic, Standard | How strictly pyright checks an open Python file. Basic reports an undefined name. |
 
-**AI** holds the assistant. `Enter` on Assistant or Provider opens a list. `Enter` on Server or Model types that value: the block cursor sits after the text, printable keys change it, `Enter` keeps it, and `Esc` drops the draft. An empty server uses the provider's default address. The model starts empty; a turn asks for one until it is set. The choice is written to `settings.json` under `ai`.
+**AI** holds the assistant. `Enter` on a list row (Assistant, Provider, Streaming, Auto-approve tools, Thinking) opens its list. `Enter` on a text row types that value with the same line keys as the command bar: `Left` / `Right` move by letter, `Ctrl + Left` / `Ctrl + Right` by word, `Home` / `End` (or `Ctrl + A` / `Ctrl + E`) jump to the ends, `Backspace` / `Delete` remove a letter, `Ctrl + Backspace` or `Alt + Backspace` removes a word, `Enter` keeps the value, and `Esc` drops the draft. A long value scrolls sideways to keep the cursor on screen. A number that is out of range keeps the draft open and says the allowed range. `Del` restores the highlighted row. Rows that only one provider uses are greyed for the others and say which provider they wait for (`· Ollama only`, `· OpenRouter only`); `Enter` on them only explains. Every choice is written to `settings.json` under `ai`.
 
 | Row | Values | Effect |
 | :--- | :--- | :--- |
 | Assistant | On, Off | Off refuses to send a prompt. |
-| Provider | Ollama, LM Studio, OpenAI-compatible, OpenRouter | Ollama defaults to `http://127.0.0.1:11434/v1`, LM Studio to `http://127.0.0.1:1234/v1`, OpenAI-compatible to `https://api.openai.com/v1`, and OpenRouter to `https://openrouter.ai/api/v1`. Each provider keeps its own Server, Model, and API key: switching away saves them under `ai.profiles` and switching back restores them. An older file's `"openai"` loads as LM Studio and is saved as `"lmstudio"`. |
-| Server | text | Base address, including `/v1`. Ollama talks to native `/api/chat` (derived from this URL) so Context size works. LM Studio stays on `/v1/chat/completions`. |
-| Model | text | Model name sent as `model`. |
-| API key | text | Optional Bearer token. Empty (default) sends no Authorization header — right for local Ollama and LM Studio. `OPENROUTER_API_KEY` (OpenRouter) or `OPENAI_API_KEY` (OpenAI-compatible) wins over the saved key when it is set. The key is also sent when listing models. |
-| Streaming | On, Off | On (default) streams tokens (SSE on LM Studio; NDJSON on Ollama native) and shows text as it arrives; falls back to one JSON reply if streaming fails. Off always uses one JSON reply. |
+| Provider | Ollama, LM Studio, OpenAI-compatible, OpenRouter | Ollama defaults to `http://127.0.0.1:11434/v1`, LM Studio to `http://127.0.0.1:1234/v1`, OpenAI-compatible to `https://api.openai.com/v1`, and OpenRouter to `https://openrouter.ai/api/v1`. Each provider keeps its own Server, Model, and API key: switching away saves them under `ai.profiles` and switching back restores them. Moving through the open list previews a provider; `Esc` goes back to the one you had. An older file's `"openai"` loads as LM Studio and is saved as `"lmstudio"`. |
+| Server | text | This provider's base address, including `/v1`. Empty shows `(default)` and uses the provider's address. Ollama talks to native `/api/chat` (derived from this URL) so Context size works; the others use `/v1/chat/completions`. |
+| Model | text | This provider's model name, sent as `model` (for OpenRouter a slug such as `anthropic/claude-sonnet-4`). |
+| API key | text, shown as dots | This provider's Bearer token. Empty (default) sends no Authorization header — right for local Ollama and LM Studio. `OPENROUTER_API_KEY` (OpenRouter) or `OPENAI_API_KEY` (OpenAI-compatible) wins over the saved key when it is set, and the row then reads `•••••••• (from OPENROUTER_API_KEY)`. The key is also sent when listing models. It is stored in plain text in `settings.json`; use the environment variable to keep it out of the file. |
+| Max tokens | blank, `off`, or 1 to 1000000 | Longest answer (`max_tokens`, or `num_predict` on Ollama). Blank (default) keeps the 16384 cap on Ollama and LM Studio and leaves it out on OpenAI-compatible and OpenRouter, so the model's own limit applies. `off` leaves it out everywhere. |
+| Request timeout | 10 to 7200 seconds | Time one request may take, streaming included. Default 1800 (30 minutes) so a slow local model can finish a large `create_file`. |
+| Retries | 0 to 10 | Extra tries after a 408, 429, or 5xx answer. Default 3. The wait doubles from one second (at most 30 seconds) and follows the server's `Retry-After` when it sends one. A refused connection, a bad key (401), no credits (402), or a forbidden model (403) is reported at once. |
+| Streaming | On, Off | On (default) streams tokens (SSE on `/v1`; NDJSON on Ollama native) and shows text as it arrives; falls back to one JSON reply if streaming fails. An error the server sends inside the stream, and a 401 / 402 / 403 / 408 / 429 / 5xx answer, is shown as the error instead of retrying without streaming. Off always uses one JSON reply. |
 | Auto-approve tools | On, Off | On runs `apply_edit`, `create_file`, and `save` without asking. Off (default) shows Yes/No buttons in the assistant panel. |
-| Context size | text (`16384`, `auto`, or a number) | Token window for Ollama (`options.num_ctx`). Default `16384`. `auto` uses 16384. OpenAI-compat `/v1` ignores `num_ctx` on current Ollama — that is why the Ollama provider uses native `/api/chat`. LM Studio: set context in LM Studio; this row only budgets client history. You can also set host env `OLLAMA_CONTEXT_LENGTH` as a fallback. |
+| Thinking | On, Off | Ollama only. On (default) sends `think: true` when the model supports it and drops it for models that reject it. |
+| Context size | text (`16384`, `auto`, or a number) | Ollama only. Token window (`options.num_ctx`). Default `16384`. `auto` uses 16384. OpenAI-compat `/v1` ignores `num_ctx` on current Ollama — that is why the Ollama provider uses native `/api/chat`. LM Studio: set context in LM Studio; this row only budgets client history. You can also set host env `OLLAMA_CONTEXT_LENGTH` as a fallback. |
+| OpenRouter app name | text | OpenRouter only. Sent as `X-Title` so requests show under this name on openrouter.ai. Default `duckx-code`. Empty sends none. |
+| OpenRouter referer | text | OpenRouter only. Sent as `HTTP-Referer`. Default `https://github.com/Manuree/duckx-code`. Empty sends none. |
+| Clear recent history | `Enter` | Forgets every remembered server and model, for all providers. The row shows how many are saved. Current values stay. |
+
+**Recent values.** Server and Model each keep the last 10 values, newest first: a value goes to the front when you save the row, when `/model name` switches to it, and when a turn with it gets an answer. Servers are kept per provider, and models per provider and server, so OpenRouter's list never shows Ollama tags. While typing one of these rows, a list opens under it: `Down` / `Up` walk it and put the highlighted value in the row (past either end returns to what you typed), typing filters it by any part of the name in any case, `Delete` on a highlighted recent value forgets it, and `Enter` keeps the row. The Model list also shows the models the server reports (`server` on the right, after the `recent` ones); they are fetched in the background when the row opens. API keys are never remembered. The lists are saved under `ai.recent` in `settings.json`; a hand-edited list is trimmed to 10 without repeats when it loads.
+
+A model the server rejects `tools` or `think` for is remembered for that server and model only. A 401, 402, 403, 408, 429, or 5xx answer never marks a model that way, whatever its text says.
 
 Code uses the syntax theme's `text` color. The other syntax roles are stored for highlighting and are what the sample on the Syntax colors row shows.
 
@@ -659,7 +670,7 @@ A line is a slash command only when `/` is the first character of the prompt (po
 | `/new` | Start a new chat (also `Ctrl+L`). |
 | `/clear` | Same as `/new`. |
 | `/help` | List slash commands and key hints. |
-| `/model [name]` | Show the current model, list models from the server (`/api/tags` or `/v1/models`), or switch to `name`. |
+| `/model [name]` | Show the current model, list models from the server (`/api/tags` or `/v1/models`, sent with the provider's key), or switch to `name`. The list is fetched in the background and appears in the transcript when it arrives. |
 | `/provider [ollama, lmstudio, openai-compatible, or openrouter]` | Show or switch the AI provider. Each provider keeps its own server, model, and key. |
 | `/context [n or auto]` | Show or set context size (`num_ctx`). |
 | `/stream on or off` | Toggle response streaming. |

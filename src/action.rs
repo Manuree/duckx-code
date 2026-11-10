@@ -289,8 +289,14 @@ pub enum SettingsAction {
     Assign(String),
     /// Characters typed into a text row.
     Insert(String),
-    /// Delete the last character of a text row.
+    /// `Backspace` in a text row: the grapheme before the cursor.
     DeleteChar,
+    /// `Delete` in a text row: the grapheme after the cursor.
+    DeleteForward,
+    /// `Ctrl+Backspace` / `Alt+Backspace` in a text row: back to the previous word stop.
+    DeleteWordBack,
+    /// Cursor moves inside a text row.
+    Cursor(crate::command::LineMove),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

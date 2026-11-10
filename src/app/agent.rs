@@ -34,6 +34,7 @@ impl App {
                 self.agent.thinking_draft = None;
                 self.remember_assistant(&text);
                 self.push_line(false, text);
+                self.remember_working_target();
                 self.agent.busy = false;
                 self.agent.busy_started = None;
                 self.agent.status = "ready".to_string();
@@ -321,7 +322,7 @@ impl App {
         self.focus_agent();
     }
 
-    fn submit_agent(&mut self) {
+    pub(crate) fn submit_agent(&mut self) {
         let prompt = self.agent.prompt.to_string();
         if prompt.trim().is_empty() || self.agent.busy {
             return;
@@ -376,6 +377,11 @@ impl App {
         self.agent.status = "waiting".to_string();
         let ollama_native = self.ai.provider == crate::settings::AiProvider::Ollama;
         let (api_key, _) = self.ai.resolved_api_key();
+        self.agent_target = Some((
+            self.ai.provider,
+            self.ai.endpoint(),
+            self.ai.model.trim().to_string(),
+        ));
         let _ = tx.send(AgentCommand::Turn {
             id,
             server: self.ai.endpoint(),
@@ -1189,10 +1195,11 @@ impl App {
         );
     }
 
-    fn slash_model(&mut self, args: &str) {
+    pub(crate) fn slash_model(&mut self, args: &str) {
         let name = args.trim();
         if !name.is_empty() {
             self.ai.model = name.to_string();
+            self.ai.remember_current();
             self.persist_ai_prefs();
             self.push_line(false, format!("model set to {name}"));
             return;
@@ -1202,23 +1209,69 @@ impl App {
         } else {
             self.ai.model.clone()
         };
-        let listed = fetch_model_names(&self.ai);
-        if listed.is_empty() {
-            self.push_line(
-                false,
-                format!("model {current} · (could not list models from server)"),
-            );
-        } else {
-            let mut lines = vec![format!("model {current}"), "Available:".into()];
-            for m in listed.into_iter().take(30) {
-                lines.push(format!("  {m}"));
+        // Listing runs off the UI thread; the answer lands in `models_listed`.
+        let job = self.list_models_job();
+        if let crate::jobs::Job::ListModels { url, .. } = &job {
+            self.agent.listing_models = Some(url.clone());
+        }
+        self.jobs.push(job);
+        self.push_line(false, format!("model {current} · listing models…"));
+    }
+
+    /// `GET /models` (or Ollama `/api/tags`) with this provider's key and headers.
+    pub(crate) fn list_models_job(&self) -> crate::jobs::Job {
+        let (api_key, _) = self.ai.resolved_api_key();
+        crate::jobs::Job::ListModels {
+            url: crate::agent::models_url(
+                &self.ai.endpoint(),
+                self.ai.provider == crate::settings::AiProvider::Ollama,
+            ),
+            api_key,
+            headers: self.ai.extra_headers(),
+        }
+    }
+
+    /// The answer to `/model` with no name. A stale answer (another `/model` since) is dropped.
+    pub(crate) fn models_listed(&mut self, url: &str, result: Result<Vec<String>, String>) {
+        if self.agent.listing_models.as_deref() != Some(url) {
+            return;
+        }
+        self.agent.listing_models = None;
+        match result {
+            Ok(names) if !names.is_empty() => {
+                let mut lines = vec![format!("Available from {url}:")];
+                for name in names.iter().take(30) {
+                    lines.push(format!("  {name}"));
+                }
+                if names.len() > 30 {
+                    lines.push(format!("  … and {} more", names.len() - 30));
+                }
+                self.push_line(false, lines.join("\n"));
             }
-            self.push_line(false, lines.join("\n"));
+            Ok(_) => self.push_line(false, format!("{url} listed no models")),
+            Err(err) => self.push_line(false, format!("Could not list models: {err}")),
         }
     }
 
     fn persist_ai_prefs(&mut self) {
         self.queue_settings_save();
+    }
+
+    /// A turn answered: its server and model go to the front of the recent lists,
+    /// unless the provider, server, or model changed while it ran.
+    fn remember_working_target(&mut self) {
+        let Some((provider, server, model)) = self.agent_target.take() else {
+            return;
+        };
+        if self.ai.provider != provider
+            || self.ai.endpoint() != server
+            || self.ai.model.trim() != model
+        {
+            return;
+        }
+        if self.ai.remember_current() {
+            self.queue_settings_save();
+        }
     }
 
     fn attach_mentions(&self, prompt: &str) -> String {
@@ -1330,64 +1383,6 @@ pub(crate) fn ai_tuning(ai: &crate::settings::AiPrefs) -> crate::agent::Tuning {
         retries: ai.resolved_retries(),
         ..crate::agent::Tuning::default()
     }
-}
-
-/// `/api/tags` for Ollama, `/models` for every OpenAI-compatible server.
-pub(crate) fn models_url(endpoint: &str, provider: crate::settings::AiProvider) -> String {
-    let endpoint = endpoint.trim().trim_end_matches('/');
-    match provider {
-        crate::settings::AiProvider::Ollama => {
-            let base = endpoint.strip_suffix("/v1").unwrap_or(endpoint);
-            format!("{}/api/tags", base.trim_end_matches('/'))
-        }
-        _ => format!("{endpoint}/models"),
-    }
-}
-
-/// Model ids from an Ollama `/api/tags` (`models[].name`) or an OpenAI `/models` (`data[].id`) body.
-pub(crate) fn parse_model_names(text: &str) -> Vec<String> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        return Vec::new();
-    };
-    let mut names = Vec::new();
-    for (list, field) in [("models", "name"), ("data", "id")] {
-        if let Some(arr) = value.get(list).and_then(|v| v.as_array()) {
-            for m in arr {
-                if let Some(name) = m.get(field).and_then(|v| v.as_str()) {
-                    names.push(name.to_string());
-                }
-            }
-        }
-    }
-    names
-}
-
-fn fetch_model_names(ai: &crate::settings::AiPrefs) -> Vec<String> {
-    let url = models_url(&ai.endpoint(), ai.provider);
-    let (api_key, _) = ai.resolved_api_key();
-    let headers = ai.extra_headers();
-    let handle = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()?;
-        rt.block_on(async move {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(4))
-                .build()
-                .ok()?;
-            let mut request = client.get(&url);
-            if !api_key.is_empty() {
-                request = request.header("Authorization", format!("Bearer {api_key}"));
-            }
-            for (name, value) in &headers {
-                request = request.header(name.as_str(), value.as_str());
-            }
-            let text = request.send().await.ok()?.text().await.ok()?;
-            Some(parse_model_names(&text))
-        })
-    });
-    handle.join().ok().flatten().unwrap_or_default()
 }
 
 impl App {
@@ -1856,26 +1851,5 @@ mod provider_tests {
                 Some(std::time::Duration::from_secs(60 * 30))
             );
         }
-    }
-
-    #[test]
-    fn models_url_uses_api_tags_only_for_ollama() {
-        assert_eq!(
-            models_url("http://127.0.0.1:11434/v1/", AiProvider::Ollama),
-            "http://127.0.0.1:11434/api/tags"
-        );
-        assert_eq!(
-            models_url("https://openrouter.ai/api/v1", AiProvider::OpenRouter),
-            "https://openrouter.ai/api/v1/models"
-        );
-        assert_eq!(
-            parse_model_names(r#"{"data":[{"id":"openai/gpt-4o"},{"id":"x/y"}]}"#),
-            ["openai/gpt-4o", "x/y"]
-        );
-        assert_eq!(
-            parse_model_names(r#"{"models":[{"name":"qwen3:8b"}]}"#),
-            ["qwen3:8b"]
-        );
-        assert!(parse_model_names("not json").is_empty());
     }
 }

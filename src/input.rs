@@ -369,28 +369,47 @@ fn route_settings(event: &Event, capturing: bool, drafting: bool) -> Option<Sema
     Some(SemanticAction::Settings(action))
 }
 
-/// A server or model row is being typed. Printable keys edit that value.
+/// A text row is being typed. Printable keys edit that value at the cursor.
 fn route_settings_text(event: &Event) -> Option<SemanticAction> {
+    use crate::command::LineMove;
     let text = match event {
         Event::Paste(text) => text.clone(),
         Event::Key(key) if key.kind != KeyEventKind::Release => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let alt = key.modifiers.contains(KeyModifiers::ALT);
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
             if ctrl && !alt && matches!(key.code, KeyCode::Char('q' | 'Q')) {
                 return Some(SemanticAction::Quit);
             }
-            if ctrl || alt {
-                return None;
-            }
+            let edit = |action| Some(SemanticAction::Settings(action));
+            // The same line keys as the command bar.
             return match key.code {
-                KeyCode::Esc | KeyCode::F(1) => {
-                    Some(SemanticAction::Settings(SettingsAction::Back))
+                KeyCode::Esc | KeyCode::F(1) => edit(SettingsAction::Back),
+                KeyCode::Enter => edit(SettingsAction::Enter),
+                KeyCode::Backspace if ctrl || alt => edit(SettingsAction::DeleteWordBack),
+                KeyCode::Backspace => edit(SettingsAction::DeleteChar),
+                KeyCode::Delete if !ctrl && !alt => edit(SettingsAction::DeleteForward),
+                KeyCode::Left if ctrl && !alt && !shift => {
+                    edit(SettingsAction::Cursor(LineMove::WordLeft))
                 }
-                KeyCode::Enter => Some(SemanticAction::Settings(SettingsAction::Enter)),
-                KeyCode::Backspace => Some(SemanticAction::Settings(SettingsAction::DeleteChar)),
-                KeyCode::Char(c) => Some(SemanticAction::Settings(SettingsAction::Insert(
-                    c.to_string(),
-                ))),
+                KeyCode::Right if ctrl && !alt && !shift => {
+                    edit(SettingsAction::Cursor(LineMove::WordRight))
+                }
+                KeyCode::Left if !ctrl && !alt && !shift => {
+                    edit(SettingsAction::Cursor(LineMove::Left))
+                }
+                KeyCode::Right if !ctrl && !alt && !shift => {
+                    edit(SettingsAction::Cursor(LineMove::Right))
+                }
+                KeyCode::Home if !shift => edit(SettingsAction::Cursor(LineMove::Home)),
+                KeyCode::End if !shift => edit(SettingsAction::Cursor(LineMove::End)),
+                KeyCode::Char('a') if ctrl && !alt => edit(SettingsAction::Cursor(LineMove::Home)),
+                KeyCode::Char('e') if ctrl && !alt => edit(SettingsAction::Cursor(LineMove::End)),
+                KeyCode::Up => edit(SettingsAction::Up),
+                KeyCode::Down => edit(SettingsAction::Down),
+                KeyCode::Char(c) if !ctrl && !alt || ctrl && alt => {
+                    edit(SettingsAction::Insert(c.to_string()))
+                }
                 _ => None,
             };
         }
@@ -1617,6 +1636,71 @@ mod tests {
         assert_eq!(
             agent(KeyCode::Down, KeyModifiers::CONTROL),
             Some(SemanticAction::Agent(AgentAction::Below))
+        );
+    }
+
+    #[test]
+    fn a_settings_text_row_takes_the_command_bar_line_keys() {
+        use crate::command::LineMove;
+        let keys = crate::keys::KeyMap::defaults();
+        let mut burst = crate::agent::PasteBurst::default();
+        let mut draft = |code, modifiers| {
+            route_flags(
+                &key(code, modifiers),
+                Focus::Settings,
+                false,
+                false,
+                &keys,
+                false,
+                true,
+                &mut burst,
+            )
+        };
+        let edit = |action| Some(SemanticAction::Settings(action));
+        assert_eq!(
+            draft(KeyCode::Left, KeyModifiers::NONE),
+            edit(SettingsAction::Cursor(LineMove::Left))
+        );
+        assert_eq!(
+            draft(KeyCode::Right, KeyModifiers::NONE),
+            edit(SettingsAction::Cursor(LineMove::Right))
+        );
+        assert_eq!(
+            draft(KeyCode::Left, KeyModifiers::CONTROL),
+            edit(SettingsAction::Cursor(LineMove::WordLeft))
+        );
+        assert_eq!(
+            draft(KeyCode::Right, KeyModifiers::CONTROL),
+            edit(SettingsAction::Cursor(LineMove::WordRight))
+        );
+        assert_eq!(
+            draft(KeyCode::Home, KeyModifiers::NONE),
+            edit(SettingsAction::Cursor(LineMove::Home))
+        );
+        assert_eq!(
+            draft(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            edit(SettingsAction::Cursor(LineMove::End))
+        );
+        assert_eq!(
+            draft(KeyCode::Delete, KeyModifiers::NONE),
+            edit(SettingsAction::DeleteForward)
+        );
+        assert_eq!(
+            draft(KeyCode::Backspace, KeyModifiers::NONE),
+            edit(SettingsAction::DeleteChar)
+        );
+        assert_eq!(
+            draft(KeyCode::Backspace, KeyModifiers::ALT),
+            edit(SettingsAction::DeleteWordBack)
+        );
+        assert_eq!(
+            draft(KeyCode::Char('x'), KeyModifiers::NONE),
+            edit(SettingsAction::Insert("x".into()))
+        );
+        assert_eq!(draft(KeyCode::Char('w'), KeyModifiers::CONTROL), None);
+        assert_eq!(
+            draft(KeyCode::Char('q'), KeyModifiers::CONTROL),
+            Some(SemanticAction::Quit)
         );
     }
 }

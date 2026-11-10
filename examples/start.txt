@@ -8,5 +8,6 @@ lang/      see colors for each language
 server/    format a file and jump to an error
 about/     open the page with the duck logo
 agent/     ask the assistant to change a file
+providers/ pick Ollama, LM Studio, OpenAI-compatible, or OpenRouter
 reveal/    show this file in the tree
 workspace/ open another folder

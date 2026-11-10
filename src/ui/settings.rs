@@ -44,9 +44,12 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         .then(|| page.section().items.get(page.row).map(|item| item.id))
         .flatten();
     let binding = matches!(row_id, Some(SettingId::Binding(_)));
-    let text_row = matches!(row_id, Some(SettingId::AiServer | SettingId::AiModel | SettingId::AiApiKey | SettingId::AiContextSize));
-    let footer = if page.text.is_some() {
-        " type    enter save    esc cancel"
+    let text_row = row_id.is_some_and(crate::settings::AiPrefs::is_text);
+    let has_picks = page.text.is_some() && !app.draft_picks().is_empty();
+    let footer = if has_picks {
+        " type    ↑↓ recent    del forget    enter save    esc cancel"
+    } else if page.text.is_some() {
+        " type    ←→ move    enter save    esc cancel"
     } else if page.capture {
         " press a key    esc cancel"
     } else if page.menu.is_some() {
@@ -94,6 +97,7 @@ fn render_columns(
                 frame, inner, app, page, canvas, 0, width, 0, slots, footer_row,
             );
             paint_menu(frame, inner, app, page, 0, width, anchor, footer_row);
+            paint_picks(frame, inner, app, 0, width, anchor, footer_row);
         } else {
             render_sections(
                 frame, inner, app, page, canvas, 0, width, 0, slots, footer_row,
@@ -146,6 +150,7 @@ fn render_columns(
         paint_menu(
             frame, inner, app, page, left, body_width, anchor, footer_row,
         );
+        paint_picks(frame, inner, app, left, body_width, anchor, footer_row);
     }
 }
 
@@ -183,6 +188,7 @@ fn render_sections(
             footer_row,
             &theme,
             None,
+            false,
         );
     }
 }
@@ -216,11 +222,29 @@ fn render_items(
         }
         let open = page.menu.is_some() && page.inside && offset == page.row;
         let capturing = page.capture && page.inside && offset == page.row;
-        let drafting = page.text.is_some() && page.inside && offset == page.row;
-        let value = choice_label(app, item.id, open, capturing, drafting);
+        let draft = page
+            .text
+            .as_ref()
+            .filter(|_| page.inside && offset == page.row);
+        let dim = !app.ai.applies(item.id);
         let syntax = (item.id == SettingId::SyntaxTheme).then(|| app.appearance.syntax.clone());
         let label = format!(" {}", item.label);
-        let value = if drafting { format!("{value} ") } else { value };
+        let (value, draft_column) = match draft {
+            Some(draft) => {
+                let (value, column) =
+                    draft_window(draft, item.id == SettingId::AiApiKey, &label, width);
+                (value, Some(column))
+            }
+            None => {
+                let value = choice_label(app, item.id, open, capturing);
+                let value = if dim {
+                    format!("{} · {}", value.trim_end_matches(" ▾"), only_for(item.id))
+                } else {
+                    value
+                };
+                (value, None)
+            }
+        };
         paint_row(
             frame,
             inner,
@@ -236,28 +260,64 @@ fn render_items(
             footer_row,
             &theme,
             syntax.as_ref(),
+            dim,
         );
-        if drafting {
-            place_draft_cursor(inner, x, row, &label, &value, width);
+        if let Some(column) = draft_column {
+            place_draft_cursor(inner, x, row, column, width);
         }
-        if open {
+        if open || draft.is_some() {
             anchor = Some(row);
         }
     }
     anchor
 }
 
-fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool, drafting: bool) -> String {
+/// Which provider a greyed row waits for.
+fn only_for(id: SettingId) -> &'static str {
+    match id {
+        SettingId::AiAppName | SettingId::AiReferer => "OpenRouter only",
+        _ => "Ollama only",
+    }
+}
+
+/// The part of a draft that fits beside the label, with the cursor kept on screen,
+/// and the cursor's column inside the row. An API key is drawn as one dot per letter.
+fn draft_window(
+    draft: &crate::settings::TextDraft,
+    masked: bool,
+    label: &str,
+    width: usize,
+) -> (String, usize) {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = draft.value();
+    let cursor = draft.input.cursor();
+    let (shown_text, shown_cursor) = if masked {
+        let dots = "•".repeat(text.graphemes(true).count());
+        let before = text[..cursor].graphemes(true).count() * "•".len();
+        (dots, before)
+    } else {
+        (text.to_string(), cursor)
+    };
+    // Leave at least the first letters of the label and a gap.
+    let budget = width
+        .saturating_sub(label.width().min(width / 2) + 1)
+        .max(1);
+    let (start, end) = crate::picker::query_window(&shown_text, shown_cursor, budget);
+    let mut value = shown_text.get(start..end).unwrap_or("").to_string();
+    if end == shown_text.len() {
+        value.push(' ');
+    }
+    let before = shown_text
+        .get(start..shown_cursor.clamp(start, end))
+        .unwrap_or("")
+        .width();
+    let column = width.saturating_sub(value.width()) + before;
+    (value, column.min(width.saturating_sub(1)))
+}
+
+fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String {
     if capturing {
         return "press a key".to_string();
-    }
-    if drafting {
-        return app
-            .settings
-            .as_ref()
-            .and_then(|page| page.text.as_ref())
-            .map(|draft| draft.value.clone())
-            .unwrap_or_default();
     }
     let mark = if open { "▴" } else { "▾" };
     match id {
@@ -297,13 +357,14 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool, drafting:
                 app.ai.model.clone()
             }
         }
-        SettingId::AiApiKey => {
-            if app.ai.api_key.trim().is_empty() {
-                "(not set)".to_string()
-            } else {
-                "••••••••".to_string()
-            }
-        }
+        SettingId::AiApiKey => match app.ai.resolved_api_key().1 {
+            crate::settings::KeySource::Env(name) => format!("•••••••• (from {name})"),
+            crate::settings::KeySource::Saved => "••••••••".to_string(),
+            crate::settings::KeySource::None => match app.ai.provider.key_env() {
+                Some(name) => format!("(not set · or set {name})"),
+                None => "(not set)".to_string(),
+            },
+        },
         SettingId::AiContextSize => {
             let raw = app.ai.context_size.trim();
             if raw.is_empty() {
@@ -320,6 +381,10 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool, drafting:
         },
         SettingId::AiTimeout => format!("{} s", app.ai.resolved_timeout()),
         SettingId::AiRetries => app.ai.resolved_retries().to_string(),
+        SettingId::AiClearRecent => match app.ai.recent.len() {
+            0 => "(empty)".to_string(),
+            n => format!("{n} saved · enter clears"),
+        },
         SettingId::AiAppName => text_or_none(&app.ai.openrouter_app_name),
         SettingId::AiReferer => text_or_none(&app.ai.openrouter_referer),
     }
@@ -334,6 +399,77 @@ fn text_or_none(value: &str) -> String {
 }
 
 const MENU_KEYS: &str = "↑↓  enter  esc ";
+
+/// Most entries the recent list under a text row shows at once.
+const PICK_ROWS: usize = 8;
+
+/// The list under the Server or Model row being typed: recent values first, then
+/// (for Model) the server's models. The highlighted entry is the one in the row.
+fn paint_picks(
+    frame: &mut Frame,
+    inner: Rect,
+    app: &App,
+    left: usize,
+    width: usize,
+    anchor: Option<u16>,
+    footer_row: u16,
+) {
+    let Some(anchor) = anchor else {
+        return;
+    };
+    let Some(draft) = app.settings.as_ref().and_then(|page| page.text.as_ref()) else {
+        return;
+    };
+    let picks = app.draft_picks();
+    if picks.is_empty() || width < 8 || footer_row == 0 {
+        return;
+    }
+    let want = picks.len().min(PICK_ROWS) as u16;
+    let room_below = footer_row.saturating_sub(anchor.saturating_add(1));
+    let room_above = anchor;
+    let (top, height) = if room_below >= 1 && (room_below >= want || room_below >= room_above) {
+        (anchor + 1, want.min(room_below))
+    } else if room_above >= 1 {
+        let height = want.min(room_above);
+        (anchor - height, height)
+    } else {
+        return;
+    };
+    let theme = *app.styles();
+    let slots = height as usize;
+    let selected = draft.pick;
+    let start = window_start(selected.unwrap_or(0), picks.len(), slots);
+    for (offset, (value, source)) in picks.iter().enumerate().skip(start).take(slots) {
+        let on = selected == Some(offset);
+        let tag = match source {
+            crate::settings::PickSource::Recent => "recent ",
+            crate::settings::PickSource::Server => "server ",
+        };
+        let base = if on { theme.hint_active } else { theme.hint };
+        let name_style = if on {
+            theme.hint_active_name
+        } else {
+            theme.hint_dim
+        };
+        let head = clip(&format!(" {value}"), width.saturating_sub(tag.width() + 1));
+        let gap = width.saturating_sub(head.width() + tag.width());
+        let line = Line::from(vec![
+            Span::styled(head, name_style),
+            Span::styled(" ".repeat(gap), base),
+            Span::styled(tag.to_string(), theme.hint_active_dim),
+        ]);
+        let y = inner.y + top + (offset - start) as u16;
+        let x = inner.x.saturating_add(left as u16);
+        if x >= inner.right() || y >= inner.bottom() {
+            return;
+        }
+        let rect_width = (width as u16).min(inner.right() - x);
+        frame.render_widget(
+            Paragraph::new(line).style(base),
+            Rect::new(x, y, rect_width, 1),
+        );
+    }
+}
 
 /// Theme names in the same rows as the command list: full width, no border,
 /// the highlighted name in the accent color, and the keys on that row.
@@ -383,6 +519,7 @@ fn paint_menu(
         | SettingId::AiRetries
         | SettingId::AiAppName
         | SettingId::AiReferer
+        | SettingId::AiClearRecent
         | SettingId::Binding(_) => return,
     };
     if names.is_empty() || width < 8 || footer_row == 0 {
@@ -483,13 +620,16 @@ fn paint_row(
     footer_row: u16,
     theme: &UiStyles,
     syntax: Option<&SyntaxTheme>,
+    dim: bool,
 ) {
     let bg = if selected {
         theme.sidebar_selected
     } else {
         canvas
     };
-    let label_style = if selected {
+    let label_style = if dim {
+        theme.sidebar_dim.bg(bg)
+    } else if selected {
         theme.title_active.bg(bg)
     } else {
         theme.sidebar.bg(bg)
@@ -583,19 +723,11 @@ fn put(frame: &mut Frame, inner: Rect, x: usize, y: u16, text: &str, style: Styl
 }
 
 /// Block cursor on the cell where the next typed character will land.
-fn place_draft_cursor(inner: Rect, x: usize, y: u16, label: &str, value: &str, width: usize) {
+fn place_draft_cursor(inner: Rect, x: usize, y: u16, column: usize, width: usize) {
     let Some((rect, width)) = row_rect(inner, x, y, width) else {
         return;
     };
-    let value_width = value.width().min(width);
-    let label_budget = width.saturating_sub(value_width.saturating_add(1));
-    let label = clip(label, label_budget);
-    let gap = width.saturating_sub(label.width().saturating_add(value_width));
-    let column = label
-        .width()
-        .saturating_add(gap)
-        .saturating_add(value_width.saturating_sub(1))
-        .min(width.saturating_sub(1));
+    let column = column.min(width.saturating_sub(1));
     super::cursor::place(rect.x.saturating_add(column as u16), rect.y);
 }
 
