@@ -14,3 +14,8 @@
 # Retries try again after a busy server (429 or 5xx).
 # Grey rows belong to another provider. They say which one.
 # In the assistant, /provider openrouter and /model also switch.
+# Server and Model remember the last 10 values for each provider.
+# While typing one of them, Down and Up pick an old value from the list.
+# Type part of a name to filter it. Delete forgets the highlighted value.
+# The Model list also shows the models the server has (marked server).
+# Clear recent history, the last AI row, forgets all of them.

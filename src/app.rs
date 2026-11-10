@@ -525,6 +525,12 @@ pub struct App {
     pub editor_prefs: crate::settings::EditorPrefs,
     pub file_prefs: crate::settings::FilePrefs,
     pub ai: crate::settings::AiPrefs,
+    /// Models the server listed for the Settings → AI Model row: `(url, names)`.
+    pub listed_models: Option<(String, Vec<String>)>,
+    /// The `/models` URL Settings asked for and is still waiting on.
+    settings_models_pending: Option<String>,
+    /// Provider, server, and model of the turn in flight. A reply adds them to the recent lists.
+    agent_target: Option<(crate::settings::AiProvider, String, String)>,
     /// Sends prompts and tool results to the assistant worker. `None` in tests.
     agent_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::agent::AgentCommand>>,
     pub agent: crate::agent::Panel,
@@ -647,6 +653,9 @@ impl App {
             editor_prefs: crate::settings::EditorPrefs::default(),
             file_prefs: crate::settings::FilePrefs::default(),
             ai: crate::settings::AiPrefs::default(),
+            listed_models: None,
+            settings_models_pending: None,
+            agent_target: None,
             agent_tx: None,
             agent: crate::agent::Panel::default(),
             key_overrides: std::collections::BTreeMap::new(),
@@ -1329,7 +1338,15 @@ impl App {
             AppEvent::GitBranch { root, name } if self.same_root(&root) => {
                 self.branch = name;
             }
-            AppEvent::ModelsListed { url, result } => self.models_listed(&url, result),
+            AppEvent::ModelsListed { url, result } => {
+                if self.settings_models_pending.as_deref() == Some(url.as_str()) {
+                    self.settings_models_pending = None;
+                    if let Ok(names) = &result {
+                        self.listed_models = Some((url.clone(), names.clone()));
+                    }
+                }
+                self.models_listed(&url, result);
+            }
             _ => {}
         }
     }
@@ -2506,6 +2523,19 @@ impl App {
             }
             return;
         }
+        if let Some(crate::settings::SettingId::AiClearRecent) = opens_menu {
+            let count = self.ai.recent.len();
+            self.ai.reset(crate::settings::SettingId::AiClearRecent);
+            self.message = Some(match count {
+                0 => "No recent servers or models".to_string(),
+                1 => "Forgot 1 recent value".to_string(),
+                n => format!("Forgot {n} recent values"),
+            });
+            if count > 0 {
+                self.queue_settings_save();
+            }
+            return;
+        }
         if let Some(id) = opens_menu.filter(|id| crate::settings::AiPrefs::is_text(*id)) {
             self.begin_text_setting(id);
             return;
@@ -2616,6 +2646,133 @@ impl App {
     }
 
     fn edit_text_setting(&mut self, action: SettingsAction) {
+        match action {
+            SettingsAction::Up => return self.move_pick(-1),
+            SettingsAction::Down => return self.move_pick(1),
+            SettingsAction::DeleteForward if self.forget_pick() => return,
+            _ => {}
+        }
+        let typed = matches!(
+            action,
+            SettingsAction::Insert(_)
+                | SettingsAction::DeleteChar
+                | SettingsAction::DeleteForward
+                | SettingsAction::DeleteWordBack
+        );
+        self.edit_draft_text(action);
+        if typed && let Some(draft) = self.settings.as_mut().and_then(|page| page.text.as_mut()) {
+            draft.filter = draft.value().to_string();
+            draft.pick = None;
+        }
+    }
+
+    /// The row being typed, when it keeps a list of recent values.
+    fn draft_row(&self) -> Option<crate::settings::SettingId> {
+        let page = self.settings.as_ref()?;
+        page.text.as_ref()?;
+        let id = page.section().items.get(page.row)?.id;
+        matches!(
+            id,
+            crate::settings::SettingId::AiServer | crate::settings::SettingId::AiModel
+        )
+        .then_some(id)
+    }
+
+    /// Entries in the list under the row being typed: recent values, then for the
+    /// Model row the models the server listed. Filtered by what was typed.
+    pub fn draft_picks(&self) -> Vec<(String, crate::settings::PickSource)> {
+        let Some(id) = self.draft_row() else {
+            return Vec::new();
+        };
+        let filter = self
+            .settings
+            .as_ref()
+            .and_then(|page| page.text.as_ref())
+            .map(|draft| draft.filter.clone())
+            .unwrap_or_default();
+        let listed: &[String] = match (&self.listed_models, id) {
+            (Some((url, names)), crate::settings::SettingId::AiModel)
+                if *url
+                    == crate::agent::models_url(
+                        &self.ai.endpoint(),
+                        self.ai.provider == crate::settings::AiProvider::Ollama,
+                    ) =>
+            {
+                names
+            }
+            _ => &[],
+        };
+        crate::settings::pick_list(self.ai.recent_for(id), listed, &filter)
+    }
+
+    /// `Up` / `Down` while typing Server or Model: walk the list and put the entry in the row.
+    fn move_pick(&mut self, delta: isize) {
+        let picks = self.draft_picks();
+        let Some(draft) = self.settings.as_mut().and_then(|page| page.text.as_mut()) else {
+            return;
+        };
+        if picks.is_empty() {
+            return;
+        }
+        let len = picks.len() as isize;
+        let next = match draft.pick {
+            None if delta > 0 => Some(0),
+            None => Some(picks.len() - 1),
+            // Up from the first entry goes back to what was typed.
+            Some(0) if delta < 0 => None,
+            Some(at) if at as isize + delta >= len => None,
+            Some(at) => Some((at as isize + delta) as usize),
+        };
+        draft.pick = next;
+        let value = match next {
+            Some(at) => picks[at].0.clone(),
+            None => draft.filter.clone(),
+        };
+        draft.input.set(value);
+    }
+
+    /// `Delete` on a highlighted recent entry forgets it. False when no entry is
+    /// highlighted, so `Delete` edits the text instead.
+    fn forget_pick(&mut self) -> bool {
+        let Some(id) = self.draft_row() else {
+            return false;
+        };
+        let picks = self.draft_picks();
+        let Some(at) = self
+            .settings
+            .as_ref()
+            .and_then(|page| page.text.as_ref())
+            .and_then(|draft| draft.pick)
+        else {
+            return false;
+        };
+        let Some((value, source)) = picks.get(at).cloned() else {
+            return false;
+        };
+        if source == crate::settings::PickSource::Server {
+            // The server lists it; there is nothing saved to forget.
+            self.message = Some("Only recent values can be forgotten".to_string());
+            return true;
+        }
+        if !self.ai.forget_recent(id, &value) {
+            return false;
+        }
+        self.message = Some(format!("Forgot {value}"));
+        self.queue_settings_save();
+        // Stay on the same place in the shorter list, or go back to what was typed.
+        let picks = self.draft_picks();
+        if let Some(draft) = self.settings.as_mut().and_then(|page| page.text.as_mut()) {
+            draft.pick = (!picks.is_empty()).then(|| at.min(picks.len() - 1));
+            let value = match draft.pick {
+                Some(at) => picks[at].0.clone(),
+                None => draft.filter.clone(),
+            };
+            draft.input.set(value);
+        }
+        true
+    }
+
+    fn edit_draft_text(&mut self, action: SettingsAction) {
         let Some(input) = self
             .settings
             .as_mut()
@@ -2680,6 +2837,19 @@ impl App {
         if let Some(page) = self.settings.as_mut() {
             page.text = Some(crate::settings::TextDraft::new(value));
         }
+        if id == SettingId::AiModel {
+            let job = self.list_models_job();
+            if let crate::jobs::Job::ListModels { url, .. } = &job {
+                let fresh = self
+                    .listed_models
+                    .as_ref()
+                    .is_some_and(|(have, _)| have == url);
+                if !fresh && self.settings_models_pending.as_ref() != Some(url) {
+                    self.settings_models_pending = Some(url.clone());
+                    self.jobs.push(job);
+                }
+            }
+        }
     }
 
     fn commit_text_setting(&mut self) {
@@ -2706,7 +2876,11 @@ impl App {
         if let Some(page) = self.settings.as_mut() {
             page.text = None;
         }
-        if changed {
+        let remembered = matches!(
+            id,
+            Some(crate::settings::SettingId::AiServer | crate::settings::SettingId::AiModel)
+        ) && self.ai.remember_current();
+        if changed || remembered {
             self.queue_settings_save();
         }
     }
@@ -2836,6 +3010,7 @@ impl App {
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
+            | SettingId::AiClearRecent
             | SettingId::Binding(_) => return,
         }
         if let Some(menu) = self.settings.as_mut().and_then(|page| page.menu.as_mut()) {
@@ -2881,6 +3056,7 @@ impl App {
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
+            | SettingId::AiClearRecent
             | SettingId::Binding(_) => {}
         }
     }
@@ -2914,6 +3090,7 @@ impl App {
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
+            | SettingId::AiClearRecent
             | SettingId::Binding(_) => String::new(),
         }
     }
@@ -2967,6 +3144,7 @@ impl App {
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
+            | SettingId::AiClearRecent
             | SettingId::Binding(_) => return None,
         };
         Some((index, token, len))
@@ -3053,7 +3231,8 @@ impl App {
             | SettingId::AiTimeout
             | SettingId::AiRetries
             | SettingId::AiAppName
-            | SettingId::AiReferer) => self.ai.reset(id),
+            | SettingId::AiReferer
+            | SettingId::AiClearRecent) => self.ai.reset(id),
         }
     }
 
@@ -10505,9 +10684,14 @@ mod tests {
                 "Context size",
                 "OpenRouter app name",
                 "OpenRouter referer",
+                "Clear recent history",
             ]
         );
-        for item in &ai.items {
+        for item in ai
+            .items
+            .iter()
+            .filter(|item| item.id != crate::settings::SettingId::AiClearRecent)
+        {
             let text = crate::settings::AiPrefs::is_text(item.id);
             let choices = !crate::settings::AiPrefs::choice_names(item.id).is_empty();
             assert!(text != choices, "{} is either typed or picked", item.label);
@@ -10688,5 +10872,157 @@ mod tests {
         });
         let last = format!("{:?}", app.agent.transcript.last().unwrap());
         assert!(last.contains("openai/gpt-4o-mini"), "{last}");
+    }
+
+    fn draft_value(app: &App) -> String {
+        app.settings
+            .as_ref()
+            .and_then(|page| page.text.as_ref())
+            .map(|draft| draft.value().to_string())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_typed_server_comes_back_from_the_recent_list() {
+        use crate::settings::SettingId;
+        let mut app = App::new(Buffer::new(), None);
+        ai_row(&mut app, SettingId::AiServer);
+        for server in ["http://10.0.0.2:11434/v1", "http://10.0.0.3:11434/v1"] {
+            settings(&mut app, SettingsAction::Enter);
+            app.settings.as_mut().unwrap().text =
+                Some(crate::settings::TextDraft::new(server.into()));
+            settings(&mut app, SettingsAction::Enter);
+        }
+        assert_eq!(
+            app.ai.recent_servers(),
+            ["http://10.0.0.3:11434/v1", "http://10.0.0.2:11434/v1"]
+        );
+        settings(&mut app, SettingsAction::Enter);
+        settings(&mut app, SettingsAction::Down);
+        assert_eq!(draft_value(&app), "http://10.0.0.3:11434/v1");
+        settings(&mut app, SettingsAction::Down);
+        assert_eq!(draft_value(&app), "http://10.0.0.2:11434/v1");
+        settings(&mut app, SettingsAction::Down);
+        assert_eq!(
+            draft_value(&app),
+            "",
+            "past the end goes back to what was typed"
+        );
+        settings(&mut app, SettingsAction::Up);
+        assert_eq!(draft_value(&app), "http://10.0.0.2:11434/v1");
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(app.ai.server, "http://10.0.0.2:11434/v1");
+        assert_eq!(app.ai.recent_servers()[0], "http://10.0.0.2:11434/v1");
+    }
+
+    #[test]
+    fn typing_filters_the_list_and_delete_forgets_a_recent_entry() {
+        use crate::settings::{PickSource, SettingId};
+        let mut app = App::new(Buffer::new(), None);
+        for model in ["qwen3:8b", "llama3.2", "qwen2.5-coder:7b"] {
+            app.ai.model = model.into();
+            app.ai.remember_current();
+        }
+        ai_row(&mut app, SettingId::AiModel);
+        settings(&mut app, SettingsAction::Enter);
+        // Opening the Model row asks the server for its models, off the UI thread.
+        let job = app
+            .take_jobs()
+            .into_iter()
+            .find(|job| matches!(job, Job::ListModels { .. }))
+            .expect("models job");
+        let Job::ListModels { url, .. } = job else {
+            unreachable!()
+        };
+        assert_eq!(url, "http://127.0.0.1:11434/api/tags");
+        app.handle_event(AppEvent::ModelsListed {
+            url,
+            result: Ok(vec!["qwen3:8b".into(), "qwen3:32b".into(), "gemma3".into()]),
+        });
+        settings(
+            &mut app,
+            SettingsAction::Cursor(crate::command::LineMove::End),
+        );
+        while !draft_value(&app).is_empty() {
+            settings(&mut app, SettingsAction::DeleteChar);
+        }
+        settings(&mut app, SettingsAction::Insert("QWEN".into()));
+        let picks = app.draft_picks();
+        assert_eq!(
+            picks,
+            [
+                ("qwen2.5-coder:7b".to_string(), PickSource::Recent),
+                ("qwen3:8b".to_string(), PickSource::Recent),
+                ("qwen3:32b".to_string(), PickSource::Server),
+            ]
+        );
+        settings(&mut app, SettingsAction::Down);
+        settings(&mut app, SettingsAction::Down);
+        assert_eq!(draft_value(&app), "qwen3:8b");
+        settings(&mut app, SettingsAction::DeleteForward);
+        assert_eq!(app.message.as_deref(), Some("Forgot qwen3:8b"));
+        assert_eq!(app.ai.recent_models(), ["qwen2.5-coder:7b", "llama3.2"]);
+        // The server still lists it, so it stays as a server entry.
+        assert_eq!(draft_value(&app), "qwen3:8b");
+        assert_eq!(app.draft_picks()[1].1, PickSource::Server);
+        settings(&mut app, SettingsAction::DeleteForward);
+        assert_eq!(
+            app.ai.recent_models().len(),
+            2,
+            "a server entry is not a recent one"
+        );
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Only recent values can be forgotten")
+        );
+        // Up past the first entry goes back to what was typed.
+        settings(&mut app, SettingsAction::Up);
+        settings(&mut app, SettingsAction::Up);
+        assert_eq!(draft_value(&app), "QWEN");
+        // Without a highlight, Delete edits the text as usual.
+        settings(
+            &mut app,
+            SettingsAction::Cursor(crate::command::LineMove::Home),
+        );
+        settings(&mut app, SettingsAction::DeleteForward);
+        assert_eq!(draft_value(&app), "WEN");
+    }
+
+    #[test]
+    fn clear_recent_history_forgets_every_provider_list() {
+        use crate::settings::{AiProvider, SettingId};
+        let mut app = App::new(Buffer::new(), None);
+        app.ai.model = "qwen3:8b".into();
+        app.ai.remember_current();
+        app.ai.switch_provider(AiProvider::OpenRouter);
+        app.ai.model = "openai/gpt-4o-mini".into();
+        app.ai.remember_current();
+        ai_row(&mut app, SettingId::AiClearRecent);
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.ai.recent.is_empty());
+        assert_eq!(app.message.as_deref(), Some("Forgot 2 recent values"));
+        assert_eq!(app.ai.model, "openai/gpt-4o-mini", "current values stay");
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(app.message.as_deref(), Some("No recent servers or models"));
+    }
+
+    #[test]
+    fn an_answered_turn_puts_its_model_first() {
+        let mut app = App::new(Buffer::new(), None);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.agent_tx = Some(tx);
+        app.ai.model = "qwen3:8b".into();
+        app.agent.prompt = "hello".into();
+        app.submit_agent();
+        assert!(
+            app.ai.recent_models().is_empty(),
+            "nothing until it answers"
+        );
+        let id = app.agent.turn;
+        app.handle_agent(crate::agent::AgentEvent::Reply {
+            id,
+            text: "hi".into(),
+        });
+        assert_eq!(app.ai.recent_models(), ["qwen3:8b"]);
     }
 }
