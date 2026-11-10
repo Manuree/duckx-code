@@ -18,7 +18,9 @@ pub use mention::{
     insert_mention, mention_trigger_at, parse_mentions, suggest_files,
 };
 pub use path::{canonicalize, strip_verbatim, within};
-pub use provider::{Tuning, content_looks_like_tool_prefix, normalize_tool_arguments};
+pub use provider::{
+    Tuning, content_looks_like_tool_prefix, list_models, models_url, normalize_tool_arguments,
+};
 pub use slash::{
     COMMANDS, ParsedSlash, SlashCommand, filter_commands, help_text, is_slash_prompt, lookup,
     parse_slash, slash_filter,
@@ -167,6 +169,8 @@ pub struct Panel {
     pub popup: Option<AgentPopup>,
     /// Last user prompt text (for `/retry`), without editor_state suffix.
     pub last_prompt: Option<String>,
+    /// `/model` asked this URL for its models and is waiting for the answer.
+    pub listing_models: Option<String>,
 }
 
 impl Default for Panel {
@@ -191,6 +195,7 @@ impl Default for Panel {
             stream_draft: None,
             thinking_draft: None,
             popup: None,
+            listing_models: None,
             last_prompt: None,
         }
     }

@@ -96,7 +96,7 @@
   * Quit sends `shutdown`, waits up to 1.5 s for the reply, sends `exit`, waits 0.5 s, then kills what remains.
 
 ### 3.6 Assistant worker
-* **Role:** Talks to an OpenAI-compatible server (Ollama at `http://127.0.0.1:11434/v1`, or LM Studio and later hosts at their `/v1` address). The HTTP loop lives on a `tokio` task.
+* **Role:** Talks to Ollama (native `/api/chat`), LM Studio, any OpenAI-compatible server, or OpenRouter (`/v1/chat/completions`). Settings → AI picks the provider; each keeps its own server, model, and key. `Tuning` carries the optional `max_tokens`, OpenRouter's `HTTP-Referer` / `X-Title`, a per-request timeout, and retries with backoff on 408 / 429 / 5xx. The HTTP loop lives on a `tokio` task; `/model` lists models through a background job.
 * **Channels:** `AgentCommand` (a prompt, a tool result, or cancel) goes to the worker. `AgentEvent` (a reply, a tool request, or an error) comes back through `mpsc` into `App::handle_agent` on the main loop, beside LSP events.
 * **Edits:** The worker never touches a `Rope`. A tool that changes an open file becomes one undo step on the core, the same way a language-server patch does. A file that is not open is read or written on `spawn_blocking`. A path that leaves the workspace, including through a symlink, is an error string returned to the model. Disk reads and edits check the file size (2 MB) before loading the bytes. Open-buffer tool reads pull line ranges from the rope without copying the whole file. `create_file` allows at most one new parent folder. Completions may stream over SSE (`ai.streaming`, default on) with automatic fallback, and an optional `ai.api_key` adds a Bearer header only when set. `apply_edit`, `create_file`, and `save` wait for Allow / Deny in the assistant panel unless `ai.auto_approve` is on. Prior tool calls/results stay in a budgeted memory for the next turn.
 * **Place:** Every prompt sent to the model ends with `editor_state` for the focused file: path, 1-based cursor line and column, and the selection. The chat line stays the text the user typed. The same tool called with the same arguments three times in a row ends the turn, and so does a 33rd tool call. `create_file` writes a new workspace file on the background job and the core opens it. An existing path is refused. The request allows 8192 tokens. Text that a thinking model puts in `reasoning`, `reasoning_content`, or `thinking` is the reply when `content` is empty. A `<tool_call>` or `<function=name>` block in that text is run. `write_file`, `search_replace`, `list_files`, and `read` map onto the real tools. `bash` and `shell` return a refusal.
@@ -113,7 +113,7 @@
 | **Syntax Highlighting** | `tree-sitter` | Incremental parsing and syntax tree queries |
 | **Async Runtime** | `tokio` | Event loop orchestration, async process I/O, and mpsc channels |
 | **LSP Protocol** | `lsp-types` + `serde_json` | Strongly-typed LSP structures and JSON-RPC 2.0 framing |
-| **Assistant HTTP** | `reqwest` | OpenAI-compatible chat completions for Ollama and other local servers |
+| **Assistant HTTP** | `reqwest` | Chat completions for Ollama, LM Studio, OpenAI-compatible servers, and OpenRouter |
 | **OS Clipboard** | `arboard` | Cross-platform native OS clipboard integration |
 | **Unicode Handling** | `unicode-segmentation` / `unicode-width` | Grapheme cluster boundary detection and display column width calculation |
 | **File Tree Walk** | `ignore` | `.gitignore`-aware directory walking for the explorer sidebar |

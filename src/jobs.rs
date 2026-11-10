@@ -164,6 +164,12 @@ pub enum Job {
         call_id: String,
         task: crate::agent::DiskTask,
     },
+    /// `GET /models` (or Ollama `/api/tags`) for `/model` and Settings → AI.
+    ListModels {
+        url: String,
+        api_key: String,
+        headers: Vec<(String, String)>,
+    },
     /// Compare one buffer with `HEAD`. `text` is a rope clone, so the UI thread does not copy it.
     GitDiff {
         tab_id: TabId,
@@ -265,6 +271,10 @@ pub enum AppEvent {
     },
     SessionSaved {
         result: Result<(), String>,
+    },
+    ModelsListed {
+        url: String,
+        result: Result<Vec<String>, String>,
     },
     GitBranch {
         root: PathBuf,
@@ -429,6 +439,14 @@ pub fn run(job: Job) -> AppEvent {
                 call_id,
             }
         }
+        Job::ListModels {
+            url,
+            api_key,
+            headers,
+        } => AppEvent::ModelsListed {
+            result: crate::agent::list_models(&url, &api_key, &headers),
+            url,
+        },
         Job::GitDiff {
             tab_id,
             path,

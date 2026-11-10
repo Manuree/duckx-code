@@ -1,0 +1,16 @@
+# Open Settings with the command bar: Shift+Space, type setting, press Enter.
+# Go down to AI and press Enter. Each row has a short note under it.
+# Provider: press Enter, move with Up and Down, press Enter to keep it.
+#   Ollama and LM Studio run on this computer.
+#   OpenAI-compatible is any server that speaks /v1/chat/completions.
+#   OpenRouter reaches many cloud models with one key.
+# Each provider keeps its own Server, Model, and API key.
+# Switch back and the old values come back too.
+# Enter on a text row starts typing. Left, Right, Home, and End move.
+# Ctrl+Left and Ctrl+Right jump by word. Esc drops the change.
+# The API key shows as dots. Set OPENROUTER_API_KEY or OPENAI_API_KEY
+# in your shell and the row says the key comes from there.
+# Max tokens left blank: local servers keep 16384, cloud servers decide.
+# Retries try again after a busy server (429 or 5xx).
+# Grey rows belong to another provider. They say which one.
+# In the assistant, /provider openrouter and /model also switch.
