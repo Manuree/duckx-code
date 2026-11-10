@@ -31,9 +31,11 @@ mod agent;
 mod convert;
 mod lsp_nav;
 mod lsp_sync;
+mod notice;
 mod preview;
 
 pub use convert::{ConvertTarget, LayoutMenuView, LayoutOs};
+pub use notice::{NoticeKind, Placement, placement};
 pub use preview::Preview;
 
 pub use lsp_nav::{ActionView, ReferenceView};
@@ -479,11 +481,16 @@ enum Pending {
     },
 }
 
-/// A short notice floating above the status bar.
+/// A short notice floating above the status bar: a transient message (see
+/// [`notice`]) or an assistant reply that landed while its panel was hidden.
 pub struct Snackbar {
     pub text: String,
-    /// A failed turn, drawn in the error color.
-    pub error: bool,
+    /// Border and title color: error red, warning, success green, or info.
+    pub kind: NoticeKind,
+    /// Drawn in the top border, such as ` Done ` or ` Assistant · F6 `.
+    pub title: &'static str,
+    /// An assistant reply. Opening the panel clears it; other notices stay.
+    pub assistant: bool,
     pub until: std::time::Instant,
 }
 
@@ -500,8 +507,11 @@ pub struct App {
     pub recent_command: Option<CommandId>,
     /// Last command run while the explorer was focused.
     recent_explorer: Option<CommandId>,
-    /// One-shot status message, cleared by the next action.
+    /// One-shot message, cleared by the next action. Transient ones are moved
+    /// to the snackbar by [`App::flush_notice`]; state text stays on the status line.
     pub message: Option<String>,
+    /// The message [`App::flush_notice`] last looked at, so it is shown once.
+    notice_seen: Option<String>,
     /// A reply that arrived while the assistant panel was hidden. Drawn above
     /// the status bar until it expires or the panel opens.
     pub snackbar: Option<Snackbar>,
@@ -655,6 +665,7 @@ impl App {
             recent_explorer: None,
             message: None,
             snackbar: None,
+            notice_seen: None,
             clipboard: Clipboard::in_memory(),
             branch: None,
             explorer: Explorer::new(PathBuf::from(".")),
@@ -5798,7 +5809,9 @@ impl App {
         }
         self.agent = crate::agent::Panel::default();
         self.agent.turn = turn.wrapping_add(1);
-        self.snackbar = None;
+        if self.snackbar.as_ref().is_some_and(|bar| bar.assistant) {
+            self.snackbar = None;
+        }
     }
 
     fn install_empty_workspace(&mut self, path: &Path) {

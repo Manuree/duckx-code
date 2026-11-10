@@ -202,7 +202,9 @@ impl App {
         if self.agent.status.is_empty() {
             self.agent.status = "ready".to_string();
         }
-        self.snackbar = None;
+        if self.snackbar.as_ref().is_some_and(|bar| bar.assistant) {
+            self.snackbar = None;
+        }
     }
 
     /// A reply that lands while the panel is hidden. The user is looking at the
@@ -219,7 +221,13 @@ impl App {
             } else {
                 line
             },
-            error,
+            kind: if error {
+                super::NoticeKind::Error
+            } else {
+                super::NoticeKind::Info
+            },
+            title: " Assistant · F6 ",
+            assistant: true,
             until: std::time::Instant::now() + std::time::Duration::from_secs(6),
         });
     }
@@ -3495,7 +3503,8 @@ mod editor_first_tests {
         });
         let note = app.snackbar.as_ref().expect("a note");
         assert_eq!(note.text, "Sorted the list. Try it.");
-        assert!(!note.error);
+        assert_eq!(note.kind, super::super::NoticeKind::Info);
+        assert!(note.assistant);
 
         app.focus_agent();
         assert!(app.snackbar.is_none(), "opening the panel clears the note");
@@ -3516,7 +3525,11 @@ mod editor_first_tests {
             id: 3,
             text: "Server error".into(),
         });
-        assert!(app.snackbar.as_ref().is_some_and(|note| note.error));
+        assert!(
+            app.snackbar
+                .as_ref()
+                .is_some_and(|note| note.kind == super::super::NoticeKind::Error)
+        );
         app.snackbar.as_mut().unwrap().until = std::time::Instant::now();
         app.expire_snackbar();
         assert!(app.snackbar.is_none());

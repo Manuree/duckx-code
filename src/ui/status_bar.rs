@@ -168,7 +168,7 @@ fn command_line(app: &App, width: usize) -> (Vec<Span<'static>>, usize) {
     {
         spans.push(Span::styled(ghost, theme.status_c_dim));
     }
-    if let Some(message) = &app.message {
+    if let Some(message) = app.status_message() {
         spans.push(Span::styled(format!("  {message}"), theme.status_message));
     }
     (spans, cursor)
@@ -262,7 +262,7 @@ fn file_line(app: &App, label: &'static str, badge: Style, badge_bg: Color) -> V
         spans.push(Span::styled(" [+]", theme.status_message));
     }
 
-    if let Some(message) = &app.message {
+    if let Some(message) = app.status_message() {
         spans.push(Span::styled(format!("  {message}"), theme.status_message));
     }
     spans

@@ -86,9 +86,9 @@ Typed a line with the wrong layout on? Select it and press ``Alt + ` `` (or run 
 
 * **What changes:** every character is looked up on the layout it was typed on and replaced by the character the same key gives on the other layout, Shift included. US QWERTY ↔ Thai Kedmanee is built in: `ouj8nv8ezbf` → `นี่คือคำผิด`, `ทำหะ` → `mest`. Thai vowels above or below a letter and tone marks are their own keys, so each one converts on its own. Spaces, new lines, and characters neither layout types stay as they are.
 * **Which way:** decided from the text. Mostly Thai letters convert to English; Latin letters, digits, or nothing either layout owns (`/-`) convert to Thai.
-* **No selection:** the word right before the cursor (back to the previous space on that line) is converted and the cursor stays after it, so you can keep typing. With a space or the line start before the cursor, the status bar says `Select the text to convert first`.
+* **No selection:** the word right before the cursor (back to the previous space on that line) is converted and the cursor stays after it, so you can keep typing. With a space or the line start before the cursor, a notice says `Select the text to convert first`.
 * **After converting:** a selection stays selected over the new text, so a second ``Alt + ` `` turns it back. The whole change is one undo step.
-* **Windows:** the installed input languages are read from Windows. When there are exactly two and they are US English (QWERTY) and Thai (Kedmanee), the text converts at once and Windows is asked to switch the terminal to the target layout, so you keep typing in the right language. The status bar says `keyboard switched to …`, or `could not switch the keyboard` when Windows refused. Other keyboards for the same language (US Dvorak, Thai Pattachote) are not treated as these two.
+* **Windows:** the installed input languages are read from Windows. When there are exactly two and they are US English (QWERTY) and Thai (Kedmanee), the text converts at once and Windows is asked to switch the terminal to the target layout, so you keep typing in the right language. The notice says `keyboard switched to …`, or `could not switch the keyboard` when Windows refused. Other keyboards for the same language (US Dvorak, Thai Pattachote) are not treated as these two.
 * **Elsewhere, or more layouts:** on Linux and macOS, or on Windows with more than two layouts or one duckx-code has no table for, a `Convert to` list opens under the selection. Each row shows a layout and what the text becomes on it. `Up` / `Down` move, `Enter` (or ``Alt + ` `` again) converts, `Esc` closes. Other keys are ignored while it is open. On Windows the keyboard still switches when the chosen layout is installed.
 * **Assistant prompt:** the same key works on the selection, or the word before the cursor, in the assistant prompt.
 * **Keys:** on the Thai layout the backtick key types `_`, so `Alt + _` does the same. Some setups use the backtick key (Grave accent) as the Windows language-switch hotkey; if ``Alt + ` `` never reaches duckx-code, change it under Settings → Keybindings → Convert keyboard.
@@ -139,7 +139,7 @@ Typed a line with the wrong layout on? Select it and press ``Alt + ` `` (or run 
 
 `Ctrl + F` also works while the sidebar is focused, and then focuses the editor.
 
-The match is selected and the cursor in the file sits on its first character. Each tab keeps the text from the last search and puts it back in the field the next time FIND opens. After you leave FIND mode, `F3` and `Shift + F3` still move through that text. With no search yet, the status bar says `Nothing to find`.
+The match is selected and the cursor in the file sits on its first character. Each tab keeps the text from the last search and puts it back in the field the next time FIND opens. After you leave FIND mode, `F3` and `Shift + F3` still move through that text. With no search yet, a notice says `Nothing to find`.
 
 From the explorer, `Ctrl + F` or `find` searches files instead of the open buffer. The field starts with the last file search. `Enter` lists every file that contains the text, with the match count on that row, and the keys go back to moving through the tree. The status badge then reads `FILTER`. `Space` marks a file and `Shift` plus the movement keys covers a range, the same way FILE mode does. `Enter` on a file opens it, enters FIND, and selects the match. `Ctrl + B` from that FIND returns to the file list. `Esc` leaves FILTER, clears those marks, and restores the tree. `find hello` from the explorer starts the search immediately. The search is the same literal, case-sensitive match, and a file that is already open is searched from its buffer.
 
@@ -200,7 +200,7 @@ Each file with unsaved edits asks `Yes` / `No` / `Cancel` before the switch. `Ye
 | `save <path>` | Save the focused editor to that path and remember it. A relative path is inside the open folder. |
 
 * **Atomic write:** the new text is written to a temporary file in the same directory, flushed, then renamed over the real file. A failed save leaves the previous file as it was.
-* **Encoding:** the status bar shows the encoding after the line ending (`4 LF UTF-8`). A file opens as UTF-8, or as UTF-8 or UTF-16 when a BOM is present. `encoding utf-16le` makes the next save write that encoding. `reload` reads the file again with the encoding it already has. `reload windows-874` reads those bytes as that encoding. A character the encoding cannot store is not written, and the status bar says so. Names: `utf-8`, `utf-8-bom`, `utf-16le`, `utf-16be`, `windows-1252`, `windows-874`.
+* **Encoding:** the status bar shows the encoding after the line ending (`4 LF UTF-8`). A file opens as UTF-8, or as UTF-8 or UTF-16 when a BOM is present. `encoding utf-16le` makes the next save write that encoding. `reload` reads the file again with the encoding it already has. `reload windows-874` reads those bytes as that encoding. A character the encoding cannot store is not written, and a notice says so. Names: `utf-8`, `utf-8-bom`, `utf-16le`, `utf-16be`, `windows-1252`, `windows-874`.
 * **Changed on disk:** about once a second, a clean file whose copy on disk changed is reloaded and the cursor stays on the same line. A file with unsaved edits asks first. `Reload` discards those edits. `Keep` and `Esc` leave the editor text; the next save writes over the disk copy. A save from duckx-code itself is not treated as an outside change.
 * **Modified marker:** `[+]` appears after the file name on that tab and in the status bar while the text differs from the last successful load or save. Undoing or deleting back to that text clears it.
 * **No path yet:** `Ctrl + S` opens the Command Bar with `save ` so you can type a path. A name with no folder, such as `hello.rs`, is saved in the directory duckx-code was started from. The status bar then shows that folder, dimmed, in front of the file name, and `Saved` includes the full path. A missing directory is created.
@@ -230,7 +230,7 @@ The program must be on `PATH`. On Windows, npm's `.cmd` launchers (such as `type
 * **Cursor line:** the most severe diagnostic under the cursor (or else on the cursor line) is a full-width bar just above the status bar. The bar uses that level's color, the message is on the left, and the number of diagnostics in the file is on the right. The status bar itself keeps only the per-level counts.
 * **Completion:** the menu shows the symbol kind, the detail, and one line of documentation when the server sends it. Accepting a snippet selects the first placeholder. `Tab` and `Shift + Tab` move through the placeholders, and `Esc` leaves the snippet. `(` and `,` ask for the function signature and show it above the cursor.
 * **Semantic tokens:** when the server offers them, those colors paint over the tree-sitter colors, so a built-in type, a macro, or a lifetime can differ from a name the grammar could not tell apart. A syntax theme may set `documentation`, `macro`, `builtin`, `escape`, and `lifetime`. Missing keys fall back to comment, function, type, constant, and attribute.
-* **Missing server:** the status bar says `No language server found. Install … for code diagnostics` once per session, and the file stays plain.
+* **Missing server:** a notice says `No language server found. Install … for code diagnostics` once per session, and the file stays plain.
 * **Crash:** a server that stops after it was ready is restarted up to 3 times, waiting 1, 2, then 4 seconds. A server that stops before it is ready, or after the third restart, stays stopped until duckx-code restarts. The status bar shows the last line it printed.
 * **Large files:** files over 8 MB are not sent to a server.
 * **Logs:** each server's stderr is written to `%APPDATA%\duckx-code\logs\lsp-<name>.log` (elsewhere, `logs/` under the config directory from [Settings](#10-settings)). The file is replaced each time the server starts.
@@ -248,7 +248,7 @@ The program must be on `PATH`. On Windows, npm's `.cmd` launchers (such as `type
 | `Ctrl + Alt + Up` / `Ctrl + Alt + Down` or `duplicate-line-up` / `duplicate-line-down` | Duplicate the current line, or the selected lines, above or below. |
 | `F7` or `format` | Ask the language server to format the file. |
 | `Ctrl + .` or `code-action` | Show fixes and refactors at the cursor. `Up` / `Down` move, `Enter` applies, `Esc` closes. |
-| `F12` or `goto-definition` | Jump to where that symbol is defined. When the server returns several places, the first one is opened and the status bar says how many there were. |
+| `F12` or `goto-definition` | Jump to where that symbol is defined. When the server returns several places, the first one is opened and a notice says how many there were. |
 | `Shift + F12` or `goto-references` | List every place that symbol is used, including its declaration when the server sends it. One place jumps there. Several places open a list: `Up` / `Down` move, `Enter` or `Tab` jumps, `Esc` closes. |
 | `Ctrl + ]` or `match-bracket` | Jump to the bracket paired with the one under the cursor, or the one just before it. `Ctrl + Shift + ]` selects through that bracket. |
 | `Ctrl + O` or `jump-back` | Return to the place from before the last definition or references jump |
@@ -299,7 +299,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 * **File and folder names:** `move`, `rename`, `save`, and `workspace` draw the rest of the closest matching name in dim text after what you typed. The block cursor sits on the first character of that hint, and `Right` accepts the whole hint. The keys in the list's border show `→` while the hint is visible. The closest name is the shortest match, then A–Z, ignoring case and treating `\` like `/`. A name you have already finished is left alone, so `move src` does not grow into `move src/ui`. `move`, `rename`, and `save` take names from the workspace tree the explorer has scanned. `move` hints folders. `rename` hints names in the same folder as the focused row. `save` hints files and folders. `workspace` hints folders saved in `session.json`. `Right` does nothing when there is no hint.
 * **Exact names win:** a fully typed command name runs even if another suggestion is highlighted.
 * **Missing arguments:** pressing `Enter` on a command that needs an argument fills in `goto ` and waits for you to type it. `find` and `replace` take no argument: `Enter` opens FIND or REPLACE mode. `replace kitten` opens REPLACE mode with that new word already typed.
-* **Errors:** messages such as `Unknown command` or `Invalid line number` appear in yellow in the status bar until the next key press.
+* **Errors:** messages such as `Unknown command` or `Invalid line number` appear in yellow beside the input while the bar is open; after the bar closes, they are an `Error` [notice](#notices).
 
 ### 6.4 Command List
 
@@ -450,7 +450,7 @@ A file tree of the directory duckx-code was started from, on the left side of th
 | `Esc` | Sidebar focused, not in FILE mode | Clear the filter; if it is already empty, return focus to the editor (the sidebar stays open) |
 
 * **Moving between surfaces:** editor windows and an open sidebar share `Ctrl + Arrows`. See [Editor Windows](#7-editor-windows). `Ctrl + Left` on the sidebar does nothing, and `Ctrl + Left` does not open a closed sidebar. Leaving the sidebar this way does not close it; `Ctrl + B` still does.
-* **Width:** the sidebar opens at 30 columns. `Alt + Right` adds four columns and `Alt + Left` removes four. It stops at 16 columns and at half the screen, and the status line says `Sidebar is at its widest` or `Sidebar is at its narrowest`. The editor keeps the other half. `wider` and `narrower` do the same thing. The width lasts until duckx-code quits. In the editor, `Alt + Left` / `Alt + Right` still move by word.
+* **Width:** the sidebar opens at 30 columns. `Alt + Right` adds four columns and `Alt + Left` removes four. It stops at 16 columns and at half the screen, and a notice says `Sidebar is at its widest` or `Sidebar is at its narrowest`. The editor keeps the other half. `wider` and `narrower` do the same thing. The width lasts until duckx-code quits. In the editor, `Alt + Left` / `Alt + Right` still move by word.
 * **Terminals that take `Ctrl + B`:** some integrated editor terminals and tmux (default prefix) intercept `Ctrl + B`. Use the `explorer` command from the Command Bar instead.
 * `Shift + Space` / `F1` open the Command Bar and `Ctrl + Q` quits from the sidebar too, including in FILE mode. `Space` without `Shift` marks files only in that mode.
 
@@ -466,7 +466,7 @@ A file tree of the directory duckx-code was started from, on the left side of th
 | `Shift` + `Up` / `Down` / `PgUp` / `PgDn` / `Home` / `End` / `Left` / `Right` | In FILE mode, cover rows from where `Shift` started. Release `Shift`, then `Space` marks them |
 | `Enter` | Expand / collapse a folder, or open a file as a tab in the focused window |
 
-`Enter` on a file opens it as a tab in the focused window and moves focus there. If that file is already open, that tab is focused. A clean untitled tab is reused. A tab that already has a path, or unsaved edits, stays open and the file loads in a new tab. A file that is not valid UTF-8 and has no UTF-16 BOM stays as an empty tab, and the status bar says to run `reload` with an encoding, for example `reload windows-874`. Saving that tab is refused until the reload succeeds. An empty tab created for a different open error is removed again.
+`Enter` on a file opens it as a tab in the focused window and moves focus there. If that file is already open, that tab is focused. A clean untitled tab is reused. A tab that already has a path, or unsaved edits, stays open and the file loads in a new tab. A file that is not valid UTF-8 and has no UTF-16 BOM stays as an empty tab, and a notice says to run `reload` with an encoding, for example `reload windows-874`. Saving that tab is refused until the reload succeeds. An empty tab created for a different open error is removed again.
 
 `reveal` selects the file of the focused tab in the tree. Folders above that file open. Other open folders stay open. A filter or a file search is cleared. In FILE mode the `Shift` cover clears and marks stay. The text cursor does not move, and focus stays where it was. A closed sidebar opens without taking focus, so typing still inserts in the editor. While focus mode is on, `reveal` does nothing. A tab with no path says `No file to reveal`. A file outside the tree, including one hidden by `.gitignore`, says `File is not in the explorer`. If the tree is still loading, the row moves when the scan finishes.
 
@@ -538,7 +538,7 @@ While the Command Bar is open the file name is hidden, and matching commands sta
 | :--- | :--- | :--- |
 | Left | `NORMAL` / `FILE` / `COMMAND` / `FIND` / `REPLACE` / `OPEN` / `SETTINGS` / `ABOUT` | Where keystrokes go. `NORMAL` (blue) while editing the file or the sidebar. `FILE` (orange) while the explorer is in FILE mode, entered with `select`. `FILTER` (teal) while the explorer is showing a file search. `COMMAND` (purple) while the Command Bar is open. `FIND` (yellow) while searching; printable keys jump to that text instead of inserting. `REPLACE` (orange) while typing a replacement. `OPEN` (purple) while the file picker is open. `SETTINGS` (green) while the settings page is open. `ABOUT` (yellow) while the about page is open. Printable keys insert text while the badge reads `NORMAL`. |
 | Left | Git branch | Shown while the bar is closed and the working directory is inside a repository. The branch icon and the branch name sit between the badge and the file. A detached HEAD shows the first 7 characters of the commit hash. Outside a repository this section is omitted. Hidden while the Command Bar, FIND mode, or REPLACE mode is open. |
-| Left | Icon + path | Shown while the Command Bar, FIND mode, and REPLACE mode are closed. File-type icon, the directory dimmed, and the file name in bold. A file saved as a bare name shows the folder duckx-code was started from. `[No Name]` when the buffer has no path. `[+]` after the name while there are unsaved changes. A yellow message (e.g. `Saved E:\Work\duckx-code\hello.rs`, `Copied 5 characters`, `Unknown command`) appears after it until the next key press. |
+| Left | Icon + path | Shown while the Command Bar, FIND mode, and REPLACE mode are closed. File-type icon, the directory dimmed, and the file name in bold. A file saved as a bare name shows the folder duckx-code was started from. `[No Name]` when the buffer has no path. `[+]` after the name while there are unsaved changes. A yellow message after it is state of the moment only (`Saving hello.rs…`, `3 of 12`, `Press Enter again to delete Lab`) and goes at the next key press. Results and errors (`Saved E:\Work\duckx-code\hello.rs`, `Copied 5 characters`) are [notices](#notices). |
 | Left | `❯` input | Shown while the bar is open, in place of the file name. Matching commands are stacked on the rows above this line. |
 | Right | `E 2 W 1` | Diagnostics in this file per level (`E`, `W`, `I`, `H`), each in its color. A level with none is omitted. The message for the cursor line is the colored bar above this line, with the file's diagnostic count at its right edge. |
 | Right | Language server | Dim name of the server for this file's language once it has started: `rust-analyzer starting`, `rust-analyzer` when ready, `rust-analyzer: Indexing 40%` while it reports work (cut to 28 characters), `rust-analyzer stopped` after it gave up. |
@@ -548,6 +548,27 @@ While the Command Bar is open the file name is hidden, and matching commands sta
 | Right | `4 LF UTF-8` | Indent, line ending, and encoding of the focused file. A number is how many spaces one Tab inserts (`4 LF UTF-8`). `Tab 4` means Tab inserts a tab character, drawn that many columns wide (`Tab 4 CRLF UTF-8`). `LF` or `CRLF` is the ending a new line break uses. With line endings set to Auto, that is the ending detected in the file. LF or CRLF in settings is what the next save writes. The encoding is what the next save writes. `encoding` changes it. |
 
 The icons and separators are Nerd Font glyphs; use a [Nerd Font](https://www.nerdfonts.com/) in your terminal or they render as empty boxes.
+
+### Notices
+
+Results, errors, and notes appear in a rounded snackbar at the bottom right, just above the status bar (or the diagnostic bar), instead of in the status line:
+
+```text
+                                        ╭ Done ───────────────────────────────╮
+                                        │ Saved E:\Work\Duckx Canvas\PRODUCT.md │
+                                        ╰─────────────────────────────────────╯
+ NORMAL  master  PRODUCT.md                                    Top   1:1   4 LF UTF-8
+```
+
+| Title and color | For | Stays |
+| :--- | :--- | :--- |
+| `Done`, green | Something finished: `Saved …`, `Copied 5 characters`, `Replaced 4`, `Deleted a.rs`, `Converted to Thai (Kedmanee)` | 4 seconds |
+| `Info`, blue | Information: `3 matches in 2 files`, `Focus on`, language server messages | 4 seconds |
+| `Note`, yellow | Nothing happened or it was refused: `Nothing to replace`, `The preview is read-only`, `Select the text to convert first` | 6 seconds |
+| `Error`, red | Something failed: `Cannot save a.rs: …`, `Unknown command: frob` | 8 seconds |
+| `Assistant · F6` | A reply that arrived while the assistant panel was hidden (red when the turn failed). Opening the panel clears it. | 6 seconds |
+
+Typing does not hide a notice; a newer one replaces it. What stays on the status line is the state you are in right now, cleared by the next key: progress (`Saving a.rs…`, `Searching…`, `Formatting…`), the FIND / REPLACE position (`3 of 12`), FILE mode marks and key hints, and anything that waits for your next key (`Press Enter again to delete Lab`, `The assistant asks to run apply_edit. F6 to answer`). While the Command Bar, FIND, or REPLACE is open, its messages (`Unknown command`, `Not found`) stay beside the input you are typing.
 
 ---
 
@@ -565,7 +586,7 @@ Editor, Files, and Keybindings are saved in the same `settings.json` as the them
 | Trim trailing space | On, Off | On removes spaces and tabs at the end of a line when the file is saved. The default is Off. |
 | Final newline | On, Off | On adds a newline at the end of a non-empty file when it is saved. The default is Off. |
 
-**Keybindings** is one row per command. The value is the chord, such as `Ctrl+S`. `Enter` waits for the next key, and `Esc` cancels. The new chord is saved. `Delete` on that row restores its built-in chord. A chord another command already uses is refused, and the status bar names that command.
+**Keybindings** is one row per command. The value is the chord, such as `Ctrl+S`. `Enter` waits for the next key, and `Esc` cancels. The new chord is saved. `Delete` on that row restores its built-in chord. A chord another command already uses is refused, and a notice names that command.
 
 These keys stay where they are, so the editor can always be used and closed:
 
@@ -627,7 +648,7 @@ User themes live next to it:
 * `%APPDATA%\duckx-code\themes\color\*.json` — interface
 * `%APPDATA%\duckx-code\themes\syntax\*.json` — code
 
-A file with the same `id` as a built-in replaces that built-in. A new `id` is added at the end of the list. A file that is not valid JSON is skipped, and the status bar says which file failed. The shipped documents are in `themes/color` and `themes/syntax` in the repository; those are the shape to copy. Colors are `#rrggbb`.
+A file with the same `id` as a built-in replaces that built-in. A new `id` is added at the end of the list. A file that is not valid JSON is skipped, and a notice says which file failed. The shipped documents are in `themes/color` and `themes/syntax` in the repository; those are the shape to copy. Colors are `#rrggbb`.
 
 A color theme may add a `diagnostics` section with `error`, `warning`, `info`, and `hint`. Without it, the Tokyo Night colors are used (`#db4b4b`, `#e0af68`, `#0db9d7`, `#1abc9c`). The Catppuccin themes use red, yellow, sky, and teal.
 
@@ -689,7 +710,7 @@ Code uses the syntax theme's `text` color. The other syntax roles are stored for
 
 ## Assistant
 
-`agent` or `F6` opens a panel under the editor, and the panel is drawn only while its prompt is focused. The editor above it keeps its own text; the panel does not cover those lines, and keys in the prompt do not move the editor cursor. `Tab` in the command bar closes the bar and shows the panel. `Tab` in the prompt opens the command bar and hides the panel when no completion popup is open; with a `/` or `@` popup open, `Tab` completes the highlighted entry instead. `Esc` closes an open popup first, then leaves the prompt and hides the panel. Hiding the panel, with `Esc` or `F6`, does not stop a running turn. Only `/stop` stops it. A reply that arrives while the panel is hidden shows a note above the status bar, at the bottom right, for 6 seconds. The note is the first line of the answer and says `F6`. Opening the panel clears it. A failed turn uses the error color. `/new`, `/clear`, and `Ctrl + L` wait until the turn is done, and say so. `F6` from the editor shows it again, and `F6` while the prompt is focused closes it. `Ctrl + Down` moves into the panel only while it is showing. Inside the panel, `Ctrl + Up` reads the messages and `Ctrl + Down` returns to the prompt. `Alt + Up` makes the panel one row taller and `Alt + Down` makes it one row shorter. The editor keeps at least six rows. At either limit the status bar says `Assistant is at its tallest` or `Assistant is at its shortest`. The size lasts until duckx-code quits. In the editor those two keys still move a line. `Up` and `Down` move a completion popup when one is open; otherwise they scroll messages or move between wrapped prompt rows. `Ctrl + L` in the panel, or the slash commands `/new` and `/clear`, starts a new chat: transcript and tool-trail memory are cleared so a long session cannot push the system prompt and tools out of a small context window. Bare prompt words `clear` / `agent new` are no longer treated as commands (they would collide with normal chat); the command-bar entry `clear` (alias `agent-new`) remains as a shortcut outside the prompt.
+`agent` or `F6` opens a panel under the editor, and the panel is drawn only while its prompt is focused. The editor above it keeps its own text; the panel does not cover those lines, and keys in the prompt do not move the editor cursor. `Tab` in the command bar closes the bar and shows the panel. `Tab` in the prompt opens the command bar and hides the panel when no completion popup is open; with a `/` or `@` popup open, `Tab` completes the highlighted entry instead. `Esc` closes an open popup first, then leaves the prompt and hides the panel. Hiding the panel, with `Esc` or `F6`, does not stop a running turn. Only `/stop` stops it. A reply that arrives while the panel is hidden shows a note above the status bar, at the bottom right, for 6 seconds. The note is the first line of the answer and says `F6`. Opening the panel clears it. A failed turn uses the error color. `/new`, `/clear`, and `Ctrl + L` wait until the turn is done, and say so. `F6` from the editor shows it again, and `F6` while the prompt is focused closes it. `Ctrl + Down` moves into the panel only while it is showing. Inside the panel, `Ctrl + Up` reads the messages and `Ctrl + Down` returns to the prompt. `Alt + Up` makes the panel one row taller and `Alt + Down` makes it one row shorter. The editor keeps at least six rows. At either limit a notice says `Assistant is at its tallest` or `Assistant is at its shortest`. The size lasts until duckx-code quits. In the editor those two keys still move a line. `Up` and `Down` move a completion popup when one is open; otherwise they scroll messages or move between wrapped prompt rows. `Ctrl + L` in the panel, or the slash commands `/new` and `/clear`, starts a new chat: transcript and tool-trail memory are cleared so a long session cannot push the system prompt and tools out of a small context window. Bare prompt words `clear` / `agent new` are no longer treated as commands (they would collide with normal chat); the command-bar entry `clear` (alias `agent-new`) remains as a shortcut outside the prompt.
 
 ### Slash commands
 

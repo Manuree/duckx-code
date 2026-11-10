@@ -512,7 +512,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     picker::render(frame, app, above_status);
     preview_side::render(frame, app, above_status);
     prompt::render(frame, app, above_status);
-    let floor = if layout.diagnostic.height > 0 {
+    // Above the assistant panel when it is open, so its ctx counter stays visible.
+    let floor = if layout.agent.height > 0 {
+        layout.agent.y
+    } else if layout.diagnostic.height > 0 {
         layout.diagnostic.y
     } else if layout.status.height > 0 {
         layout.status.y
@@ -652,12 +655,80 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_notice_is_a_green_snackbar_not_status_text() {
+        let mut app = App::new(Buffer::from_text("# Product\n"), None);
+        app.set_screen_size(80, 12);
+        app.message = Some(r"Saved E:\Work\Duckx Canvas\PRODUCT.md".into());
+        assert!(app.flush_notice());
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = draw(&app, 80, 12);
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(
+            !lines[11].contains("Saved"),
+            "not in the status line: {screen}"
+        );
+        let row = lines
+            .iter()
+            .position(|line| line.contains(r"Saved E:\Work\Duckx Canvas\PRODUCT.md"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(lines[row - 1].contains("╭ Done "), "{screen}");
+        assert!(
+            lines[row + 1].contains("╰") && lines[row + 1].contains("╯"),
+            "{screen}"
+        );
+        assert_eq!(row + 2, 11, "sits right on the status bar");
+        let x = lines[row - 1].chars().position(|c| c == '╭').unwrap() as u16;
+        assert_eq!(buffer[(x, row as u16 - 1)].fg, app.styles().git_added);
+    }
+
+    #[test]
+    fn an_error_notice_uses_the_error_color() {
+        let mut app = App::new(Buffer::from_text(""), None);
+        app.set_screen_size(80, 12);
+        app.message = Some("Cannot save a.rs: Access is denied. (os error 5)".into());
+        app.flush_notice();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = draw(&app, 80, 12);
+        let lines: Vec<&str> = screen.lines().collect();
+        let top = lines
+            .iter()
+            .position(|line| line.contains("╭ Error "))
+            .unwrap_or_else(|| panic!("{screen}"));
+        let x = lines[top].chars().position(|c| c == '╭').unwrap() as u16;
+        assert_eq!(buffer[(x, top as u16)].fg, app.styles().diagnostic_error);
+        assert!(lines[top + 1].contains("Cannot save a.rs"), "{screen}");
+    }
+
+    #[test]
+    fn progress_stays_in_the_status_line() {
+        let mut app = App::new(Buffer::from_text(""), None);
+        app.message = Some("Saving PRODUCT.md…".into());
+        assert!(!app.flush_notice());
+        let screen = draw(&app, 80, 12);
+        assert!(
+            screen
+                .lines()
+                .nth(11)
+                .unwrap()
+                .contains("Saving PRODUCT.md…"),
+            "{screen}"
+        );
+        assert!(!screen.contains("╭ "), "{screen}");
+    }
+
+    #[test]
     fn a_folded_reply_sits_above_the_status_bar_in_a_rounded_note() {
         let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
         app.set_screen_size(80, 24);
         app.snackbar = Some(crate::app::Snackbar {
             text: "Sorted the list.".into(),
-            error: false,
+            kind: crate::app::NoticeKind::Info,
+            title: " Assistant · F6 ",
+            assistant: true,
             until: std::time::Instant::now() + std::time::Duration::from_secs(6),
         });
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
