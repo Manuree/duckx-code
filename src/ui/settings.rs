@@ -398,10 +398,42 @@ fn text_or_none(value: &str) -> String {
     }
 }
 
-const MENU_KEYS: &str = "↑↓  enter  esc ";
+const MENU_KEYS: &str = "↑↓ move  enter select  esc";
+const PICK_KEYS: &str = "↑↓ pick  del forget  enter save";
 
 /// Most entries the recent list under a text row shows at once.
 const PICK_ROWS: usize = 8;
+
+/// Narrowest a settings list is drawn, so short names still read as a list.
+const MIN_LIST_WIDTH: u16 = 30;
+
+/// Where a settings list goes: right-aligned under the row at `anchor`, in the
+/// column that starts at `left`, above the footer.
+fn list_rect(
+    inner: Rect,
+    left: usize,
+    width: usize,
+    anchor: u16,
+    footer_row: u16,
+    list: &super::dropdown::List,
+    max_rows: usize,
+) -> Option<Rect> {
+    let column = Rect::new(
+        inner.x.saturating_add(left as u16),
+        inner.y,
+        (width as u16).min(inner.width.saturating_sub(left as u16)),
+        footer_row.min(inner.height),
+    );
+    let list_width = list.natural_width().max(MIN_LIST_WIDTH).min(column.width);
+    let x = column.right().saturating_sub(list_width);
+    super::dropdown::anchored(
+        column,
+        x,
+        list_width,
+        inner.y + anchor,
+        super::dropdown::frame_height(list.rows.len(), max_rows),
+    )
+}
 
 /// The list under the Server or Model row being typed: recent values first, then
 /// (for Model) the server's models. The highlighted entry is the one in the row.
@@ -421,58 +453,27 @@ fn paint_picks(
         return;
     };
     let picks = app.draft_picks();
-    if picks.is_empty() || width < 8 || footer_row == 0 {
+    if picks.is_empty() {
         return;
     }
-    let want = picks.len().min(PICK_ROWS) as u16;
-    let room_below = footer_row.saturating_sub(anchor.saturating_add(1));
-    let room_above = anchor;
-    let (top, height) = if room_below >= 1 && (room_below >= want || room_below >= room_above) {
-        (anchor + 1, want.min(room_below))
-    } else if room_above >= 1 {
-        let height = want.min(room_above);
-        (anchor - height, height)
-    } else {
+    let rows: Vec<super::dropdown::Row> = picks
+        .iter()
+        .map(|(value, source)| {
+            super::dropdown::Row::new(value.clone()).tag(match source {
+                crate::settings::PickSource::Recent => "recent",
+                crate::settings::PickSource::Server => "server",
+            })
+        })
+        .collect();
+    let list = super::dropdown::List::new(" Recent ", PICK_KEYS, &rows).selected(draft.pick);
+    let Some(rect) = list_rect(inner, left, width, anchor, footer_row, &list, PICK_ROWS) else {
         return;
     };
-    let theme = *app.styles();
-    let slots = height as usize;
-    let selected = draft.pick;
-    let start = window_start(selected.unwrap_or(0), picks.len(), slots);
-    for (offset, (value, source)) in picks.iter().enumerate().skip(start).take(slots) {
-        let on = selected == Some(offset);
-        let tag = match source {
-            crate::settings::PickSource::Recent => "recent ",
-            crate::settings::PickSource::Server => "server ",
-        };
-        let base = if on { theme.hint_active } else { theme.hint };
-        let name_style = if on {
-            theme.hint_active_name
-        } else {
-            theme.hint_dim
-        };
-        let head = clip(&format!(" {value}"), width.saturating_sub(tag.width() + 1));
-        let gap = width.saturating_sub(head.width() + tag.width());
-        let line = Line::from(vec![
-            Span::styled(head, name_style),
-            Span::styled(" ".repeat(gap), base),
-            Span::styled(tag.to_string(), theme.hint_active_dim),
-        ]);
-        let y = inner.y + top + (offset - start) as u16;
-        let x = inner.x.saturating_add(left as u16);
-        if x >= inner.right() || y >= inner.bottom() {
-            return;
-        }
-        let rect_width = (width as u16).min(inner.right() - x);
-        frame.render_widget(
-            Paragraph::new(line).style(base),
-            Rect::new(x, y, rect_width, 1),
-        );
-    }
+    super::dropdown::render(frame, rect, &list, app.styles());
 }
 
-/// Theme names in the same rows as the command list: full width, no border,
-/// the highlighted name in the accent color, and the keys on that row.
+/// A setting's choices (themes, provider, on/off) in a framed list under its row.
+/// `Up` / `Down` preview, `Enter` keeps, `Esc` restores.
 fn paint_menu(
     frame: &mut Frame,
     inner: Rect,
@@ -489,9 +490,10 @@ fn paint_menu(
     let Some(anchor) = anchor else {
         return;
     };
-    let Some(id) = page.section().items.get(page.row).map(|item| item.id) else {
+    let Some(item) = page.section().items.get(page.row) else {
         return;
     };
+    let id = item.id;
     let names = match id {
         SettingId::ColorTheme => app.appearance.color_names(),
         SettingId::SyntaxTheme => app.appearance.syntax_names(),
@@ -522,87 +524,19 @@ fn paint_menu(
         | SettingId::AiClearRecent
         | SettingId::Binding(_) => return,
     };
-    if names.is_empty() || width < 8 || footer_row == 0 {
+    if names.is_empty() {
         return;
     }
-    let want = names.len() as u16;
-    let room_below = footer_row.saturating_sub(anchor.saturating_add(1));
-    let room_above = anchor;
-    let (top, height) = if room_below >= 1 && (room_below >= want || room_below >= room_above) {
-        (anchor + 1, want.min(room_below))
-    } else if room_above >= 1 {
-        let height = want.min(room_above);
-        (anchor - height, height)
-    } else {
-        return;
-    };
-    if height == 0 {
-        return;
-    }
-    let rect = Rect::new(
-        inner.x.saturating_add(left as u16),
-        inner.y.saturating_add(top),
-        width as u16,
-        height,
-    );
-    if rect.right() > inner.right() || rect.bottom() > inner.bottom() {
-        return;
-    }
-    let theme = *app.styles();
-    let name_width = names
+    let rows: Vec<super::dropdown::Row> = names
         .iter()
-        .map(|name| name.width() + 1)
-        .max()
-        .unwrap_or(1)
-        .clamp(1, width);
-    let slots = height as usize;
-    let start = window_start(menu.index, names.len(), slots);
-    for (offset, name) in names.iter().enumerate().skip(start).take(slots) {
-        let selected = offset == menu.index;
-        let (line, style) = menu_row(name, selected, name_width, width, &theme);
-        let row = rect.y + (offset - start) as u16;
-        frame.render_widget(
-            Paragraph::new(line).style(style),
-            Rect::new(rect.x, row, rect.width, 1),
-        );
-    }
-}
-
-fn menu_row(
-    name: &str,
-    selected: bool,
-    name_width: usize,
-    width: usize,
-    theme: &UiStyles,
-) -> (Line<'static>, Style) {
-    let base = if selected {
-        theme.hint_active
-    } else {
-        theme.hint
+        .map(|name| super::dropdown::Row::new(name.to_string()))
+        .collect();
+    let title = format!(" {} ", item.label);
+    let list = super::dropdown::List::new(&title, MENU_KEYS, &rows).selected(Some(menu.index));
+    let Some(rect) = list_rect(inner, left, width, anchor, footer_row, &list, rows.len()) else {
+        return;
     };
-    let name_style = if selected {
-        theme.hint_active_name
-    } else {
-        theme.hint_dim
-    };
-    let head = pad_width(&format!(" {name}"), name_width.min(width));
-    let keys = if selected && head.width() + MENU_KEYS.width() <= width {
-        MENU_KEYS
-    } else {
-        ""
-    };
-    let gap = width.saturating_sub(head.width() + keys.width());
-    let line = Line::from(vec![
-        Span::styled(head, name_style),
-        Span::styled(" ".repeat(gap), base),
-        Span::styled(keys.to_string(), theme.hint_active_dim),
-    ]);
-    (line, base)
-}
-
-fn pad_width(text: &str, width: usize) -> String {
-    let pad = width.saturating_sub(text.width());
-    format!("{text}{}", " ".repeat(pad))
+    super::dropdown::render(frame, rect, &list, app.styles());
 }
 
 fn paint_row(
