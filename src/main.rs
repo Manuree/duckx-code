@@ -330,13 +330,7 @@ async fn drive(
             app.set_screen_size(size.width, size.height);
             let area = Rect::new(0, 0, size.width, size.height);
             let layout = ui::frame_layout(app, area);
-            app.resize_panes(
-                &layout
-                    .panes
-                    .iter()
-                    .map(|pane| (pane.id, pane.text.width, pane.text.height))
-                    .collect::<Vec<_>>(),
-            );
+            app.resize_panes(&layout.pane_sizes());
             let tree_height = ui::sidebar_tree_height(layout.sidebar);
             app.explorer.height = tree_height;
             if last_explorer_height != Some(tree_height) {
