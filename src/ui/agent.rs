@@ -32,7 +32,16 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         theme.sidebar_border
     };
     let title = format!(" {} ", fit(&status_label(app), 56));
-    let block = panel(&title).border_style(border).style(theme.sidebar);
+    let mut block = panel(&title).border_style(border).style(theme.sidebar);
+    // Context use in the bottom-right corner; the bottom border is otherwise empty.
+    // Two corner cells and one dash on each side stay as border.
+    let room = (area.width as usize).saturating_sub(4);
+    let (used, limit) = app.context_gauge();
+    if let Some(text) = context_text(used, limit, room) {
+        let style = context_style(&theme, used, limit);
+        let corner = vec![Span::styled(text, style), Span::styled("─", border)];
+        block = block.title_bottom(Line::from(corner).right_aligned());
+    }
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
@@ -146,6 +155,51 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+
+/// `12.4k`; a limit that is a multiple of 1024 reads as `32k`, the way models list it.
+pub(crate) fn short_tokens(tokens: u32) -> String {
+    if tokens < 1000 {
+        return tokens.to_string();
+    }
+    if tokens.is_multiple_of(1024) {
+        return format!("{}k", tokens / 1024);
+    }
+    if tokens >= 100_000 {
+        return format!("{}k", (tokens + 500) / 1000);
+    }
+    let tenths = (tokens + 50) / 100;
+    if tenths.is_multiple_of(10) {
+        format!("{}k", tenths / 10)
+    } else {
+        format!("{}.{}k", tenths / 10, tenths % 10)
+    }
+}
+
+/// ` ctx 12.4k/32k 38% `, or ` 12.4k/32k ` when that is all `room` allows, or nothing.
+pub(crate) fn context_text(used: u32, limit: Option<u32>, room: usize) -> Option<String> {
+    let limit_text = limit.map_or_else(|| "?".to_string(), short_tokens);
+    let pair = format!("{}/{limit_text}", short_tokens(used));
+    let long = match limit {
+        Some(limit) if limit > 0 => {
+            format!(" ctx {pair} {}% ", u64::from(used) * 100 / u64::from(limit))
+        }
+        _ => format!(" ctx {pair} "),
+    };
+    let short = format!(" {pair} ");
+    [long, short].into_iter().find(|text| text.width() <= room)
+}
+
+/// Dim below 70 % of the limit, the warning color to 90 %, the error color from there on.
+fn context_style(theme: &crate::theme::UiStyles, used: u32, limit: Option<u32>) -> Style {
+    let percent = limit
+        .filter(|limit| *limit > 0)
+        .map_or(0, |limit| u64::from(used) * 100 / u64::from(limit));
+    match percent {
+        90.. => theme.sidebar.fg(theme.diagnostic_error),
+        70.. => theme.sidebar.fg(theme.diagnostic_warning),
+        _ => theme.sidebar_dim,
+    }
+}
 
 fn render_popup(
     frame: &mut Frame,

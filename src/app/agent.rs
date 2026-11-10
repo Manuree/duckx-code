@@ -478,13 +478,9 @@ impl App {
         });
     }
 
-    /// `(used, limit)` for the status line's `ctx` segment: while the assistant is
-    /// focused, or open with a session going. `limit` is `None` when unknown.
-    pub fn context_gauge(&self) -> Option<(u32, Option<u32>)> {
-        let session = self.agent.context_used.is_some();
-        if !(self.agent.open && (self.agent.focused || session)) {
-            return None;
-        }
+    /// `(used, limit)` for the `ctx` counter in the assistant panel's bottom border.
+    /// `limit` is `None` when unknown.
+    pub fn context_gauge(&self) -> (u32, Option<u32>) {
         let used = match self.agent.context_used {
             Some((tokens, _)) => tokens,
             None => self.estimate_context(&self.agent.prompt.to_string()),
@@ -493,7 +489,7 @@ impl App {
             .ai
             .context_size_known()
             .then(|| self.ai.resolved_context_size());
-        Some((used, limit))
+        (used, limit)
     }
 
     /// Context tokens the next request would use, by the same estimate auto compact uses.
@@ -2325,22 +2321,15 @@ mod tests {
     fn the_gauge_prefers_what_the_server_reported() {
         let (mut app, _rx) = app_with_worker();
         app.ai.context_size = "32768".into();
-        let (estimate, limit) = app.context_gauge().unwrap();
-        assert!(estimate > 0);
+        let (estimate, limit) = app.context_gauge();
+        assert!(estimate > 0, "an estimate before the first turn");
         assert_eq!(limit, Some(32768));
         app.agent.turn = 1;
         app.handle_agent(AgentEvent::Usage {
             id: 1,
             tokens: 12_400,
         });
-        assert_eq!(app.context_gauge(), Some((12_400, Some(32768))));
-        app.agent.focused = false;
-        assert!(
-            app.context_gauge().is_some(),
-            "a session keeps it on screen"
-        );
-        app.agent.open = false;
-        assert_eq!(app.context_gauge(), None);
+        assert_eq!(app.context_gauge(), (12_400, Some(32768)));
     }
 
     #[test]
@@ -2349,9 +2338,9 @@ mod tests {
         app.ai
             .switch_provider(crate::settings::AiProvider::OpenRouter);
         app.ai.context_size = "auto".into();
-        assert_eq!(app.context_gauge().unwrap().1, None);
+        assert_eq!(app.context_gauge().1, None);
         app.ai.switch_provider(crate::settings::AiProvider::Ollama);
         app.ai.context_size = "auto".into();
-        assert_eq!(app.context_gauge().unwrap().1, Some(16384));
+        assert_eq!(app.context_gauge().1, Some(16384));
     }
 }

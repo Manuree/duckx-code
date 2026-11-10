@@ -1401,51 +1401,53 @@ mod tests {
         assert!(!status.contains("[+]"));
     }
 
-    fn agent_status(width: u16, used: u32, limit: &str) -> (App, String) {
+    /// The assistant panel open with `used` tokens reported; the screen as rows.
+    fn agent_with_context(width: u16, used: u32, limit: &str) -> (App, Vec<String>) {
         let mut app = App::new(Buffer::new(), None);
         app.ai.context_size = limit.into();
         app.agent.open = true;
         app.agent.focused = true;
         app.agent.context_used = Some((used, true));
-        let screen = draw(&app, width, 12);
-        let status = screen.lines().last().unwrap().to_string();
-        (app, status)
+        let screen = draw(&app, width, 16);
+        (app, screen.lines().map(str::to_string).collect())
+    }
+
+    /// The panel's bottom border: the last row that starts with `╰`.
+    fn agent_bottom(rows: &[String]) -> (usize, String) {
+        rows.iter()
+            .enumerate()
+            .rev()
+            .find(|(_, row)| row.starts_with('╰'))
+            .map(|(y, row)| (y, row.clone()))
+            .expect("assistant panel bottom border")
     }
 
     #[test]
-    fn the_agent_status_line_shows_context_use_before_the_position() {
-        let (_, status) = agent_status(110, 12_400, "32768");
-        assert!(status.contains(" ctx 12.4k/32k 37% "), "{status:?}");
-        assert!(status.find("ctx") < status.find("1:1"), "{status:?}");
-        assert!(status.contains("4 LF UTF-8"), "{status:?}");
-        let mut app = App::new(Buffer::new(), None);
-        let status = draw(&app, 110, 12).lines().last().unwrap().to_string();
-        assert!(!status.contains("ctx"), "no session, no gauge: {status:?}");
-        app.agent.open = true;
-        app.agent.focused = true;
-        let status = draw(&app, 110, 12).lines().last().unwrap().to_string();
+    fn the_agent_panel_shows_context_use_in_its_bottom_right_corner() {
+        let (_, rows) = agent_with_context(110, 12_400, "32768");
+        let (_, bottom) = agent_bottom(&rows);
+        assert!(bottom.ends_with("─ ctx 12.4k/32k 37% ─╯"), "{bottom:?}");
+        let status = rows.last().unwrap();
         assert!(
-            status.contains(" ctx "),
-            "an estimate before the first turn: {status:?}"
+            !status.contains("ctx"),
+            "the status line is as before: {status:?}"
         );
+        assert!(status.contains("AGENT"), "{status:?}");
     }
 
     #[test]
     fn context_use_turns_warning_then_error_colored() {
         let color = |used: u32| {
-            let (app, _) = agent_status(110, used, "10000");
-            let mut terminal = Terminal::new(TestBackend::new(110, 12)).unwrap();
+            let (app, rows) = agent_with_context(110, used, "10000");
+            let (y, bottom) = agent_bottom(&rows);
+            let x = bottom[..bottom.find("ctx").unwrap()].chars().count() as u16;
+            let mut terminal = Terminal::new(TestBackend::new(110, 16)).unwrap();
             terminal.draw(|frame| render(frame, &app)).unwrap();
             let buffer = terminal.backend().buffer().clone();
-            let row: String = (0..110)
-                .map(|x| buffer[(x, 11)].symbol().to_string())
-                .collect();
-            let x = row.find("ctx").unwrap();
-            let x = row[..x].chars().count() as u16;
-            (buffer[(x, 11)].fg, *app.styles())
+            (buffer[(x, y as u16)].fg, *app.styles())
         };
         let (fg, theme) = color(5_000);
-        assert_eq!(Some(fg), theme.status_c.fg);
+        assert_eq!(Some(fg), theme.sidebar_dim.fg);
         let (fg, theme) = color(7_500);
         assert_eq!(fg, theme.diagnostic_warning);
         let (fg, theme) = color(9_500);
@@ -1453,24 +1455,57 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_status_line_shortens_then_drops_context_use() {
-        let (_, wide) = agent_status(110, 900, "auto");
-        assert!(wide.contains(" ctx 900/16k 5% "), "{wide:?}");
-        let (_, short) = agent_status(60, 900, "auto");
+    fn a_narrow_agent_panel_shortens_then_hides_context_use() {
+        let (_, rows) = agent_with_context(20, 900, "auto");
         assert!(
-            short.contains(" 900/16k ") && !short.contains("ctx"),
-            "{short:?}"
+            agent_bottom(&rows).1.contains("─ ctx 900/16k 5% ─╯"),
+            "{rows:?}"
         );
-        assert!(short.contains("4 LF UTF-8"), "{short:?}");
-        let (_, narrow) = agent_status(52, 900, "auto");
-        assert!(!narrow.contains("900/"), "{narrow:?}");
-        assert!(narrow.contains("4 LF UTF-8"), "{narrow:?}");
-        assert!(narrow.contains("AGENT"), "{narrow:?}");
+        let (_, rows) = agent_with_context(16, 900, "auto");
+        let bottom = agent_bottom(&rows).1;
+        assert!(
+            bottom.contains("─ 900/16k ─╯") && !bottom.contains("ctx"),
+            "{bottom:?}"
+        );
+        let (_, rows) = agent_with_context(10, 900, "auto");
+        let bottom = agent_bottom(&rows).1;
+        assert!(!bottom.contains("900"), "{bottom:?}");
+        assert!(
+            bottom.starts_with('╰') && bottom.ends_with('╯'),
+            "{bottom:?}"
+        );
+    }
+
+    #[test]
+    fn the_slash_and_mention_lists_leave_the_context_corner_alone() {
+        for typed in ["/", "@"] {
+            let mut app = App::new(Buffer::new(), None);
+            app.ai.context_size = "32768".into();
+            app.agent.open = true;
+            app.agent.focused = true;
+            app.agent.context_used = Some((12_400, true));
+            app.handle(SemanticAction::Agent(crate::action::AgentAction::Insert(
+                typed.into(),
+            )));
+            assert!(app.agent.popup.is_some(), "{typed} opens its list");
+            let screen = draw(&app, 110, 24);
+            let rows: Vec<String> = screen.lines().map(str::to_string).collect();
+            let (y, bottom) = agent_bottom(&rows);
+            assert!(
+                bottom.ends_with("─ ctx 12.4k/32k 37% ─╯"),
+                "{typed}: {bottom:?}"
+            );
+            let list_bottom = rows
+                .iter()
+                .rposition(|row| row.contains("↑↓ tab enter esc"))
+                .expect("list keys row");
+            assert!(list_bottom < y, "{typed}: the list stays above the prompt");
+        }
     }
 
     #[test]
     fn token_counts_read_short() {
-        use super::status_bar::{context_text, short_tokens};
+        use super::agent::{context_text, short_tokens};
         assert_eq!(short_tokens(950), "950");
         assert_eq!(short_tokens(12_400), "12.4k");
         assert_eq!(short_tokens(32_768), "32k");
