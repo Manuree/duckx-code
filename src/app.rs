@@ -1329,6 +1329,7 @@ impl App {
             AppEvent::GitBranch { root, name } if self.same_root(&root) => {
                 self.branch = name;
             }
+            AppEvent::ModelsListed { url, result } => self.models_listed(&url, result),
             _ => {}
         }
     }
@@ -2539,7 +2540,11 @@ impl App {
                 false
             }
             SettingsAction::Reset | SettingsAction::Assign(_) => false,
-            SettingsAction::Insert(_) | SettingsAction::DeleteChar => false,
+            SettingsAction::Insert(_)
+            | SettingsAction::DeleteChar
+            | SettingsAction::DeleteForward
+            | SettingsAction::DeleteWordBack
+            | SettingsAction::Cursor(_) => false,
         };
         if close {
             self.settings = None;
@@ -2602,23 +2607,37 @@ impl App {
                 }
             }
             SettingsAction::Reset | SettingsAction::Assign(_) => {}
-            SettingsAction::Insert(_) | SettingsAction::DeleteChar => {}
+            SettingsAction::Insert(_)
+            | SettingsAction::DeleteChar
+            | SettingsAction::DeleteForward
+            | SettingsAction::DeleteWordBack
+            | SettingsAction::Cursor(_) => {}
         }
     }
 
     fn edit_text_setting(&mut self, action: SettingsAction) {
+        let Some(input) = self
+            .settings
+            .as_mut()
+            .and_then(|page| page.text.as_mut())
+            .map(|draft| &mut draft.input)
+        else {
+            return;
+        };
         match action {
             SettingsAction::Insert(text) => {
-                if let Some(draft) = self.settings.as_mut().and_then(|page| page.text.as_mut()) {
-                    let room = 512usize.saturating_sub(draft.value.chars().count());
-                    draft.value.extend(text.chars().take(room));
-                }
+                input.insert(&text, crate::settings::TextDraft::LIMIT);
             }
             SettingsAction::DeleteChar => {
-                if let Some(draft) = self.settings.as_mut().and_then(|page| page.text.as_mut()) {
-                    draft.value.pop();
-                }
+                input.backspace();
             }
+            SettingsAction::DeleteForward => {
+                input.delete_forward();
+            }
+            SettingsAction::DeleteWordBack => {
+                input.delete_word_back();
+            }
+            SettingsAction::Cursor(movement) => input.move_cursor(movement),
             SettingsAction::Enter => self.commit_text_setting(),
             SettingsAction::Back => {
                 if let Some(page) = self.settings.as_mut() {
@@ -2631,6 +2650,15 @@ impl App {
 
     fn begin_text_setting(&mut self, id: crate::settings::SettingId) {
         use crate::settings::SettingId;
+        if !self.ai.applies(id) {
+            self.message = Some(match id {
+                SettingId::AiAppName | SettingId::AiReferer => {
+                    "Only used when the provider is OpenRouter".to_string()
+                }
+                _ => "Only used when the provider is Ollama".to_string(),
+            });
+            return;
+        }
         let value = match id {
             SettingId::AiServer => self.ai.endpoint(),
             SettingId::AiModel => self.ai.model.clone(),
@@ -2642,6 +2670,11 @@ impl App {
                     self.ai.context_size.clone()
                 }
             }
+            SettingId::AiMaxTokens => self.ai.max_tokens.clone(),
+            SettingId::AiTimeout => self.ai.resolved_timeout().to_string(),
+            SettingId::AiRetries => self.ai.resolved_retries().to_string(),
+            SettingId::AiAppName => self.ai.openrouter_app_name.clone(),
+            SettingId::AiReferer => self.ai.openrouter_referer.clone(),
             _ => return,
         };
         if let Some(page) = self.settings.as_mut() {
@@ -2650,11 +2683,10 @@ impl App {
     }
 
     fn commit_text_setting(&mut self) {
-        use crate::settings::SettingId;
         let Some(value) = self.settings.as_ref().and_then(|page| {
             page.text
                 .as_ref()
-                .map(|draft| draft.value.trim().to_string())
+                .map(|draft| draft.value().trim().to_string())
         }) else {
             return;
         };
@@ -2662,39 +2694,14 @@ impl App {
             .settings
             .as_ref()
             .and_then(|page| page.section().items.get(page.row).map(|item| item.id));
-        let changed = match id {
-            Some(SettingId::AiServer) => {
-                let default = self.ai.provider.default_server();
-                let stored = if value == default {
-                    String::new()
-                } else {
-                    value
-                };
-                let changed = stored != self.ai.server;
-                self.ai.server = stored;
-                changed
+        let changed = match id.map(|id| self.store_text_setting(id, value)) {
+            Some(Ok(changed)) => changed,
+            Some(Err(problem)) => {
+                // Keep the draft open so the value can be fixed.
+                self.message = Some(problem);
+                return;
             }
-            Some(SettingId::AiModel) => {
-                let changed = value != self.ai.model;
-                self.ai.model = value;
-                changed
-            }
-            Some(SettingId::AiApiKey) => {
-                let changed = value != self.ai.api_key;
-                self.ai.api_key = value;
-                changed
-            }
-            Some(SettingId::AiContextSize) => {
-                let stored = if value.is_empty() {
-                    "16384".to_string()
-                } else {
-                    value
-                };
-                let changed = stored != self.ai.context_size;
-                self.ai.context_size = stored;
-                changed
-            }
-            _ => false,
+            None => false,
         };
         if let Some(page) = self.settings.as_mut() {
             page.text = None;
@@ -2702,6 +2709,93 @@ impl App {
         if changed {
             self.queue_settings_save();
         }
+    }
+
+    /// Validates and stores one typed value. `Ok(true)` when it changed.
+    fn store_text_setting(
+        &mut self,
+        id: crate::settings::SettingId,
+        value: String,
+    ) -> Result<bool, String> {
+        use crate::settings::{
+            DEFAULT_RETRIES, DEFAULT_TIMEOUT_SECS, MAX_RETRIES, MAX_TOKENS_LIMIT, SettingId,
+            TIMEOUT_RANGE,
+        };
+        fn put<T: PartialEq>(slot: &mut T, next: T) -> bool {
+            let changed = *slot != next;
+            *slot = next;
+            changed
+        }
+        Ok(match id {
+            SettingId::AiServer => {
+                let default = self.ai.provider.default_server();
+                let stored = if value == default {
+                    String::new()
+                } else {
+                    value
+                };
+                put(&mut self.ai.server, stored)
+            }
+            SettingId::AiModel => put(&mut self.ai.model, value),
+            SettingId::AiApiKey => put(&mut self.ai.api_key, value),
+            SettingId::AiContextSize => {
+                let stored = if value.is_empty() {
+                    "16384".to_string()
+                } else {
+                    value
+                };
+                put(&mut self.ai.context_size, stored)
+            }
+            SettingId::AiMaxTokens => {
+                let lower = value.to_ascii_lowercase();
+                let stored = if matches!(lower.as_str(), "off" | "none" | "0") {
+                    "off".to_string()
+                } else if value.is_empty() {
+                    String::new()
+                } else {
+                    match value.parse::<u32>() {
+                        Ok(n) if (1..=MAX_TOKENS_LIMIT).contains(&n) => n.to_string(),
+                        _ => {
+                            return Err(format!(
+                                "Max tokens is blank, off, or 1 to {MAX_TOKENS_LIMIT}"
+                            ));
+                        }
+                    }
+                };
+                put(&mut self.ai.max_tokens, stored)
+            }
+            SettingId::AiTimeout => {
+                let seconds = if value.is_empty() {
+                    DEFAULT_TIMEOUT_SECS
+                } else {
+                    match value.trim_end_matches('s').trim().parse::<u32>() {
+                        Ok(n) if TIMEOUT_RANGE.contains(&n) => n,
+                        _ => {
+                            return Err(format!(
+                                "Request timeout is {} to {} seconds",
+                                TIMEOUT_RANGE.start(),
+                                TIMEOUT_RANGE.end()
+                            ));
+                        }
+                    }
+                };
+                put(&mut self.ai.request_timeout, seconds)
+            }
+            SettingId::AiRetries => {
+                let retries = if value.is_empty() {
+                    DEFAULT_RETRIES
+                } else {
+                    match value.parse::<u32>() {
+                        Ok(n) if n <= MAX_RETRIES => n,
+                        _ => return Err(format!("Retries is 0 to {MAX_RETRIES}")),
+                    }
+                };
+                put(&mut self.ai.retries, retries)
+            }
+            SettingId::AiAppName => put(&mut self.ai.openrouter_app_name, value),
+            SettingId::AiReferer => put(&mut self.ai.openrouter_referer, value),
+            _ => false,
+        })
     }
 
     fn preview_choice(&mut self, id: crate::settings::SettingId, index: usize) {
@@ -10367,5 +10461,232 @@ mod tests {
         assert_eq!(rights, [3, 8, 9, 12]);
         assert_eq!(word(&mut app, true, true), 13);
         assert_eq!(app.agent.anchor, 12);
+    }
+
+    /// Settings → AI, inside the section, on the row for `id`.
+    fn ai_row(app: &mut App, id: crate::settings::SettingId) {
+        use crate::settings::sections;
+        run(app, "setting");
+        let section = sections().iter().position(|s| s.name == "AI").unwrap();
+        let row = sections()[section]
+            .items
+            .iter()
+            .position(|item| item.id == id)
+            .unwrap();
+        let page = app.settings.as_mut().unwrap();
+        page.section = section;
+        page.inside = true;
+        page.row = row;
+    }
+
+    fn settings(app: &mut App, action: SettingsAction) {
+        app.handle(SemanticAction::Settings(action));
+    }
+
+    #[test]
+    fn the_ai_section_lists_every_provider_knob_in_order() {
+        use crate::settings::sections;
+        let ai = sections().iter().find(|s| s.name == "AI").unwrap();
+        let labels: Vec<&str> = ai.items.iter().map(|item| item.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "Assistant",
+                "Provider",
+                "Server",
+                "Model",
+                "API key",
+                "Max tokens",
+                "Request timeout",
+                "Retries",
+                "Streaming",
+                "Auto-approve tools",
+                "Thinking",
+                "Context size",
+                "OpenRouter app name",
+                "OpenRouter referer",
+            ]
+        );
+        for item in &ai.items {
+            let text = crate::settings::AiPrefs::is_text(item.id);
+            let choices = !crate::settings::AiPrefs::choice_names(item.id).is_empty();
+            assert!(text != choices, "{} is either typed or picked", item.label);
+        }
+    }
+
+    #[test]
+    fn a_settings_text_row_edits_at_the_cursor_like_the_command_bar() {
+        use crate::command::LineMove;
+        use crate::settings::SettingId;
+        let mut app = App::new(Buffer::new(), None);
+        ai_row(&mut app, SettingId::AiServer);
+        settings(&mut app, SettingsAction::Enter);
+        let value = |app: &App| {
+            app.settings
+                .as_ref()
+                .unwrap()
+                .text
+                .as_ref()
+                .unwrap()
+                .value()
+                .to_string()
+        };
+        assert_eq!(value(&app), "http://127.0.0.1:11434/v1");
+        settings(&mut app, SettingsAction::Cursor(LineMove::WordLeft));
+        settings(&mut app, SettingsAction::Cursor(LineMove::WordLeft));
+        settings(&mut app, SettingsAction::DeleteWordBack);
+        settings(&mut app, SettingsAction::Insert("11435".into()));
+        assert_eq!(value(&app), "http://127.0.0.1:11435/v1");
+        settings(&mut app, SettingsAction::Cursor(LineMove::Home));
+        settings(&mut app, SettingsAction::DeleteForward);
+        settings(&mut app, SettingsAction::Insert("H".into()));
+        settings(&mut app, SettingsAction::Cursor(LineMove::End));
+        settings(&mut app, SettingsAction::DeleteChar);
+        settings(&mut app, SettingsAction::Insert("2".into()));
+        assert_eq!(value(&app), "Http://127.0.0.1:11435/v2");
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.settings.as_ref().unwrap().text.is_none());
+        assert_eq!(app.ai.server, "Http://127.0.0.1:11435/v2");
+        // Typing the default back stores an empty server.
+        settings(&mut app, SettingsAction::Enter);
+        app.settings.as_mut().unwrap().text = Some(crate::settings::TextDraft::new(
+            "http://127.0.0.1:11434/v1".into(),
+        ));
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(app.ai.server, "");
+    }
+
+    #[test]
+    fn a_bad_number_keeps_the_draft_open_and_says_why() {
+        use crate::settings::SettingId;
+        let mut app = App::new(Buffer::new(), None);
+        ai_row(&mut app, SettingId::AiRetries);
+        settings(&mut app, SettingsAction::Enter);
+        settings(&mut app, SettingsAction::DeleteChar);
+        settings(&mut app, SettingsAction::Insert("42".into()));
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.settings.as_ref().unwrap().text.is_some());
+        assert_eq!(app.message.as_deref(), Some("Retries is 0 to 10"));
+        assert_eq!(app.ai.retries, crate::settings::DEFAULT_RETRIES);
+        settings(&mut app, SettingsAction::DeleteChar);
+        settings(&mut app, SettingsAction::DeleteChar);
+        settings(&mut app, SettingsAction::Insert("0".into()));
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(app.ai.retries, 0);
+
+        let mut app = App::new(Buffer::new(), None);
+        ai_row(&mut app, SettingId::AiMaxTokens);
+        settings(&mut app, SettingsAction::Enter);
+        settings(&mut app, SettingsAction::Insert("lots".into()));
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.settings.as_ref().unwrap().text.is_some());
+        settings(&mut app, SettingsAction::Back);
+        settings(&mut app, SettingsAction::Enter);
+        settings(&mut app, SettingsAction::Insert("4096".into()));
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(app.ai.max_tokens, "4096");
+        settings(&mut app, SettingsAction::Reset);
+        assert_eq!(app.ai.max_tokens, "");
+
+        let mut app = App::new(Buffer::new(), None);
+        ai_row(&mut app, SettingId::AiTimeout);
+        settings(&mut app, SettingsAction::Enter);
+        app.settings.as_mut().unwrap().text = Some(crate::settings::TextDraft::new("120".into()));
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(app.ai.request_timeout, 120);
+    }
+
+    #[test]
+    fn the_provider_picker_has_four_choices_and_swaps_each_ones_values() {
+        use crate::settings::{AiProvider, SettingId};
+        let mut app = App::new(Buffer::new(), None);
+        app.ai.model = "qwen3:8b".into();
+        ai_row(&mut app, SettingId::AiProvider);
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.settings.as_ref().unwrap().menu.is_some());
+        for _ in 0..3 {
+            settings(&mut app, SettingsAction::Down);
+        }
+        assert_eq!(app.ai.provider, AiProvider::OpenRouter);
+        assert_eq!(app.ai.model, "");
+        assert_eq!(app.ai.endpoint(), "https://openrouter.ai/api/v1");
+        settings(&mut app, SettingsAction::Back);
+        assert_eq!(app.ai.provider, AiProvider::Ollama, "Esc restores");
+        assert_eq!(app.ai.model, "qwen3:8b");
+        settings(&mut app, SettingsAction::Enter);
+        settings(&mut app, SettingsAction::Last);
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(app.ai.provider, AiProvider::OpenRouter);
+        app.ai.model = "openai/gpt-4o-mini".into();
+        settings(&mut app, SettingsAction::Enter);
+        settings(&mut app, SettingsAction::First);
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(app.ai.model, "qwen3:8b");
+        assert_eq!(
+            app.ai
+                .profiles
+                .get(&AiProvider::OpenRouter)
+                .map(|p| p.model.as_str()),
+            Some("openai/gpt-4o-mini")
+        );
+    }
+
+    #[test]
+    fn ollama_only_and_openrouter_only_rows_refuse_to_edit_elsewhere() {
+        use crate::settings::{AiProvider, SettingId};
+        let mut app = App::new(Buffer::new(), None);
+        ai_row(&mut app, SettingId::AiAppName);
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.settings.as_ref().unwrap().text.is_none());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Only used when the provider is OpenRouter")
+        );
+        app.ai.switch_provider(AiProvider::OpenRouter);
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.settings.as_ref().unwrap().text.is_some());
+        settings(&mut app, SettingsAction::Back);
+        ai_row(&mut app, SettingId::AiContextSize);
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.settings.as_ref().unwrap().text.is_none());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Only used when the provider is Ollama")
+        );
+    }
+
+    #[test]
+    fn model_with_no_name_lists_models_off_the_ui_thread() {
+        let mut app = App::new(Buffer::new(), None);
+        app.ai
+            .switch_provider(crate::settings::AiProvider::OpenRouter);
+        app.ai.api_key = "sk-saved".into();
+        app.slash_model("");
+        let job = app
+            .take_jobs()
+            .into_iter()
+            .find(|job| matches!(job, Job::ListModels { .. }))
+            .expect("a ListModels job");
+        let Job::ListModels { url, headers, .. } = job else {
+            unreachable!()
+        };
+        assert_eq!(url, "https://openrouter.ai/api/v1/models");
+        assert!(headers.iter().any(|(name, _)| name == "X-Title"));
+        let before = app.agent.transcript.len();
+        app.handle_event(AppEvent::ModelsListed {
+            url: "http://elsewhere/v1/models".into(),
+            result: Ok(vec!["stale".into()]),
+        });
+        assert_eq!(
+            app.agent.transcript.len(),
+            before,
+            "a stale answer is dropped"
+        );
+        app.handle_event(AppEvent::ModelsListed {
+            url: url.clone(),
+            result: Ok(vec!["openai/gpt-4o-mini".into()]),
+        });
+        let last = format!("{:?}", app.agent.transcript.last().unwrap());
+        assert!(last.contains("openai/gpt-4o-mini"), "{last}");
     }
 }

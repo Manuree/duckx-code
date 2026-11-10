@@ -1,4 +1,5 @@
-//! Cursor stops for one-line text inputs (the command bar and the file picker).
+//! Cursor stops for one-line text inputs (the command bar, the file picker, and
+//! the text rows in Settings).
 //!
 //! Positions are byte offsets into the text and always sit on a grapheme
 //! boundary, so a Thai base letter and its combining marks move and delete
@@ -84,9 +85,114 @@ pub fn stem_end(name: &str) -> Option<usize> {
     name.rfind('.').filter(|dot| *dot > 0)
 }
 
+/// A one-line text input with a cursor: the shared editor behind Settings text rows.
+/// Same keys and the same grapheme and word stops as the command bar.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineInput {
+    text: String,
+    /// Byte offset, always on a grapheme boundary.
+    cursor: usize,
+}
+
+impl LineInput {
+    /// The cursor starts at the end of `text`.
+    pub fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let cursor = text.len();
+        Self { text, cursor }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn cursor(&self) -> usize {
+        snap(&self.text, self.cursor)
+    }
+
+    /// Replace the whole text; the cursor goes to the end.
+    pub fn set(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.cursor = self.text.len();
+    }
+
+    pub fn move_cursor(&mut self, movement: crate::command::LineMove) {
+        use crate::command::LineMove;
+        let at = self.cursor();
+        self.cursor = match movement {
+            LineMove::Left => prev(&self.text, at),
+            LineMove::Right => next(&self.text, at),
+            LineMove::WordLeft => word_left(&self.text, at),
+            LineMove::WordRight => word_right(&self.text, at),
+            LineMove::Home => 0,
+            LineMove::End => self.text.len(),
+        };
+    }
+
+    /// Insert at the cursor, keeping the whole text within `limit` characters.
+    /// Returns true when the text changed.
+    pub fn insert(&mut self, text: &str, limit: usize) -> bool {
+        let room = limit.saturating_sub(self.text.chars().count());
+        let piece: String = text.chars().take(room).collect();
+        if piece.is_empty() {
+            return false;
+        }
+        let at = self.cursor();
+        self.text.insert_str(at, &piece);
+        self.cursor = at + piece.len();
+        true
+    }
+
+    fn delete_to(&mut self, to: usize) -> bool {
+        let at = self.cursor();
+        let (start, end) = if to < at { (to, at) } else { (at, to) };
+        if start == end {
+            return false;
+        }
+        self.text.replace_range(start..end, "");
+        self.cursor = start;
+        true
+    }
+
+    pub fn backspace(&mut self) -> bool {
+        self.delete_to(prev(&self.text, self.cursor()))
+    }
+
+    pub fn delete_forward(&mut self) -> bool {
+        self.delete_to(next(&self.text, self.cursor()))
+    }
+
+    pub fn delete_word_back(&mut self) -> bool {
+        self.delete_to(word_left(&self.text, self.cursor()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_input_edits_at_the_cursor_by_grapheme() {
+        use crate::command::LineMove;
+        let mut input = LineInput::new("alpha beta");
+        input.move_cursor(LineMove::WordLeft);
+        assert_eq!(&input.text()[input.cursor()..], "beta");
+        assert!(input.delete_word_back());
+        assert_eq!(input.text(), "beta");
+        assert_eq!(input.cursor(), 0);
+        input.set("aกิน");
+        input.move_cursor(LineMove::Left);
+        assert!(input.backspace());
+        assert_eq!(input.text(), "aน");
+        input.move_cursor(LineMove::Home);
+        assert!(input.delete_forward());
+        assert_eq!(input.text(), "น");
+        assert!(input.insert("abc", 3));
+        assert_eq!(input.text(), "abน");
+        assert!(!input.insert("z", 3), "the limit counts characters");
+        input.move_cursor(LineMove::End);
+        assert_eq!(input.cursor(), input.text().len());
+    }
 
     #[test]
     fn steps_keep_thai_marks_with_their_letter() {

@@ -1023,14 +1023,24 @@ pub struct Page {
 }
 
 /// Text being typed into a settings row. `Enter` keeps it. `Esc` drops it.
+/// Edited with the same line editor as the command bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextDraft {
-    pub value: String,
+    pub input: crate::line_edit::LineInput,
 }
 
 impl TextDraft {
+    /// Longest value a row accepts, in characters.
+    pub const LIMIT: usize = 512;
+
     pub fn new(value: String) -> Self {
-        Self { value }
+        Self {
+            input: crate::line_edit::LineInput::new(value),
+        }
+    }
+
+    pub fn value(&self) -> &str {
+        self.input.text()
     }
 }
 
@@ -1155,23 +1165,38 @@ pub fn sections() -> &'static [Section] {
                         },
                         Item {
                             label: "Provider",
-                            detail: "Picks the default server address.",
+                            detail: "Ollama, LM Studio, OpenAI-compatible, or OpenRouter. Each keeps its own server, model, and key.",
                             id: SettingId::AiProvider,
                         },
                         Item {
                             label: "Server",
-                            detail: "OpenAI-compatible address, including /v1.",
+                            detail: "Base URL for this provider, including /v1. Empty uses the default.",
                             id: SettingId::AiServer,
                         },
                         Item {
                             label: "Model",
-                            detail: "Model name the server should run.",
+                            detail: "Model name for this provider, e.g. qwen3:8b or anthropic/claude-sonnet-4.",
                             id: SettingId::AiModel,
                         },
                         Item {
                             label: "API key",
-                            detail: "Optional Bearer token. Leave empty for local Ollama or LM Studio.",
+                            detail: "Bearer token for this provider. OPENROUTER_API_KEY or OPENAI_API_KEY wins when set.",
                             id: SettingId::AiApiKey,
+                        },
+                        Item {
+                            label: "Max tokens",
+                            detail: "Longest answer. Blank: 16384 on Ollama / LM Studio, left out on cloud. off leaves it out.",
+                            id: SettingId::AiMaxTokens,
+                        },
+                        Item {
+                            label: "Request timeout",
+                            detail: "Seconds one request may take, streaming included. 10 to 7200.",
+                            id: SettingId::AiTimeout,
+                        },
+                        Item {
+                            label: "Retries",
+                            detail: "Extra tries after 408, 429, or 5xx, waiting longer each time. 0 to 10.",
+                            id: SettingId::AiRetries,
                         },
                         Item {
                             label: "Streaming",
@@ -1184,9 +1209,24 @@ pub fn sections() -> &'static [Section] {
                             id: SettingId::AiAutoApprove,
                         },
                         Item {
+                            label: "Thinking",
+                            detail: "Ollama only: ask for think: true when the model supports it.",
+                            id: SettingId::AiThink,
+                        },
+                        Item {
                             label: "Context size",
-                            detail: "Token window for Ollama (num_ctx). Default 16384. Type auto or a number. LM Studio: set context there instead.",
+                            detail: "Ollama only: token window (num_ctx). Default 16384. Type auto or a number.",
                             id: SettingId::AiContextSize,
+                        },
+                        Item {
+                            label: "OpenRouter app name",
+                            detail: "OpenRouter only: sent as X-Title so the app shows on openrouter.ai.",
+                            id: SettingId::AiAppName,
+                        },
+                        Item {
+                            label: "OpenRouter referer",
+                            detail: "OpenRouter only: sent as HTTP-Referer. Empty sends none.",
+                            id: SettingId::AiReferer,
                         },
                     ],
                 ),

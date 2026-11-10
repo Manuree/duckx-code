@@ -796,6 +796,92 @@ mod tests {
         assert_eq!(x as usize, end, "{line}");
     }
 
+    fn ai_settings_app(id: crate::settings::SettingId) -> App {
+        use crate::settings::{Page, sections};
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        let section = sections()
+            .iter()
+            .position(|item| item.name == "AI")
+            .unwrap();
+        let row = sections()[section]
+            .items
+            .iter()
+            .position(|item| item.id == id)
+            .unwrap();
+        let mut page = Page::new();
+        page.section = section;
+        page.row = row;
+        page.inside = true;
+        app.settings = Some(page);
+        app
+    }
+
+    #[test]
+    fn an_api_key_draft_is_drawn_as_dots() {
+        use crate::settings::{SettingId, TextDraft};
+        let mut app = ai_settings_app(SettingId::AiApiKey);
+        app.settings.as_mut().unwrap().text = Some(TextDraft::new("sk-secret".into()));
+        let screen = draw(&app, 100, 40);
+        assert!(!screen.contains("sk-secret"), "{screen}");
+        assert!(screen.contains("•••••••••"), "{screen}");
+        let (x, y) = cursor_at(&app, 100, 40);
+        let line: Vec<char> = screen.lines().nth(y as usize).unwrap().chars().collect();
+        assert_eq!(line[x as usize - 1], '•', "cursor sits after the last dot");
+        assert_eq!(line[x as usize], ' ');
+    }
+
+    #[test]
+    fn rows_for_another_provider_are_greyed_and_say_which() {
+        use crate::settings::{AiProvider, SettingId};
+        let mut app = ai_settings_app(SettingId::AiProvider);
+        let screen = draw(&app, 110, 40);
+        assert!(!screen.contains("· Ollama only"), "{screen}");
+        assert!(screen.contains("duckx-code · OpenRouter only"), "{screen}");
+        app.ai.switch_provider(AiProvider::OpenRouter);
+        let screen = draw(&app, 110, 40);
+        assert!(screen.contains("16384 · Ollama only"), "{screen}");
+        assert!(screen.contains("On · Ollama only"), "{screen}");
+        assert!(!screen.contains("· OpenRouter only"), "{screen}");
+        assert!(screen.contains("OpenRouter ▾"), "{screen}");
+        assert!(
+            screen.contains("https://openrouter.ai/api/v1 (default)"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("(not set · or set OPENROUTER_API_KEY)"),
+            "{screen}"
+        );
+        assert!(screen.contains("(omit)"), "{screen}");
+    }
+
+    #[test]
+    fn a_long_server_draft_scrolls_to_keep_the_cursor_on_screen() {
+        use crate::command::LineMove;
+        use crate::settings::{SettingId, TextDraft};
+        let mut app = ai_settings_app(SettingId::AiServer);
+        let long = format!("https://{}.example.com/v1", "very-long-host-name".repeat(6));
+        app.settings.as_mut().unwrap().text = Some(TextDraft::new(long.clone()));
+        let screen = draw(&app, 80, 30);
+        let server_line = |screen: &str| {
+            screen
+                .lines()
+                .find(|line| line.contains("│ Server"))
+                .unwrap()
+                .to_string()
+        };
+        let line = server_line(&screen);
+        assert!(line.contains(".example.com/v1"), "{line}");
+        assert!(!line.contains("https://"), "the start scrolls off: {line}");
+        let draft = app.settings.as_mut().unwrap().text.as_mut().unwrap();
+        draft.input.move_cursor(LineMove::Home);
+        let screen = draw(&app, 80, 30);
+        assert!(screen.contains("https://very"), "{screen}");
+        let (x, y) = cursor_at(&app, 80, 30);
+        let line: Vec<char> = screen.lines().nth(y as usize).unwrap().chars().collect();
+        assert_eq!(line[x as usize], 'h', "{}", line.iter().collect::<String>());
+        assert!(x < 80);
+    }
+
     #[test]
     fn command_bar_overlay_shows_input_and_suggestions() {
         let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);

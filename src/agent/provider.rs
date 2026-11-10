@@ -474,6 +474,72 @@ fn error_text(text: &str) -> String {
         .unwrap_or_else(|| text.to_string())
 }
 
+/// `/api/tags` for Ollama, `/models` for every OpenAI-compatible server.
+pub fn models_url(endpoint: &str, ollama: bool) -> String {
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    if ollama {
+        let base = endpoint.strip_suffix("/v1").unwrap_or(endpoint);
+        format!("{}/api/tags", base.trim_end_matches('/'))
+    } else {
+        format!("{endpoint}/models")
+    }
+}
+
+/// Model ids from an Ollama `/api/tags` (`models[].name`) or an OpenAI `/models` (`data[].id`) body.
+pub fn parse_model_names(text: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for (list, field) in [("models", "name"), ("data", "id")] {
+        if let Some(arr) = value.get(list).and_then(|v| v.as_array()) {
+            for m in arr {
+                if let Some(name) = m.get(field).and_then(|v| v.as_str()) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Model names from `url`, sent with the provider's key and headers. Blocking:
+/// run it from a job, never on the UI thread.
+pub fn list_models(
+    url: &str,
+    api_key: &str,
+    headers: &[(String, String)],
+) -> Result<Vec<String>, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("Cannot start HTTP: {err}"))?;
+    runtime.block_on(async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|err| format!("Cannot start HTTP: {err}"))?;
+        let tuning = Tuning {
+            headers: headers.to_vec(),
+            ..Tuning::default()
+        };
+        let response = prepare(client.get(url), api_key, &tuning)
+            .send()
+            .await
+            .map_err(|err| http_err(url, err))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|err| format!("Cannot read the response: {err}"))?;
+        if !status.is_success() {
+            return Err(status_error(status, &text));
+        }
+        Ok(parse_model_names(&text))
+    })
+}
+
 pub fn parse_reply(text: &str) -> Result<Reply, String> {
     let value: Value = serde_json::from_str(text).map_err(|err| format!("Bad response: {err}"))?;
     let raw = value
@@ -3747,5 +3813,68 @@ mod tests {
         assert_eq!(backoff_for(&tuning, 0), Duration::from_secs(1));
         assert_eq!(backoff_for(&tuning, 2), Duration::from_secs(4));
         assert_eq!(backoff_for(&tuning, 20), MAX_BACKOFF);
+    }
+
+    #[test]
+    fn models_url_uses_api_tags_only_for_ollama() {
+        assert_eq!(
+            models_url("http://127.0.0.1:11434/v1/", true),
+            "http://127.0.0.1:11434/api/tags"
+        );
+        assert_eq!(
+            models_url("https://openrouter.ai/api/v1", false),
+            "https://openrouter.ai/api/v1/models"
+        );
+        assert_eq!(
+            parse_model_names(r#"{"data":[{"id":"openai/gpt-4o"},{"id":"x/y"}]}"#),
+            ["openai/gpt-4o", "x/y"]
+        );
+        assert_eq!(
+            parse_model_names(r#"{"models":[{"name":"qwen3:8b"}]}"#),
+            ["qwen3:8b"]
+        );
+        assert!(parse_model_names("not json").is_empty());
+    }
+
+    #[test]
+    fn listing_models_sends_the_key_and_reports_a_401() {
+        let (url, server) = spawn_rounds(2, |round, request| {
+            assert!(request.starts_with("GET /v1/models"), "{request}");
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer sk-list"),
+                "{request}"
+            );
+            assert!(
+                request.to_ascii_lowercase().contains("x-title: duckx-code"),
+                "{request}"
+            );
+            match round {
+                0 => ok_json_raw(r#"{"data":[{"id":"openai/gpt-4o-mini"}]}"#),
+                _ => http(
+                    "401 Unauthorized",
+                    "application/json",
+                    "",
+                    r#"{"error":{"message":"No auth credentials found"}}"#,
+                ),
+            }
+        });
+        let models = models_url(&url, false);
+        let headers = vec![("X-Title".to_string(), "duckx-code".to_string())];
+        assert_eq!(
+            list_models(&models, "sk-list", &headers).unwrap(),
+            ["openai/gpt-4o-mini"]
+        );
+        let err = list_models(&models, "sk-list", &headers).unwrap_err();
+        assert!(
+            err.contains("401") && err.contains("No auth credentials found"),
+            "{err}"
+        );
+        server.join().unwrap();
+    }
+
+    fn ok_json_raw(body: &str) -> String {
+        http("200 OK", "application/json", "", body)
     }
 }
