@@ -104,6 +104,15 @@ async fn run(
                         });
                     }
                 }
+                // Tell App what the server taught us, so it outlives this session.
+                let (no_tools, no_think) = provider::detected_for(&server, &model, ollama_native);
+                if no_tools || no_think {
+                    let _ = events.send(AgentEvent::Detected {
+                        key: provider::capability_key_for(&server, &model, ollama_native),
+                        no_tools,
+                        no_think,
+                    });
+                }
             }
             AgentCommand::Cancel { .. } | AgentCommand::ToolResult { .. } => {}
         }

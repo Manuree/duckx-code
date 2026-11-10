@@ -19,7 +19,8 @@ pub use mention::{
 };
 pub use path::{canonicalize, strip_verbatim, within};
 pub use provider::{
-    Tuning, content_looks_like_tool_prefix, list_models, models_url, normalize_tool_arguments,
+    ToolsMode, Tuning, capability_key_for, content_looks_like_tool_prefix, forget_detected,
+    list_models, models_url, normalize_tool_arguments,
 };
 pub use slash::{
     COMMANDS, ParsedSlash, SlashCommand, filter_commands, help_text, is_slash_prompt, lookup,
@@ -30,6 +31,11 @@ pub use paste::{PasteBurst, normalize_paste};
 pub use wrap::{column_at, index_at, next_boundary, prev_boundary, rows as wrap_rows};
 
 use serde_json::{Value, json};
+
+/// Loads saved detections into the worker's per-model memory.
+pub fn provider_seed_detected(detected: &crate::settings::Detected) {
+    provider::seed_detected(&detected.no_tools, &detected.no_think);
+}
 
 /// One line in the assistant panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,6 +270,13 @@ pub enum AgentEvent {
     /// Drop poisoned tool history so the next turn does not keep failing with 400.
     ResetMemory {
         id: u64,
+    },
+    /// The server rejected native tools and/or `think` for this model (`key` is
+    /// [`provider::capability_key_for`]). `App` saves it to `settings.json`.
+    Detected {
+        key: String,
+        no_tools: bool,
+        no_think: bool,
     },
 }
 

@@ -1098,6 +1098,8 @@ impl App {
         tx: tokio::sync::mpsc::UnboundedSender<crate::agent::AgentCommand>,
     ) {
         self.agent_tx = Some(tx);
+        // What earlier sessions learned about models without tools or think.
+        crate::agent::provider_seed_detected(&self.ai.detected);
     }
 
     /// Rows the assistant panel takes. Zero unless the prompt itself is focused.
@@ -1482,6 +1484,27 @@ impl App {
             state.install(parsed);
         }
         self.queue_parse(tab_id);
+    }
+
+    /// Settings → AI → Detected limits: the current model is asked for tools and
+    /// think again on the next turn.
+    fn forget_detected(&mut self) {
+        let keys = self.ai.detected_keys();
+        if keys.is_empty() {
+            self.message = Some(if self.ai.model_tools_key().is_none() {
+                "Set a model first".to_string()
+            } else {
+                "Nothing detected for this model".to_string()
+            });
+            return;
+        }
+        crate::agent::forget_detected(&keys);
+        self.ai.reset(crate::settings::SettingId::AiDetected);
+        self.message = Some(format!(
+            "Forgot what {} could not do; it is asked again next turn",
+            self.ai.model.trim()
+        ));
+        self.queue_settings_save();
     }
 
     /// Queues one write of `settings.json`. A change that arrives while a write
@@ -2532,6 +2555,16 @@ impl App {
             }
             return;
         }
+        if let Some(crate::settings::SettingId::AiDetected) = opens_menu {
+            self.forget_detected();
+            return;
+        }
+        if let Some(crate::settings::SettingId::AiModelTools) = opens_menu
+            && self.ai.model_tools_key().is_none()
+        {
+            self.message = Some("Set a model first".to_string());
+            return;
+        }
         if let Some(crate::settings::SettingId::AiClearRecent) = opens_menu {
             let count = self.ai.recent.len();
             self.ai.reset(crate::settings::SettingId::AiClearRecent);
@@ -3033,7 +3066,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => {
+            | SettingId::AiThink
+            | SettingId::AiModelTools) => {
                 self.ai.set_choice(id, index);
             }
             SettingId::AiServer
@@ -3046,6 +3080,7 @@ impl App {
             | SettingId::AiAppName
             | SettingId::AiReferer
             | SettingId::AiClearRecent
+            | SettingId::AiDetected
             | SettingId::Binding(_) => return,
         }
         if let Some(menu) = self.settings.as_mut().and_then(|page| page.menu.as_mut()) {
@@ -3079,7 +3114,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => {
+            | SettingId::AiThink
+            | SettingId::AiModelTools) => {
                 self.ai.restore_choice(id, origin);
             }
             SettingId::AiServer
@@ -3092,6 +3128,7 @@ impl App {
             | SettingId::AiAppName
             | SettingId::AiReferer
             | SettingId::AiClearRecent
+            | SettingId::AiDetected
             | SettingId::Binding(_) => {}
         }
     }
@@ -3115,7 +3152,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => self.ai.choice_token(id),
+            | SettingId::AiThink
+            | SettingId::AiModelTools) => self.ai.choice_token(id),
             SettingId::AiServer
             | SettingId::AiModel
             | SettingId::AiApiKey
@@ -3126,6 +3164,7 @@ impl App {
             | SettingId::AiAppName
             | SettingId::AiReferer
             | SettingId::AiClearRecent
+            | SettingId::AiDetected
             | SettingId::Binding(_) => String::new(),
         }
     }
@@ -3165,7 +3204,8 @@ impl App {
             | SettingId::AiAutoApprove
             | SettingId::AiStreaming
             | SettingId::AiProvider
-            | SettingId::AiThink) => (
+            | SettingId::AiThink
+            | SettingId::AiModelTools) => (
                 self.ai.choice_index(id),
                 self.ai.choice_token(id),
                 AiPrefs::choice_names(id).len(),
@@ -3180,6 +3220,7 @@ impl App {
             | SettingId::AiAppName
             | SettingId::AiReferer
             | SettingId::AiClearRecent
+            | SettingId::AiDetected
             | SettingId::Binding(_) => return None,
         };
         Some((index, token, len))
@@ -3267,7 +3308,9 @@ impl App {
             | SettingId::AiRetries
             | SettingId::AiAppName
             | SettingId::AiReferer
-            | SettingId::AiClearRecent) => self.ai.reset(id),
+            | SettingId::AiClearRecent
+            | SettingId::AiModelTools) => self.ai.reset(id),
+            SettingId::AiDetected => self.forget_detected(),
         }
     }
 
@@ -10716,21 +10759,77 @@ mod tests {
                 "Streaming",
                 "Auto-approve tools",
                 "Thinking",
+                "Model tools",
+                "Detected limits",
                 "Context size",
                 "OpenRouter app name",
                 "OpenRouter referer",
                 "Clear recent history",
             ]
         );
-        for item in ai
-            .items
-            .iter()
-            .filter(|item| item.id != crate::settings::SettingId::AiClearRecent)
-        {
+        for item in ai.items.iter().filter(|item| {
+            !matches!(
+                item.id,
+                crate::settings::SettingId::AiClearRecent | crate::settings::SettingId::AiDetected
+            )
+        }) {
             let text = crate::settings::AiPrefs::is_text(item.id);
             let choices = !crate::settings::AiPrefs::choice_names(item.id).is_empty();
             assert!(text != choices, "{} is either typed or picked", item.label);
         }
+    }
+
+    #[test]
+    fn model_tools_is_per_model_and_reaches_the_request() {
+        use crate::agent::ToolsMode;
+        use crate::settings::{AiProvider, SettingId};
+        let mut app = App::new(Buffer::new(), None);
+        ai_row(&mut app, SettingId::AiModelTools);
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(app.message.as_deref(), Some("Set a model first"));
+        app.ai.model = "gemma3".into();
+        app.ai.set_choice(SettingId::AiModelTools, 2);
+        assert_eq!(app.ai.model_tools_mode(), ToolsMode::Off);
+        assert_eq!(crate::app::agent::ai_tuning(&app.ai).tools, ToolsMode::Off);
+        app.ai.model = "qwen3".into();
+        assert_eq!(app.ai.model_tools_mode(), ToolsMode::Auto);
+        assert_eq!(crate::app::agent::ai_tuning(&app.ai).tools, ToolsMode::Auto);
+        app.ai.switch_provider(AiProvider::LmStudio);
+        app.ai.model = "gemma3".into();
+        assert_eq!(app.ai.model_tools_mode(), ToolsMode::Auto, "other provider");
+        app.ai.switch_provider(AiProvider::Ollama);
+        app.ai.model = "gemma3".into();
+        assert_eq!(app.ai.choice_token(SettingId::AiModelTools), "off");
+        app.ai.reset(SettingId::AiModelTools);
+        assert!(app.ai.model_tools.is_empty());
+    }
+
+    #[test]
+    fn a_detection_is_saved_and_enter_forgets_it() {
+        use crate::agent::AgentEvent;
+        use crate::settings::SettingId;
+        let mut app = App::new(Buffer::new(), None);
+        app.ai.model = "detect-model".into();
+        let key = crate::agent::capability_key_for(&app.ai.endpoint(), "detect-model", true);
+        app.handle_agent(AgentEvent::Detected {
+            key: key.clone(),
+            no_tools: true,
+            no_think: false,
+        });
+        assert!(app.ai.detected.no_tools.contains(&key));
+        assert_eq!(app.ai.detected_now(), (true, false));
+        ai_row(&mut app, SettingId::AiDetected);
+        settings(&mut app, SettingsAction::Enter);
+        assert!(app.ai.detected.is_empty());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Forgot what detect-model could not do; it is asked again next turn")
+        );
+        settings(&mut app, SettingsAction::Enter);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Nothing detected for this model")
+        );
     }
 
     #[test]

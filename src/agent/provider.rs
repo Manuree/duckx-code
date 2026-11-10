@@ -50,6 +50,32 @@ pub struct Tuning {
     pub retries: u32,
     /// Wait before the first retry. Doubles each time, capped at [`MAX_BACKOFF`].
     pub backoff: Duration,
+    /// Native tools: detect per model (default), always, or never.
+    pub tools: ToolsMode,
+}
+
+/// Whether a request carries native `tools`. `Auto` sends them until the server
+/// says the model cannot use them, then switches that model to the text tool prompt.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolsMode {
+    #[default]
+    Auto,
+    /// Always send native tools; a rejection is reported, not worked around.
+    On,
+    /// Never send native tools; describe them in the prompt instead.
+    Off,
 }
 
 /// The longest wait between two attempts, including a server's `Retry-After`.
@@ -63,6 +89,7 @@ pub static DEFAULT_TUNING: Tuning = Tuning {
     timeout: None,
     retries: 0,
     backoff: Duration::from_millis(1000),
+    tools: ToolsMode::Auto,
 };
 
 impl Default for Tuning {
@@ -265,7 +292,57 @@ fn models_without_tools() -> &'static Mutex<HashSet<String>> {
 /// One model on one server. The same model name on another provider is a different
 /// deployment, so what one rejected says nothing about the other.
 fn capability_key(server: &str, model: &str) -> String {
-    format!("{}\n{model}", server.trim().trim_end_matches('/'))
+    format!("{} {model}", server.trim().trim_end_matches('/'))
+}
+
+/// Whether this request sends native tools, given the mode and what was learned.
+fn tools_wanted(mode: ToolsMode, key: &str) -> bool {
+    match mode {
+        ToolsMode::Auto => !model_skips_tools(key),
+        ToolsMode::On => true,
+        ToolsMode::Off => false,
+    }
+}
+
+/// The key [`detected_for`] and the saved list use: the chat URL this model is
+/// asked at, a space, and the model.
+pub fn capability_key_for(server: &str, model: &str, ollama_native: bool) -> String {
+    let url = if ollama_native {
+        ollama_chat_url(server)
+    } else {
+        completions_url(server)
+    };
+    capability_key(&url, model)
+}
+
+/// `(no tools, no think)` learned so far for this model on this server.
+pub fn detected_for(server: &str, model: &str, ollama_native: bool) -> (bool, bool) {
+    let key = capability_key_for(server, model, ollama_native);
+    (model_skips_tools(&key), model_skips_think(&key))
+}
+
+/// Loads what earlier sessions learned (keys from [`capability_key_for`]).
+pub fn seed_detected<'a>(
+    no_tools: impl IntoIterator<Item = &'a String>,
+    no_think: impl IntoIterator<Item = &'a String>,
+) {
+    for key in no_tools {
+        remember_model_without_tools(key);
+    }
+    for key in no_think {
+        remember_model_without_think(key);
+    }
+}
+
+/// Forgets what was learned for these keys, so the next request tries again.
+pub fn forget_detected(keys: &[String]) {
+    for set in [models_without_tools(), models_without_think()] {
+        if let Ok(mut set) = set.lock() {
+            for key in keys {
+                set.remove(key);
+            }
+        }
+    }
 }
 
 fn model_skips_tools(model: &str) -> bool {
@@ -1881,7 +1958,7 @@ async fn complete_once(
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     loop {
-        let use_tools = allow_tools && !model_skips_tools(&key);
+        let use_tools = allow_tools && tools_wanted(tuning.tools, &key);
         let use_think = allow_think && !model_skips_think(&key);
         let tools = if use_tools {
             tool_specs()
@@ -1927,7 +2004,7 @@ async fn complete_once(
                 allow_think = false;
                 continue;
             }
-            if use_tools && tools_not_supported(status, &text) {
+            if use_tools && tuning.tools == ToolsMode::Auto && tools_not_supported(status, &text) {
                 remember_model_without_tools(&key);
                 allow_tools = false;
                 continue;
@@ -1976,7 +2053,7 @@ where
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     let response = loop {
-        let use_tools = allow_tools && !model_skips_tools(&key);
+        let use_tools = allow_tools && tools_wanted(tuning.tools, &key);
         let tools = if use_tools {
             tool_specs()
         } else {
@@ -2005,7 +2082,7 @@ where
             break response;
         }
         let text = response.text().await.unwrap_or_default();
-        if use_tools && tools_not_supported(status, &text) {
+        if use_tools && tuning.tools == ToolsMode::Auto && tools_not_supported(status, &text) {
             remember_model_without_tools(&key);
             allow_tools = false;
             continue;
@@ -2162,7 +2239,7 @@ where
     let mut flattened = false;
     let mut working: Vec<Value> = messages.iter().map(sanitize_tool_message).collect();
     let response = loop {
-        let use_tools = allow_tools && !model_skips_tools(&key);
+        let use_tools = allow_tools && tools_wanted(tuning.tools, &key);
         let use_think = allow_think && !model_skips_think(&key);
         let tools = if use_tools {
             tool_specs()
@@ -2202,7 +2279,7 @@ where
             allow_think = false;
             continue;
         }
-        if use_tools && tools_not_supported(status, &text) {
+        if use_tools && tuning.tools == ToolsMode::Auto && tools_not_supported(status, &text) {
             remember_model_without_tools(&key);
             allow_tools = false;
             continue;
@@ -3876,5 +3953,119 @@ mod tests {
 
     fn ok_json_raw(body: &str) -> String {
         http("200 OK", "application/json", "", body)
+    }
+
+    fn no_tools_answer() -> String {
+        http(
+            "400 Bad Request",
+            "application/json",
+            "",
+            r#"{"error":{"message":"model does not support tools"}}"#,
+        )
+    }
+
+    #[tokio::test]
+    async fn tools_off_never_sends_native_tools() {
+        let (url, server) = spawn_rounds(1, |_, _| ok_json("ok"));
+        let client = reqwest::Client::new();
+        let tuning = Tuning {
+            tools: ToolsMode::Off,
+            ..quick(0)
+        };
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        complete(&client, &url, "tools-off-model", &messages, options)
+            .await
+            .unwrap();
+        let body = body_of(&server.join().unwrap()[0]);
+        assert!(body.get("tools").is_none(), "{body}");
+        let system = body["messages"][0]["content"].as_str().unwrap_or("");
+        assert!(
+            system.contains("read_file"),
+            "tools are described in text: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_on_reports_a_rejection_instead_of_dropping_tools() {
+        let (url, server) = spawn_rounds(1, |_, _| no_tools_answer());
+        let client = reqwest::Client::new();
+        let tuning = Tuning {
+            tools: ToolsMode::On,
+            ..quick(0)
+        };
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        let err = complete(&client, &url, "tools-on-model", &messages, options)
+            .await
+            .unwrap_err();
+        assert!(err.contains("does not support tools"), "{err}");
+        assert_eq!(server.join().unwrap().len(), 1, "no retry without tools");
+        assert_eq!(detected_for(&url, "tools-on-model", false), (false, false));
+    }
+
+    #[tokio::test]
+    async fn tools_on_still_sends_tools_to_a_model_auto_marked_without_them() {
+        let (url, server) = spawn_rounds(1, |_, _| ok_json("ok"));
+        let key = capability_key_for(&url, "forced-model", false);
+        seed_detected([&key], []);
+        let client = reqwest::Client::new();
+        let tuning = Tuning {
+            tools: ToolsMode::On,
+            ..quick(0)
+        };
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        complete(&client, &url, "forced-model", &messages, options)
+            .await
+            .unwrap();
+        let body = body_of(&server.join().unwrap()[0]);
+        assert!(body.get("tools").is_some(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn auto_learns_no_tools_and_forgetting_asks_again() {
+        let (url, server) = spawn_rounds(3, |round, _| match round {
+            0 => no_tools_answer(),
+            _ => ok_json("ok"),
+        });
+        let client = reqwest::Client::new();
+        let tuning = quick(0);
+        let options = CompleteOptions {
+            tuning: &tuning,
+            ..CompleteOptions::default()
+        };
+        let messages = [json!({"role":"user","content":"hi"})];
+        let model = "auto-learn-model";
+        complete(&client, &url, model, &messages, options)
+            .await
+            .unwrap();
+        assert_eq!(detected_for(&url, model, false), (true, false));
+        let key = capability_key_for(&url, model, false);
+        assert!(
+            key.ends_with(" auto-learn-model") && key.contains("/chat/completions"),
+            "{key}"
+        );
+        forget_detected(std::slice::from_ref(&key));
+        assert_eq!(detected_for(&url, model, false), (false, false));
+        complete(&client, &url, model, &messages, options)
+            .await
+            .unwrap();
+        let seen = server.join().unwrap();
+        assert!(body_of(&seen[0]).get("tools").is_some());
+        assert!(body_of(&seen[1]).get("tools").is_none());
+        assert!(
+            body_of(&seen[2]).get("tools").is_some(),
+            "asked again after forget"
+        );
     }
 }

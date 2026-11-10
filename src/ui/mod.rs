@@ -832,6 +832,31 @@ mod tests {
     }
 
     #[test]
+    fn model_tools_and_detected_limits_read_for_the_current_model() {
+        use crate::settings::SettingId;
+        let mut app = ai_settings_app(SettingId::AiModelTools);
+        let screen = draw(&app, 110, 40);
+        assert!(screen.contains("(set a model first)"), "{screen}");
+        app.ai.model = "gemma3".into();
+        app.ai.set_choice(SettingId::AiModelTools, 2);
+        let key = crate::agent::capability_key_for(&app.ai.endpoint(), "gemma3", true);
+        app.ai.detected.learn(&key, true, true);
+        let screen = draw(&app, 110, 40);
+        let row = |name: &str| {
+            screen
+                .lines()
+                .find(|line| line.contains(name))
+                .unwrap()
+                .to_string()
+        };
+        assert!(row("Model tools").contains("Off ▾"), "{screen}");
+        assert!(
+            row("Detected limits").contains("no tools, no think · enter forgets"),
+            "{screen}"
+        );
+    }
+
+    #[test]
     fn rows_for_another_provider_are_greyed_and_say_which() {
         use crate::settings::{AiProvider, SettingId};
         let mut app = ai_settings_app(SettingId::AiProvider);

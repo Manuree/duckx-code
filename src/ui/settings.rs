@@ -349,7 +349,8 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         | SettingId::AiAutoApprove
         | SettingId::AiStreaming
         | SettingId::AiProvider
-        | SettingId::AiThink) => {
+        | SettingId::AiThink
+        | SettingId::AiModelTools) => {
             format!("{} {mark}", app.ai.choice_label(id))
         }
         SettingId::AiServer => {
@@ -390,6 +391,18 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         },
         SettingId::AiTimeout => format!("{} s", app.ai.resolved_timeout()),
         SettingId::AiRetries => app.ai.resolved_retries().to_string(),
+        SettingId::AiDetected => match (app.ai.model_tools_key(), app.ai.detected_now()) {
+            (None, _) => "(set a model first)".to_string(),
+            (Some(_), (false, false)) => "none".to_string(),
+            (Some(_), (tools, think)) => {
+                let what = match (tools, think) {
+                    (true, true) => "no tools, no think",
+                    (true, false) => "no tools",
+                    _ => "no think",
+                };
+                format!("{what} · enter forgets")
+            }
+        },
         SettingId::AiClearRecent => match app.ai.recent.len() {
             0 => "(empty)".to_string(),
             n => format!("{n} saved · enter clears"),
@@ -526,7 +539,8 @@ fn paint_menu(
         | SettingId::AiAutoApprove
         | SettingId::AiStreaming
         | SettingId::AiProvider
-        | SettingId::AiThink) => crate::settings::AiPrefs::choice_names(id),
+        | SettingId::AiThink
+        | SettingId::AiModelTools) => crate::settings::AiPrefs::choice_names(id),
         SettingId::AiServer
         | SettingId::AiModel
         | SettingId::AiApiKey
@@ -537,6 +551,7 @@ fn paint_menu(
         | SettingId::AiAppName
         | SettingId::AiReferer
         | SettingId::AiClearRecent
+        | SettingId::AiDetected
         | SettingId::Binding(_) => return,
     };
     if names.is_empty() {

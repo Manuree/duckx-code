@@ -75,6 +75,15 @@ impl App {
                 self.agent.busy_started = None;
                 self.agent.status = clip(&text, 80);
             }
+            AgentEvent::Detected {
+                key,
+                no_tools,
+                no_think,
+            } => {
+                if self.ai.detected.learn(&key, no_tools, no_think) {
+                    self.queue_settings_save();
+                }
+            }
             AgentEvent::ResetMemory { id } => {
                 if id != self.agent.turn {
                     return;
@@ -1381,6 +1390,7 @@ pub(crate) fn ai_tuning(ai: &crate::settings::AiPrefs) -> crate::agent::Tuning {
             ai.resolved_timeout(),
         ))),
         retries: ai.resolved_retries(),
+        tools: ai.model_tools_mode(),
         ..crate::agent::Tuning::default()
     }
 }
