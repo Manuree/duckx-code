@@ -257,6 +257,8 @@ The program must be on `PATH`. On Windows, npm's `.cmd` launchers (such as `type
 
 With no diagnostics in the file, both diagnostic keys say `No diagnostics in this file`. With no references, `Shift + F12` says `No references`. A reference row shows the file and line, and the text of that line when the file is already open. `Ctrl + O` returns from that jump the same way it returns from a definition.
 
+**Bracket highlights.** When the cursor is on a bracket, or just after one, that bracket and its pair are drawn bold on a soft background. Brackets in strings and comments are skipped, and a bracket in a string pairs only with one in a string. Nothing is shown when the pair is off screen or more than 50 000 characters away, and only the focused window shows it. A bracket that has no pair is drawn in the error color. Brackets are also colored by nesting depth; a bracket with no partner uses the error color. `<` and `>` are never treated as brackets here. The selection draws over both, and a diagnostic's color wins over a depth color. Both are rows under Settings → Editor (on by default) and the commands `bracket-match` and `bracket-colors`.
+
 `Ctrl + ]` pairs `()` `[]` and `{}`. With a syntax tree, `<>` also jumps when that tree treats the two ends as one pair, such as a generic argument, and a bracket in a string or comment stays put. A file with no tree yet pairs `()` `[]` `{}` by scanning, so a bracket in a string can match. Nothing happens when there is no pair, and this jump is not part of the definition jump list. `match-bracket` does the same jump when a terminal does not report `Ctrl + ]`.
 
 The completion list filters as you keep typing. `Up` and `Down` move the highlight, `Tab` or `Enter` inserts the highlighted item as one undo step, and `Esc` closes the list. Other keys still type into the file. A file that has not been saved yet says so instead of asking a server.
@@ -372,6 +374,8 @@ If no OS clipboard is available (e.g. a headless session), `copy`, `cut`, and `p
 | `explorer` | — | Toggle the file explorer sidebar (same cycle as `Ctrl + B`) | `Ctrl + B` |
 | `reveal` | — | Show the focused file in the explorer. See [Explorer Sidebar](#8-explorer-sidebar). | — |
 | `diff` | — | Show or hide changes against HEAD in the gutter. See [Editor Windows](#7-editor-windows). | — |
+| `bracket-match` | — | Turn bracket matching on or off. Flips and saves **Match brackets** (Settings → Editor). | — |
+| `bracket-colors` | — | Turn bracket pair colors on or off. Flips and saves **Colorize bracket pairs** (Settings → Editor). | — |
 | `hidden` | — | Show or hide dot files and folders (`.claude`, `.env`) in the explorer, the file picker, and searches. Flips and saves **Show hidden files** (Settings → Files). `.git` stays hidden. | — |
 | `focus` | — | Show only the buffer in use. The title, status bar, diagnostic line, sidebar, and other windows hide. The command bar, and find or replace, appear only while they are open. Only `focus` again brings the rest back. See [Editor Windows](#7-editor-windows). | — |
 | `split-right` | — | Open an empty editor to the right of the focused one | — |
@@ -584,6 +588,8 @@ Editor, Files, and Keybindings are saved in the same `settings.json` as the them
 | Tab width | 2, 4, 8 | Spaces inserted for one Tab, and the on-screen width of a tab character. The default is 4. |
 | Indent with spaces | On, Off | On inserts spaces. Off inserts a tab character. Text already in the file is left as it is. |
 | Line endings | Auto, LF, CRLF | Auto keeps the ending detected in the file. LF or CRLF is the ending written the next time the file is saved. |
+| Match brackets | On, Off | On draws the bracket at the cursor (or just before it) and its pair bold on a soft background, in the focused window, when both are on screen. A bracket with no pair is drawn in the error color. Brackets in strings and comments are skipped. The default is On. The `bracket-match` command flips it. |
+| Colorize bracket pairs | On, Off | On colors `()` `[]` `{}` by how deep they are nested, cycling through the syntax theme's bracket colors. Unmatched ones use the error color. The default is On. The `bracket-colors` command flips it. |
 | Trim trailing space | On, Off | On removes spaces and tabs at the end of a line when the file is saved. The default is Off. |
 | Final newline | On, Off | On adds a newline at the end of a non-empty file when it is saved. The default is Off. |
 | Show hidden files | On, Off | On lists dot files and folders (`.claude`, `.github`, `.env`) in the explorer, the file picker, `@` mentions, find in files, and the assistant's `search` tool. `.git` stays hidden either way, and `.gitignore` rules still apply. Saved as `files.show_hidden`; the default is Off. The `hidden` command flips it. |
@@ -634,7 +640,7 @@ The choice is written to `settings.json`:
 {
   "color_theme": "tokyo-night",
   "syntax_theme": "tokyo-night",
-  "editor": { "tab_width": 4, "indent_with_spaces": true, "line_ending": "auto" },
+  "editor": { "tab_width": 4, "indent_with_spaces": true, "line_ending": "auto", "match_brackets": true, "colorize_brackets": true },
   "files": { "trim_trailing_space": false, "final_newline": false },
   "lsp": { "enabled": true, "check_on_save": true, "format_on_save": false, "python": "basic" },
   "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "", "auto_approve": false, "streaming": true, "context_size": "16384", "think": true, "max_tokens": "", "request_timeout": 1800, "retries": 3, "openrouter_app_name": "duckx-code", "openrouter_referer": "https://github.com/Manuree/duckx-code" }
@@ -651,6 +657,8 @@ User themes live next to it:
 * `%APPDATA%\duckx-code\themes\syntax\*.json` — code
 
 A file with the same `id` as a built-in replaces that built-in. A new `id` is added at the end of the list. A file that is not valid JSON is skipped, and a notice says which file failed. The shipped documents are in `themes/color` and `themes/syntax` in the repository; those are the shape to copy. Colors are `#rrggbb`.
+
+A syntax theme may add `brackets`, a list of colors used in turn for each nesting depth, and `bracket_error` for unmatched brackets. A color theme may add `bracket_match` under `editor`, the background behind a matched pair. Without them the depth colors are the theme's `constant`, `keyword`, and `function` colors, unmatched brackets use its `error` color, and the pair background is `editor.divider`, so an older theme file still loads. Every built-in theme sets all three.
 
 A color theme may add a `diagnostics` section with `error`, `warning`, `info`, and `hint`. Without it, the Tokyo Night colors are used (`#db4b4b`, `#e0af68`, `#0db9d7`, `#1abc9c`). The Catppuccin themes use red, yellow, sky, and teal.
 

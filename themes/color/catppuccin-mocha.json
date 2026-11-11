@@ -7,7 +7,8 @@
     "gutter": "#6c7086",
     "gutter_active": "#f9e2af",
     "selection": "#45475a",
-    "divider": "#585b70"
+    "divider": "#585b70",
+    "bracket_match": "#585b70"
   },
   "status": {
     "badge_fg": "#181825",

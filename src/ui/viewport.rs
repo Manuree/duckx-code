@@ -8,12 +8,28 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::View;
+use crate::brackets::{BracketColor, BracketMatch, Partner};
 use crate::buffer::{Buffer, Selection, grapheme_width};
 use crate::lsp::Severity;
 use crate::services::git::{FileDiff, LineKind};
 use crate::theme::{SyntaxRole, SyntaxTheme, UiStyles};
 
-/// `diagnostics` are char ranges with their level, as from `Tab::diagnostic_spans`.
+/// What is painted over the text, all in char indices.
+#[derive(Clone, Copy, Default)]
+pub struct Decorations<'a> {
+    /// Syntax roles, as from `Tab::highlights`, sorted by start.
+    pub highlights: &'a [(usize, usize, SyntaxRole)],
+    /// Ranges with their level, as from `Tab::diagnostic_spans`.
+    pub diagnostics: &'a [(usize, usize, Severity)],
+    /// Bracket depth colors, as from `Tab::bracket_colors`, sorted by index.
+    pub bracket_colors: &'a [(usize, BracketColor)],
+    /// The bracket at the cursor and its partner, as from `Tab::bracket_match`.
+    pub bracket_match: Option<BracketMatch>,
+}
+
+/// Style layers, lowest first: syntax color, bracket depth color, unmatched
+/// bracket color, matched-pair background (bold), selection background, then a
+/// diagnostic's color (bold). The block cursor reverses its cell after all of them.
 pub fn render(
     frame: &mut Frame,
     buffer: &Buffer,
@@ -23,11 +39,11 @@ pub fn render(
     focused: bool,
     theme: &UiStyles,
     syntax: &SyntaxTheme,
-    highlights: &[(usize, usize, SyntaxRole)],
-    diagnostics: &[(usize, usize, Severity)],
+    decorations: Decorations,
     show_diff: bool,
     diff: Option<&FileDiff>,
 ) {
+    let diagnostics = decorations.diagnostics;
     let selection = buffer.highlight();
     let (cursor_line, cursor_col) = buffer.cursor_line_col();
     let number_width = (gutter.width as usize).saturating_sub(2 + usize::from(show_diff));
@@ -83,8 +99,7 @@ pub fn render(
             text.width as usize,
             theme,
             syntax,
-            highlights,
-            diagnostics,
+            decorations,
         ));
     }
 
@@ -171,9 +186,14 @@ fn render_line(
     width: usize,
     theme: &UiStyles,
     syntax: &SyntaxTheme,
-    highlights: &[(usize, usize, SyntaxRole)],
-    diagnostics: &[(usize, usize, Severity)],
+    decorations: Decorations,
 ) -> Line<'static> {
+    let Decorations {
+        highlights,
+        diagnostics,
+        bracket_colors,
+        bracket_match,
+    } = decorations;
     let line_start = buffer.rope().line_to_char(line);
     let content = buffer.line_content(line);
     let right_edge = scroll_x + width;
@@ -193,6 +213,23 @@ fn render_line(
         let mut style = Style::new()
             .fg(syntax.color(role_at(pos)))
             .bg(theme.editor_bg);
+        if let Ok(found) = bracket_colors.binary_search_by_key(&pos, |(at, _)| *at) {
+            style = style.fg(match bracket_colors[found].1 {
+                BracketColor::Depth(depth) => syntax.bracket_color(depth),
+                BracketColor::Unmatched => syntax.bracket_error_color(),
+            });
+        }
+        if let Some(pair) = bracket_match {
+            match pair.partner {
+                Partner::Found(mate) if pos == pair.at || pos == mate => {
+                    style = style.patch(theme.bracket_match);
+                }
+                Partner::Unmatched if pos == pair.at => {
+                    style = style.fg(syntax.bracket_error_color());
+                }
+                _ => {}
+            }
+        }
         if pos >= selection.from() && pos < selection.to() {
             style = style.patch(theme.selection);
         }

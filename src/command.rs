@@ -39,6 +39,10 @@ pub enum CommandId {
     Diff,
     /// Show or hide dot files and folders (Settings → Files → Show hidden files).
     ShowHidden,
+    /// Turn bracket matching on or off (Settings → Editor → Match brackets).
+    BracketMatch,
+    /// Turn bracket pair colors on or off (Settings → Editor → Colorize bracket pairs).
+    BracketColors,
     /// Show only the focused buffer, without the title or status bar.
     Focus,
     /// Open a read-only Markdown preview beside the focused file.
@@ -228,6 +232,24 @@ pub const COMMANDS: &[CommandSpec] = &[
         arg: None,
         editor: true,
         explorer: true,
+    },
+    CommandSpec {
+        id: CommandId::BracketMatch,
+        name: "bracket-match",
+        description: "Highlight the bracket at the cursor and its pair, or stop",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::BracketColors,
+        name: "bracket-colors",
+        description: "Color brackets by nesting depth, or stop",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
     },
     CommandSpec {
         id: CommandId::Focus,
@@ -764,6 +786,8 @@ fn importance(id: CommandId) -> u16 {
         CommandId::JumpForward => 210,
         CommandId::Diff => 255,
         CommandId::ShowHidden => 266,
+        CommandId::BracketMatch => 267,
+        CommandId::BracketColors => 268,
         CommandId::Focus => 258,
         CommandId::Preview => 257,
         CommandId::Reveal => 259,
@@ -1229,6 +1253,8 @@ mod tests {
                 "reveal",
                 "explorer",
                 "hidden",
+                "bracket-match",
+                "bracket-colors",
                 "select-all",
                 "deselect",
                 "indent",

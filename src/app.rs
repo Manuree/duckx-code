@@ -153,6 +153,24 @@ impl View {
     }
 }
 
+/// Last bracket color pass, keyed by everything it read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BracketKey {
+    epoch: u64,
+    revision: u64,
+    generation: u64,
+    version: u64,
+    tree: bool,
+    start_line: usize,
+    end_line: usize,
+}
+
+#[derive(Debug)]
+struct BracketCache {
+    key: BracketKey,
+    colors: Vec<(usize, crate::brackets::BracketColor)>,
+}
+
 /// Cached visible syntax spans for one paint range.
 #[derive(Debug, Clone)]
 struct HighlightCache {
@@ -199,6 +217,10 @@ pub struct Tab {
     syntax_generation: u64,
     /// Last `highlights` result for the visible range. Cleared when the tree or range changes.
     highlight_cache: RefCell<Option<HighlightCache>>,
+    /// Last `bracket_colors` result for the visible range.
+    bracket_cache: RefCell<Option<BracketCache>>,
+    /// Last `bracket_match` result, with the cursor it was for.
+    match_cache: RefCell<Option<(BracketKey, usize, Option<crate::brackets::BracketMatch>)>>,
     /// Edits not yet sent to the language server.
     lsp_edits: Vec<crate::buffer::ByteEdit>,
     /// Last comparison with `HEAD`. Kept while a newer one is in flight so the gutter does not blink.
@@ -260,6 +282,116 @@ impl Tab {
         }
         spans.sort_by_key(|span| span.0);
         spans
+    }
+
+    /// Strings and comments on chars `start..end`, as a test for one char index.
+    fn literal_test(&self, start: usize, end: usize) -> impl Fn(usize) -> bool + use<> {
+        let ranges = self
+            .syntax
+            .as_ref()
+            .map(|state| state.literal_ranges(self.buffer.rope(), start, end))
+            .unwrap_or_default();
+        move |at: usize| {
+            let after = ranges.partition_point(|(from, _)| *from <= at);
+            after > 0 && at < ranges[after - 1].1
+        }
+    }
+
+    fn bracket_key(&self, start_line: usize, end_line: usize) -> BracketKey {
+        BracketKey {
+            epoch: self.epoch,
+            revision: self.buffer.revision(),
+            generation: self.syntax.as_ref().map(|s| s.generation()).unwrap_or(0),
+            version: self.syntax.as_ref().map(|s| s.version()).unwrap_or(0),
+            tree: self.syntax.as_ref().is_some_and(|s| s.has_tree()),
+            start_line,
+            end_line,
+        }
+    }
+
+    /// The bracket at the cursor and its partner, when both are on lines
+    /// `start_line..end_line`. A cursor bracket known to be unmatched is returned
+    /// with [`Partner::Unmatched`](crate::brackets::Partner::Unmatched); a partner
+    /// off screen or past the search limit gives `None` (Neovim's matchparen does the same).
+    pub fn bracket_match(
+        &self,
+        start_line: usize,
+        end_line: usize,
+    ) -> Option<crate::brackets::BracketMatch> {
+        let key = self.bracket_key(start_line, end_line);
+        let head = self.buffer.selection().head;
+        if let Some((cached, at, found)) = self.match_cache.borrow().as_ref()
+            && *cached == key
+            && *at == head
+        {
+            return *found;
+        }
+        let found = self.find_bracket_match(start_line, end_line);
+        *self.match_cache.borrow_mut() = Some((key, head, found));
+        found
+    }
+
+    fn find_bracket_match(
+        &self,
+        start_line: usize,
+        end_line: usize,
+    ) -> Option<crate::brackets::BracketMatch> {
+        use crate::brackets::{MATCH_SCAN_CHARS, Partner, match_at_cursor};
+        let rope = self.buffer.rope();
+        let head = self.buffer.selection().head;
+        let tree_pair = |at: usize| {
+            self.syntax
+                .as_ref()
+                .and_then(|state| state.tree_pair(rope, at))
+        };
+        // Strings and comments near the cursor first; the whole search window only
+        // when the scan gets that far.
+        let near = self.literal_test(head.saturating_sub(4_096), head + 4_096);
+        let far = std::cell::OnceCell::new();
+        let literal = |at: usize| {
+            if at.abs_diff(head) < 4_096 {
+                near(at)
+            } else {
+                far.get_or_init(|| {
+                    self.literal_test(
+                        head.saturating_sub(MATCH_SCAN_CHARS + 1),
+                        head + MATCH_SCAN_CHARS + 1,
+                    )
+                })(at)
+            }
+        };
+        let found = match_at_cursor(rope, head, &tree_pair, &literal, MATCH_SCAN_CHARS)?;
+        let visible = |at: usize| (start_line..end_line).contains(&rope.char_to_line(at));
+        match found.partner {
+            _ if !visible(found.at) => None,
+            Partner::Found(mate) if visible(mate) => Some(found),
+            Partner::Unmatched if !found.in_literal => Some(found),
+            _ => None,
+        }
+    }
+
+    /// Depth colors for the brackets on lines `start_line..end_line`, cached until
+    /// the text, the tree, or the range changes.
+    pub fn bracket_colors(
+        &self,
+        start_line: usize,
+        end_line: usize,
+    ) -> Vec<(usize, crate::brackets::BracketColor)> {
+        let key = self.bracket_key(start_line, end_line);
+        if let Some(cache) = self.bracket_cache.borrow().as_ref()
+            && cache.key == key
+        {
+            return cache.colors.clone();
+        }
+        let rope = self.buffer.rope();
+        let (scan_start, scan_end) = crate::brackets::color_scan_range(rope, start_line, end_line);
+        let literal = self.literal_test(scan_start, scan_end);
+        let colors = crate::brackets::colorize(rope, start_line, end_line, &literal);
+        *self.bracket_cache.borrow_mut() = Some(BracketCache {
+            key,
+            colors: colors.clone(),
+        });
+        colors
     }
 
     /// The diff to draw, when one has landed for this path.
@@ -331,6 +463,8 @@ fn fresh_tab(id: TabId, buffer: Buffer, path: Option<PathBuf>) -> Tab {
         syntax: None,
         syntax_generation: 0,
         highlight_cache: RefCell::new(None),
+        bracket_cache: RefCell::new(None),
+        match_cache: RefCell::new(None),
         lsp_edits: Vec::new(),
         diff: None,
     }
@@ -2422,6 +2556,19 @@ impl App {
         }
     }
 
+    /// `bracket-match` / `bracket-colors`: flip the Editor setting and save it.
+    fn toggle_bracket_pref(&mut self, colors: bool) {
+        let (on, what) = if colors {
+            self.editor_prefs.colorize_brackets = !self.editor_prefs.colorize_brackets;
+            (self.editor_prefs.colorize_brackets, "Bracket pair colors")
+        } else {
+            self.editor_prefs.match_brackets = !self.editor_prefs.match_brackets;
+            (self.editor_prefs.match_brackets, "Bracket matching")
+        };
+        self.queue_settings_save();
+        self.message = Some(format!("{what} {}", if on { "on" } else { "off" }));
+    }
+
     /// `hidden`: flip Show hidden files and save it.
     fn toggle_hidden(&mut self) {
         self.file_prefs.show_hidden = !self.file_prefs.show_hidden;
@@ -3366,7 +3513,11 @@ impl App {
             SettingId::SyntaxTheme => {
                 self.appearance.select_syntax_index(index);
             }
-            SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => {
+            SettingId::TabWidth
+            | SettingId::IndentWithSpaces
+            | SettingId::LineEnding
+            | SettingId::MatchBrackets
+            | SettingId::ColorizeBrackets => {
                 self.editor_prefs.set_choice(id, index);
                 self.apply_editor_prefs();
             }
@@ -3425,7 +3576,11 @@ impl App {
             SettingId::SyntaxTheme => {
                 self.appearance.select_syntax_id(origin);
             }
-            SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => {
+            SettingId::TabWidth
+            | SettingId::IndentWithSpaces
+            | SettingId::LineEnding
+            | SettingId::MatchBrackets
+            | SettingId::ColorizeBrackets => {
                 self.editor_prefs.restore_choice(id, origin);
                 self.apply_editor_prefs();
             }
@@ -3477,9 +3632,11 @@ impl App {
         match id {
             SettingId::ColorTheme => self.appearance.color.id.clone(),
             SettingId::SyntaxTheme => self.appearance.syntax.id.clone(),
-            SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => {
-                self.editor_prefs.choice_token(id)
-            }
+            SettingId::TabWidth
+            | SettingId::IndentWithSpaces
+            | SettingId::LineEnding
+            | SettingId::MatchBrackets
+            | SettingId::ColorizeBrackets => self.editor_prefs.choice_token(id),
             SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
                 self.file_prefs.choice_token(id)
             }
@@ -3532,7 +3689,11 @@ impl App {
                 self.appearance.syntax.id.clone(),
                 self.appearance.syntax_count(),
             ),
-            SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => (
+            SettingId::TabWidth
+            | SettingId::IndentWithSpaces
+            | SettingId::LineEnding
+            | SettingId::MatchBrackets
+            | SettingId::ColorizeBrackets => (
                 self.editor_prefs.choice_index(id),
                 self.editor_prefs.choice_token(id),
                 EditorPrefs::choice_names(id).len(),
@@ -3638,7 +3799,11 @@ impl App {
     fn reset_one(&mut self, id: crate::settings::SettingId) {
         use crate::settings::{PythonCheck, SettingId};
         match id {
-            SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => {
+            SettingId::TabWidth
+            | SettingId::IndentWithSpaces
+            | SettingId::LineEnding
+            | SettingId::MatchBrackets
+            | SettingId::ColorizeBrackets => {
                 self.editor_prefs.reset(id);
             }
             SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
@@ -4828,6 +4993,8 @@ impl App {
             CommandId::Workspace => self.request_workspace(arg.unwrap_or(""))?,
             CommandId::Diff => self.toggle_diff(),
             CommandId::ShowHidden => self.toggle_hidden(),
+            CommandId::BracketMatch => self.toggle_bracket_pref(false),
+            CommandId::BracketColors => self.toggle_bracket_pref(true),
             CommandId::Focus => self.toggle_focus(),
             CommandId::Preview => self.open_preview(arg.unwrap_or(""))?,
         }
@@ -8479,6 +8646,131 @@ mod tests {
             let event = crate::jobs::run(job);
             app.handle_event(event);
         }
+    }
+
+    fn parsed(text: &str, path: &str) -> App {
+        let mut app = App::new(Buffer::from_text(text), Some(path.into()));
+        finish_jobs(&mut app);
+        assert!(
+            app.active_editor()
+                .tab()
+                .syntax
+                .as_ref()
+                .is_some_and(|state| state.has_tree()),
+            "parsed"
+        );
+        app
+    }
+
+    #[test]
+    fn bracket_matching_skips_strings_and_comments_with_a_tree() {
+        use crate::brackets::Partner;
+        let text = "fn f() {\n    g(\")\", 1); // )\n}\n";
+        let mut app = parsed(text, "a.rs");
+        let open = text.find("g(").unwrap() + 1;
+        let close = text.find("1)").unwrap() + 1;
+        app.buffer_mut().move_to(open, false);
+        let tab = app.active_editor().tab();
+        let found = tab.bracket_match(0, 10).unwrap();
+        assert_eq!(found.partner, Partner::Found(close));
+        // The `)` in the string and the one in the comment get no color.
+        let colors: Vec<usize> = tab
+            .bracket_colors(0, 10)
+            .iter()
+            .map(|(at, _)| *at)
+            .collect();
+        assert!(!colors.contains(&text.find("\")").unwrap().saturating_add(1)));
+        assert!(!colors.contains(&text.rfind(')').unwrap()));
+        assert!(colors.contains(&open) && colors.contains(&close));
+        // In the string, the `)` there pairs with nothing: no error mark either.
+        let in_string = text.find("\")").unwrap() + 1;
+        app.buffer_mut().move_to(in_string, false);
+        assert_eq!(app.active_editor().tab().bracket_match(0, 10), None);
+        // Brackets in one comment pair with each other.
+        let text = "// see (a [b])\nfn f() {}\n";
+        let mut app = parsed(text, "a.rs");
+        app.buffer_mut().move_to(text.find('[').unwrap(), false);
+        let found = app.active_editor().tab().bracket_match(0, 10).unwrap();
+        assert_eq!(found.partner, Partner::Found(text.find(']').unwrap()));
+        // An unclosed bracket in code is marked; one in a comment is not.
+        let text = "fn f() {\n    g(1;\n}\n";
+        let mut app = parsed(text, "a.rs");
+        app.buffer_mut()
+            .move_to(text.find("g(").unwrap() + 1, false);
+        let found = app.active_editor().tab().bracket_match(0, 10).unwrap();
+        assert_eq!(found.partner, Partner::Unmatched);
+    }
+
+    #[test]
+    fn a_partner_off_screen_shows_nothing() {
+        let body = "    x;\n".repeat(50);
+        let text = format!("fn f() {{\n{body}}}\n");
+        let mut app = parsed(&text, "a.rs");
+        app.buffer_mut().move_to(text.find('{').unwrap(), false);
+        let tab = app.active_editor().tab();
+        assert_eq!(tab.bracket_match(0, 20), None);
+        assert!(tab.bracket_match(0, 60).is_some());
+    }
+
+    #[test]
+    fn bracket_colors_in_a_big_parsed_file_stay_bounded() {
+        let text = "fn f(a: [u8; 4]) -> Vec<u8> { g(\"(\"); vec![a[0]] }\n".repeat(40_000);
+        let app = parsed(&text, "a.rs");
+        let tab = app.active_editor().tab();
+        let started = std::time::Instant::now();
+        let colors = tab.bracket_colors(30_000, 30_040);
+        let first = started.elapsed();
+        // 12 brackets a line; the `(` in each string is skipped.
+        assert_eq!(colors.len(), 40 * 12);
+        let again = std::time::Instant::now();
+        assert_eq!(tab.bracket_colors(30_000, 30_040), colors);
+        assert!(
+            again.elapsed() < first,
+            "the second call is served from the cache"
+        );
+        assert!(first < std::time::Duration::from_secs(2), "{first:?}");
+        eprintln!("bracket colors over a 40k-line file: {first:?}");
+    }
+
+    #[test]
+    fn bracket_settings_are_editor_rows_on_by_default_and_commands_flip_them() {
+        use crate::settings::{EditorPrefs, SettingId, SettingsFile};
+        let (config, _config_guard) = temp_dir();
+        let mut app = App::new(Buffer::from_text("(a)"), None);
+        app.load_appearance(&config);
+        assert!(app.editor_prefs.match_brackets && app.editor_prefs.colorize_brackets);
+        let sections = crate::settings::sections();
+        let editor = sections
+            .iter()
+            .find(|section| section.name == "Editor")
+            .unwrap();
+        let ids: Vec<SettingId> = editor.items.iter().map(|item| item.id).collect();
+        assert!(
+            ids.contains(&SettingId::MatchBrackets) && ids.contains(&SettingId::ColorizeBrackets)
+        );
+        let older: SettingsFile = serde_json::from_str(r#"{"editor": {"tab_width": 2}}"#).unwrap();
+        assert!(older.editor.match_brackets && older.editor.colorize_brackets);
+        let mut prefs = EditorPrefs::default();
+        assert_eq!(prefs.choice_label(SettingId::MatchBrackets), "On");
+        prefs.set_choice(SettingId::ColorizeBrackets, 1);
+        assert!(!prefs.colorize_brackets);
+        assert_eq!(prefs.choice_token(SettingId::ColorizeBrackets), "off");
+        prefs.reset(SettingId::ColorizeBrackets);
+        assert!(prefs.colorize_brackets);
+
+        run(&mut app, "bracket-match");
+        assert!(!app.editor_prefs.match_brackets);
+        assert_eq!(app.message.as_deref(), Some("Bracket matching off"));
+        run(&mut app, "bracket-colors");
+        assert!(!app.editor_prefs.colorize_brackets);
+        for _ in 0..4 {
+            finish_jobs(&mut app);
+        }
+        let saved = std::fs::read_to_string(config.join("settings.json")).unwrap();
+        assert!(saved.contains("\"match_brackets\": false"), "{saved}");
+        assert!(saved.contains("\"colorize_brackets\": false"), "{saved}");
+        run(&mut app, "bracket-match");
+        assert!(app.editor_prefs.match_brackets);
     }
 
     #[test]

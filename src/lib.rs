@@ -1,6 +1,7 @@
 pub mod action;
 pub mod agent;
 pub mod app;
+pub mod brackets;
 pub mod buffer;
 pub mod command;
 pub mod explorer;

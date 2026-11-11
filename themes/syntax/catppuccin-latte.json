@@ -21,5 +21,7 @@
   "macro": "#179299",
   "builtin": "#d20f39",
   "escape": "#d20f39",
-  "lifetime": "#ea76cb"
+  "lifetime": "#ea76cb",
+  "brackets": ["#df8e1d", "#8839ef", "#1e66f5"],
+  "bracket_error": "#d20f39"
 }

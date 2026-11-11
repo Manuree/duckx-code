@@ -494,6 +494,15 @@ pub fn render(frame: &mut Frame, app: &App) {
             .unwrap_or(&[]);
         let highlights = editor.tab().highlights(start, end, semantic);
         let diagnostics = editor.tab().diagnostic_spans(&app.diagnostics, start, end);
+        let bracket_colors = if app.editor_prefs.colorize_brackets {
+            editor.tab().bracket_colors(start, end)
+        } else {
+            Vec::new()
+        };
+        // Like Neovim's matchparen, only the window with focus shows the pair.
+        let bracket_match = (app.editor_prefs.match_brackets && focused)
+            .then(|| editor.tab().bracket_match(start, end))
+            .flatten();
         viewport::render(
             frame,
             &editor.tab().buffer,
@@ -503,8 +512,12 @@ pub fn render(frame: &mut Frame, app: &App) {
             focused,
             &theme,
             &app.appearance.syntax,
-            &highlights,
-            &diagnostics,
+            viewport::Decorations {
+                highlights: &highlights,
+                diagnostics: &diagnostics,
+                bracket_colors: &bracket_colors,
+                bracket_match,
+            },
             app.show_diff(),
             editor.tab().file_diff(),
         );
@@ -1198,6 +1211,125 @@ mod tests {
             })
         });
         assert_ne!(spinner, Some((x, y)));
+    }
+
+    /// Cells of the first editor row, from the first text column, after a full draw.
+    fn text_row(app: &App) -> Vec<ratatui::buffer::Cell> {
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        super::draw(&mut terminal, app).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let starts =
+            |x: u16, y: u16| buffer[(x, y)].symbol() == "f" && buffer[(x + 1, y)].symbol() == "(";
+        let (x, y) = (0..24)
+            .find_map(|y| (0..59).find(|&x| starts(x, y)).map(|x| (x, y)))
+            .expect("text row");
+        (x..60).map(|x| buffer[(x, y)].clone()).collect()
+    }
+
+    #[test]
+    fn the_bracket_pair_at_the_cursor_is_bold_on_the_match_background() {
+        let mut app = App::new(Buffer::from_text("f(a[b]c)\n"), None);
+        app.buffer_mut().move_to(1, false);
+        let styles = *app.styles();
+        let match_bg = styles.bracket_match.bg.unwrap();
+        let row = text_row(&app);
+        let (open, close) = (&row[1], &row[7]);
+        assert_eq!((open.symbol(), close.symbol()), ("(", ")"));
+        for cell in [open, close] {
+            assert_eq!(cell.bg, match_bg);
+            assert!(cell.modifier.contains(Modifier::BOLD));
+        }
+        assert!(
+            open.modifier.contains(Modifier::REVERSED),
+            "the block cursor still shows"
+        );
+        assert_eq!(
+            row[3].bg, styles.editor_bg,
+            "other brackets keep the canvas"
+        );
+        // The cursor right after `)` (end of line) matches the `)` before it.
+        app.buffer_mut().move_to(8, false);
+        let row = text_row(&app);
+        assert_eq!(row[1].bg, match_bg);
+        assert_eq!(row[7].bg, match_bg);
+    }
+
+    #[test]
+    fn selection_draws_over_the_match_and_diagnostics_over_colors() {
+        let mut app = App::new(Buffer::from_text("f(a)\n"), None);
+        app.buffer_mut().move_to(0, false);
+        app.buffer_mut().move_to(2, true);
+        let styles = *app.styles();
+        let row = text_row(&app);
+        // The cursor (head) is at `a`, so the `(` before it is matched, but it is selected.
+        assert_eq!(row[1].bg, styles.selection.bg.unwrap());
+        assert_eq!(row[3].bg, styles.bracket_match.bg.unwrap());
+    }
+
+    #[test]
+    fn brackets_are_colored_by_depth_and_unmatched_ones_stand_out() {
+        let mut app = App::new(Buffer::from_text("f(a[b{c}d]e)) x\n"), None);
+        app.buffer_mut().move_to(15, false);
+        let syntax = app.appearance.syntax.clone();
+        let row = text_row(&app);
+        let fg = |i: usize| row[i].fg;
+        assert_eq!(fg(1), syntax.bracket_color(0));
+        assert_eq!(fg(3), syntax.bracket_color(1));
+        assert_eq!(fg(5), syntax.bracket_color(2));
+        assert_eq!(fg(7), syntax.bracket_color(2));
+        assert_eq!(fg(9), syntax.bracket_color(1));
+        assert_eq!(fg(11), syntax.bracket_color(0));
+        assert_eq!(fg(12), syntax.bracket_error_color());
+        assert_ne!(syntax.bracket_color(0), syntax.bracket_color(1));
+        assert_eq!(
+            syntax.bracket_color(3),
+            syntax.bracket_color(0),
+            "three colors cycle"
+        );
+    }
+
+    #[test]
+    fn both_bracket_settings_off_draw_the_old_look() {
+        let mut app = App::new(Buffer::from_text("f(a[b]c)) x\n"), None);
+        app.buffer_mut().move_to(1, false);
+        app.editor_prefs.match_brackets = false;
+        app.editor_prefs.colorize_brackets = false;
+        let styles = *app.styles();
+        let text = app.appearance.syntax.color(crate::theme::SyntaxRole::Text);
+        let row = text_row(&app);
+        for i in [1, 3, 5, 7, 8] {
+            assert_eq!(row[i].fg, text, "column {i}");
+            assert!(!row[i].modifier.contains(Modifier::BOLD), "column {i}");
+        }
+        assert_eq!(row[7].bg, styles.editor_bg);
+    }
+
+    #[test]
+    fn an_unfocused_editor_shows_no_bracket_match() {
+        let mut app = App::new(Buffer::from_text("f(a)\n"), None);
+        app.buffer_mut().move_to(1, false);
+        app.handle(crate::action::SemanticAction::OpenCommandBar);
+        let row = text_row(&app);
+        assert_eq!(row[3].bg, app.styles().editor_bg);
+    }
+
+    #[test]
+    fn bracket_colors_line_up_after_thai_wide_text_and_tabs() {
+        let mut app = App::new(Buffer::from_text("f\tก界(x)\n"), None);
+        app.buffer_mut().move_to(0, false);
+        let syntax = app.appearance.syntax.clone();
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        super::draw(&mut terminal, &app).unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = (0..8)
+            .find(|&y| (0..60).any(|x| buffer[(x, y)].symbol() == "f"))
+            .unwrap();
+        let open = (0..60).find(|&x| buffer[(x, y)].symbol() == "(").unwrap();
+        let close = (0..60).find(|&x| buffer[(x, y)].symbol() == ")").unwrap();
+        assert_eq!(close, open + 2);
+        assert_eq!(buffer[(open, y)].fg, syntax.bracket_color(0));
+        assert_eq!(buffer[(close, y)].fg, syntax.bracket_color(0));
+        assert_eq!(buffer[(open + 1, y)].symbol(), "x");
     }
 
     #[test]

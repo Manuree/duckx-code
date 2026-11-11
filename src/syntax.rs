@@ -331,6 +331,71 @@ impl SyntaxState {
         crate::buffer::scan_bracket(rope, at, bracket)
     }
 
+    /// Char index of the bracket the tree pairs with the `()[]{}` bracket at `at`.
+    /// `None` when there is no tree or the tree has no node from one to the other.
+    pub fn tree_pair(&self, rope: &Rope, at: usize) -> Option<usize> {
+        if at >= rope.len_chars() {
+            return None;
+        }
+        let bracket = rope.char(at);
+        if !is_plain_bracket(bracket) {
+            return None;
+        }
+        let mate = self.structural_pair(rope, rope.char_to_byte(at), bracket)?;
+        byte_to_char(rope, mate)
+    }
+
+    /// Char ranges of the strings, comments, and character literals that overlap
+    /// chars `start..end`, sorted and merged. One walk of the tree over that range,
+    /// so a caller can test many brackets without a tree lookup each. Empty without a tree.
+    pub fn literal_ranges(&self, rope: &Rope, start: usize, end: usize) -> Vec<(usize, usize)> {
+        let Some(tree) = self.tree.as_ref() else {
+            return Vec::new();
+        };
+        let len = rope.len_chars();
+        let start_byte = rope.char_to_byte(start.min(len));
+        let end_byte = rope.char_to_byte(end.min(len));
+        let mut bytes = Vec::new();
+        match tree {
+            HighlightTree::Code(tree) => {
+                literal_nodes(tree.root_node(), start_byte, end_byte, &mut bytes);
+            }
+            HighlightTree::Markdown(tree) => {
+                literal_nodes(
+                    tree.block_tree().root_node(),
+                    start_byte,
+                    end_byte,
+                    &mut bytes,
+                );
+                for inline in tree.inline_trees() {
+                    literal_nodes(inline.root_node(), start_byte, end_byte, &mut bytes);
+                }
+            }
+        }
+        for injection in &self.injections {
+            if injection.start_byte < end_byte && injection.end_byte > start_byte {
+                literal_nodes(injection.tree.root_node(), start_byte, end_byte, &mut bytes);
+            }
+        }
+        let mut ranges: Vec<(usize, usize)> = bytes
+            .into_iter()
+            .filter_map(|(from, to)| {
+                let from = rope.try_byte_to_char(from.min(rope.len_bytes())).ok()?;
+                let to = rope.try_byte_to_char(to.min(rope.len_bytes())).ok()?;
+                (from < to).then_some((from, to))
+            })
+            .collect();
+        ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+        for (from, to) in ranges {
+            match merged.last_mut() {
+                Some(last) if from <= last.1 => last.1 = last.1.max(to),
+                _ => merged.push((from, to)),
+            }
+        }
+        merged
+    }
+
     fn structural_pair(&self, rope: &Rope, byte: usize, bracket: char) -> Option<usize> {
         let tree = self.tree.as_ref()?;
         if let Some(injection) = self
@@ -460,6 +525,32 @@ fn node_in_literal(root: Node, byte: usize, bracket: char) -> bool {
         current = node.parent();
     }
     false
+}
+
+/// Push the byte ranges of literal nodes under `root` that overlap `start..end`,
+/// without descending into a literal or into nodes outside the range.
+fn literal_nodes(root: Node, start: usize, end: usize, out: &mut Vec<(usize, usize)>) {
+    if root.start_byte() >= end || root.end_byte() <= start {
+        return;
+    }
+    let mut cursor = root.walk();
+    loop {
+        let node = cursor.node();
+        let overlaps = node.start_byte() < end && node.end_byte() > start;
+        if overlaps && literal_kind(node.kind()) {
+            out.push((node.start_byte(), node.end_byte()));
+        } else if overlaps && cursor.goto_first_child_for_byte(start).is_some() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() && cursor.node().start_byte() < end {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
+    }
 }
 
 fn literal_kind(kind: &str) -> bool {
