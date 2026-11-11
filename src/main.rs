@@ -23,6 +23,7 @@ use duckx_code::{
     explorer::Explorer,
     input,
     jobs::{self, AppEvent},
+    key_burst::{self, KeyBurst},
     lsp,
     services::{
         clipboard::Clipboard,
@@ -287,6 +288,33 @@ async fn run_loop(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
     result
 }
 
+/// Route one terminal event to the focused surface. Returns true when it did something.
+fn route_event(
+    app: &mut App,
+    event: &crossterm::event::Event,
+    paste_burst: &mut duckx_code::agent::PasteBurst,
+) -> bool {
+    let action = if app.pane_select.is_some() {
+        input::route_pane_select(event, app.keys())
+    } else {
+        input::route_flags(
+            event,
+            app.focus(),
+            app.explorer.selecting,
+            app.filtering(),
+            app.keys(),
+            app.capturing(),
+            app.drafting(),
+            paste_burst,
+        )
+    };
+    let Some(action) = action else {
+        return false;
+    };
+    app.handle(action);
+    true
+}
+
 async fn drive(
     terminal: &mut Tui,
     app: &mut App,
@@ -306,6 +334,7 @@ async fn drive(
     let mut needs_draw = true;
     let mut last_explorer_height: Option<usize> = None;
     let mut paste_burst = duckx_code::agent::PasteBurst::default();
+    let mut burst = KeyBurst::default();
     while !app.should_quit {
         sync_folder_watch(&mut folder_watch, &app.explorer.root, &fs_tx, &mut fs_due);
         let queued = app.take_jobs();
@@ -345,29 +374,30 @@ async fn drive(
             tokio::time::Instant::now() + until.saturating_duration_since(std::time::Instant::now())
         });
 
+        let paste_at = burst.deadline().map(|due| {
+            tokio::time::Instant::now() + due.saturating_duration_since(std::time::Instant::now())
+        });
+
         tokio::select! {
             event = events.next() => {
                 let Some(event) = event else {
                     break;
                 };
-                let event = event?;
-                let action = if app.pane_select.is_some() {
-                    input::route_pane_select(&event, app.keys())
-                } else {
-                    input::route_flags(
-                        &event,
-                        app.focus(),
-                        app.explorer.selecting,
-                        app.filtering(),
-                        app.keys(),
-                        app.capturing(),
-                        app.drafting(),
-                        &mut paste_burst,
-                    )
-                };
-                if let Some(action) = action {
-                    app.handle(action);
-                    needs_draw = true;
+                // Drain what is already queued so a Windows paste (one key per character)
+                // is seen as one batch. See `key_burst`.
+                let mut batch = vec![event?];
+                while batch.len() < key_burst::MAX_DRAIN
+                    && crossterm::event::poll(Duration::ZERO)?
+                {
+                    batch.push(crossterm::event::read()?);
+                }
+                for event in burst.push(batch, std::time::Instant::now()) {
+                    needs_draw |= route_event(app, &event, &mut paste_burst);
+                }
+            }
+            _ = tokio::time::sleep_until(paste_at.unwrap_or_else(tokio::time::Instant::now)), if paste_at.is_some() => {
+                if let Some(event) = burst.flush() {
+                    needs_draw |= route_event(app, &event, &mut paste_burst);
                 }
             }
             Some(event) = job_events.recv() => {

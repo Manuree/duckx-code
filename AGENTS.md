@@ -52,6 +52,7 @@ Before making structural, UX, or architectural changes, always consult:
   * Ensure a panic hook restores terminal state (`disable_raw_mode`, `LeaveAlternateScreen`) before printing panic backtraces so the user's terminal is never left corrupted.
 * **Terminal Compatibility:**
   * In `crossterm`, enable `EnableBracketedPaste` and attempt `PushKeyboardEnhancementFlags` where supported, but always provide fallback key matches (`F1` and `Ctrl + ;` alongside `Shift + Space`) so Windows Terminal, Alacritty, WezTerm, and standard terminals all work out of the box.
+  * Windows gets no `Event::Paste` from crossterm; a paste arrives as key presses. Route terminal events through `key_burst::KeyBurst` (as `main.rs` does) so a key flood becomes one `Event::Paste`, and handle `Event::Paste` in every new text input instead of relying on per-key handling. See DESIGN.md R6.
 * **Testing:**
   * Write unit tests for `buffer.rs` (cursor movement, `Shift` selection spans, grapheme boundaries, Undo/Redo transactions) and `command.rs` (prefix matching and `Top-1 Recent` ordering) independent of the terminal UI.
 * **Feature examples:**
