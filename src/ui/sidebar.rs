@@ -144,6 +144,10 @@ fn render_tree(frame: &mut Frame, explorer: &Explorer, area: Rect, theme: &UiSty
             let name_style = match (status, row.matched) {
                 (_, true) => theme.sidebar_match,
                 (Some(status), false) => Style::new().fg(git_color(theme, status)),
+                // Dot entries (shown with Show hidden files) read as secondary.
+                (None, false) if crate::services::tree::is_hidden_name(&entry.name) => {
+                    theme.sidebar_dim
+                }
                 (None, false) if entry.is_dir => Style::new().fg(theme.sidebar_folder),
                 (None, false) => Style::new(),
             };

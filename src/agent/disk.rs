@@ -31,6 +31,8 @@ pub enum DiskTask {
         query: String,
         glob: Option<String>,
         open: Vec<(PathBuf, Rope)>,
+        /// Show hidden files: search dot files too. `.git` is never searched.
+        hidden: bool,
     },
 }
 
@@ -73,7 +75,8 @@ pub fn perform(task: DiskTask) -> DiskReport {
             query,
             glob,
             open,
-        } => report(search(&root, &query, glob.as_deref(), &open)),
+            hidden,
+        } => report(search(&root, &query, glob.as_deref(), &open, hidden)),
     }
 }
 
@@ -94,7 +97,13 @@ fn read_decoded(path: &Path) -> Result<String, String> {
 }
 
 /// `path:line: text` for each line holding `query`. Lowercase queries ignore case.
-fn search(root: &Path, query: &str, glob: Option<&str>, open: &[(PathBuf, Rope)]) -> String {
+fn search(
+    root: &Path,
+    query: &str,
+    glob: Option<&str>,
+    open: &[(PathBuf, Rope)],
+    hidden: bool,
+) -> String {
     let query = query.trim_end_matches(['\r', '\n']);
     if query.trim().is_empty() {
         return "query is empty".to_string();
@@ -105,8 +114,7 @@ fn search(root: &Path, query: &str, glob: Option<&str>, open: &[(PathBuf, Rope)]
     } else {
         query.to_string()
     };
-    let mut builder = ignore::WalkBuilder::new(root);
-    builder.hidden(true).git_ignore(true).require_git(false);
+    let mut builder = crate::services::tree::walker(root, hidden);
     if let Some(glob) = glob.map(str::trim).filter(|glob| !glob.is_empty()) {
         let mut overrides = ignore::overrides::OverrideBuilder::new(root);
         let pattern = if glob.contains('/') {
@@ -431,6 +439,7 @@ mod tests {
             query: "alpha".into(),
             glob: None,
             open: Vec::new(),
+            hidden: false,
         })
         .message;
         assert!(found.contains("src/a.rs:1: fn alpha() {}"), "{found}");
@@ -444,6 +453,7 @@ mod tests {
             query: "alpha".into(),
             glob: Some("*.rs".into()),
             open: Vec::new(),
+            hidden: false,
         })
         .message;
         assert!(!only_rs.contains("notes.md"), "{only_rs}");
@@ -457,9 +467,32 @@ mod tests {
             query: "gamma".into(),
             glob: None,
             open,
+            hidden: false,
         })
         .message;
         assert!(edited.contains("src/a.rs:1: fn gamma() {}"), "{edited}");
+
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git").join("HEAD"), "alpha in git\n").unwrap();
+        fs::write(root.join(".env"), "ALPHA=1 alpha\n").unwrap();
+        let search = |hidden: bool| {
+            perform(DiskTask::Search {
+                root: root.clone(),
+                query: "alpha".into(),
+                glob: None,
+                open: Vec::new(),
+                hidden,
+            })
+            .message
+        };
+        let plain = search(false);
+        assert!(!plain.contains(".env"), "{plain}");
+        let all = search(true);
+        assert!(
+            all.contains(".env:1:"),
+            "Show hidden files searches dot files: {all}"
+        );
+        assert!(!all.contains(".git"), ".git is never searched: {all}");
         let _ = fs::remove_dir_all(&root);
     }
 }

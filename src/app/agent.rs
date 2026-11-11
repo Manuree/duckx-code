@@ -1375,6 +1375,7 @@ impl App {
                 query,
                 glob,
                 open,
+                hidden: self.file_prefs.show_hidden,
             },
         });
         None

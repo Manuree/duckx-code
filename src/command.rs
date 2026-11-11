@@ -37,6 +37,8 @@ pub enum CommandId {
     SidebarNarrower,
     /// Show or hide changes against HEAD in the gutter.
     Diff,
+    /// Show or hide dot files and folders (Settings → Files → Show hidden files).
+    ShowHidden,
     /// Show only the focused buffer, without the title or status bar.
     Focus,
     /// Open a read-only Markdown preview beside the focused file.
@@ -217,6 +219,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         arg: None,
         editor: true,
         explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::ShowHidden,
+        name: "hidden",
+        description: "Show or hide dot files and folders like .claude",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: true,
     },
     CommandSpec {
         id: CommandId::Focus,
@@ -752,6 +763,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::JumpBack => 200,
         CommandId::JumpForward => 210,
         CommandId::Diff => 255,
+        CommandId::ShowHidden => 266,
         CommandId::Focus => 258,
         CommandId::Preview => 257,
         CommandId::Reveal => 259,
@@ -1216,6 +1228,7 @@ mod tests {
                 "focus",
                 "reveal",
                 "explorer",
+                "hidden",
                 "select-all",
                 "deselect",
                 "indent",
@@ -1257,6 +1270,7 @@ mod tests {
                 "explorer",
                 "wider",
                 "narrower",
+                "hidden",
                 "setting",
                 "about",
                 "quit"
@@ -1285,6 +1299,7 @@ mod tests {
                 "explorer",
                 "wider",
                 "narrower",
+                "hidden",
                 "setting",
                 "about",
                 "quit"
