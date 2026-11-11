@@ -8,17 +8,30 @@ use crate::explorer::FileEntry;
 /// Upper bound on scanned entries so huge directories can't stall the explorer.
 pub const MAX_ENTRIES: usize = 20_000;
 
-/// Walks `root` (respecting `.gitignore`, `.ignore`, and skipping hidden files) and returns
-/// entries in display order: depth-first, directories before files, names case-insensitive.
-/// Blocking; run it off the UI thread.
-pub fn scan(root: &Path) -> Vec<FileEntry> {
-    let mut children: HashMap<PathBuf, Vec<(PathBuf, bool)>> = HashMap::new();
-    let walker = WalkBuilder::new(root)
-        .hidden(true)
+/// The one workspace walk: respects `.gitignore` and `.ignore`, does not follow
+/// links, and never enters `.git`. Dot files and folders (`.claude`, `.env`) are
+/// skipped unless `show_hidden` (Settings → Files → Show hidden files) is on.
+pub fn walker(root: &Path, show_hidden: bool) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(!show_hidden)
         .git_ignore(true)
         .require_git(false)
         .follow_links(false)
-        .build();
+        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git");
+    builder
+}
+
+/// A dot file or folder, hidden unless Show hidden files is on.
+pub fn is_hidden_name(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+/// Walks `root` with [`walker`] and returns entries in display order: depth-first,
+/// directories before files, names case-insensitive. Blocking; run it off the UI thread.
+pub fn scan(root: &Path, show_hidden: bool) -> Vec<FileEntry> {
+    let mut children: HashMap<PathBuf, Vec<(PathBuf, bool)>> = HashMap::new();
+    let walker = walker(root, show_hidden).build();
 
     for entry in walker.filter_map(Result::ok).take(MAX_ENTRIES + 1) {
         if entry.depth() == 0 {
@@ -147,7 +160,7 @@ mod tests {
         }
         fs::write(root.join(".gitignore"), "target/\n").unwrap();
 
-        let listed: Vec<(String, usize)> = scan(&root)
+        let listed: Vec<(String, usize)> = scan(&root, false)
             .into_iter()
             .map(|e| (e.path.to_string_lossy().replace('\\', "/"), e.depth))
             .collect();
@@ -162,6 +175,38 @@ mod tests {
                 ("Zeta/z.rs".to_string(), 2),
                 ("A.md".to_string(), 1),
                 ("b.txt".to_string(), 1),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn show_hidden_lists_dot_entries_but_never_git() {
+        let root = std::env::temp_dir().join(format!("duckx-tree-hidden-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for dir in [".claude", ".git/objects", "crates", "target"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        for file in [".claude/settings.json", ".git/HEAD", ".env", "Cargo.toml"] {
+            fs::write(root.join(file), "").unwrap();
+        }
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        let names = |show: bool| -> Vec<String> {
+            scan(&root, show)
+                .into_iter()
+                .map(|e| e.path.to_string_lossy().replace('\\', "/"))
+                .collect()
+        };
+        assert_eq!(names(false), ["crates", "Cargo.toml"]);
+        assert_eq!(
+            names(true),
+            [
+                ".claude",
+                ".claude/settings.json",
+                "crates",
+                ".env",
+                ".gitignore",
+                "Cargo.toml",
             ]
         );
         fs::remove_dir_all(root).unwrap();

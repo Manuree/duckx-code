@@ -11,7 +11,6 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use ignore::WalkBuilder;
 use unicode_width::UnicodeWidthStr;
 
 /// Files kept from one walk. Past this, the picker says the list was cut short.
@@ -330,14 +329,10 @@ pub fn absolute_path(root: &Path, relative: &str) -> PathBuf {
     path
 }
 
-/// Blocking walk. Call it from a background job.
-pub fn index_workspace(root: &Path) -> (Vec<IndexedFile>, bool) {
-    let walker = WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .require_git(false)
-        .follow_links(false)
-        .build();
+/// Blocking walk. Call it from a background job. Dot files only with `show_hidden`;
+/// `.git` never.
+pub fn index_workspace(root: &Path, show_hidden: bool) -> (Vec<IndexedFile>, bool) {
+    let walker = crate::services::tree::walker(root, show_hidden).build();
     let mut files = Vec::new();
     let mut truncated = false;
     for entry in walker {
@@ -981,10 +976,21 @@ mod tests {
         std::fs::write(root.join("src/app.rs"), "").unwrap();
         std::fs::write(root.join("target/secret.rs"), "").unwrap();
 
-        let (files, truncated) = index_workspace(&root);
+        let (files, truncated) = index_workspace(&root, false);
         let listed: Vec<&str> = files.iter().map(|file| file.relative.as_str()).collect();
         assert!(!truncated);
         assert_eq!(listed, ["src/app.rs"]);
+
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "").unwrap();
+        let (files, _) = index_workspace(&root, true);
+        let mut listed: Vec<&str> = files.iter().map(|file| file.relative.as_str()).collect();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [".gitignore", ".hidden.rs", "src/app.rs"],
+            "dot files with Show hidden files, still no .git or ignored files"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

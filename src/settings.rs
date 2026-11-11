@@ -25,6 +25,8 @@ pub enum SettingId {
     TrimTrailingSpace,
     /// Add a newline at the end of a file on save.
     FinalNewline,
+    /// List dot files and folders in the explorer, file picker, and searches.
+    ShowHidden,
     /// One rebindable command chord.
     Binding(&'static str),
     /// Start language servers for open files.
@@ -1518,12 +1520,16 @@ pub struct FilePrefs {
     pub trim_trailing_space: bool,
     #[serde(default)]
     pub final_newline: bool,
+    /// Dot files and folders (`.claude`, `.env`) in the explorer, the file picker,
+    /// `@` mentions, and searches. Off by default; `.git` stays hidden either way.
+    #[serde(default)]
+    pub show_hidden: bool,
 }
 
 impl FilePrefs {
     pub fn choice_names(id: SettingId) -> Vec<String> {
         match id {
-            SettingId::TrimTrailingSpace | SettingId::FinalNewline => {
+            SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
                 vec!["On".into(), "Off".into()]
             }
             _ => Vec::new(),
@@ -1534,6 +1540,7 @@ impl FilePrefs {
         let on = match id {
             SettingId::TrimTrailingSpace => self.trim_trailing_space,
             SettingId::FinalNewline => self.final_newline,
+            SettingId::ShowHidden => self.show_hidden,
             _ => return 0,
         };
         usize::from(!on)
@@ -1543,6 +1550,7 @@ impl FilePrefs {
         match id {
             SettingId::TrimTrailingSpace => on_off(self.trim_trailing_space),
             SettingId::FinalNewline => on_off(self.final_newline),
+            SettingId::ShowHidden => on_off(self.show_hidden),
             _ => String::new(),
         }
     }
@@ -1559,6 +1567,7 @@ impl FilePrefs {
         match id {
             SettingId::TrimTrailingSpace => self.trim_trailing_space = on,
             SettingId::FinalNewline => self.final_newline = on,
+            SettingId::ShowHidden => self.show_hidden = on,
             _ => {}
         }
     }
@@ -1568,6 +1577,7 @@ impl FilePrefs {
         match id {
             SettingId::TrimTrailingSpace => self.trim_trailing_space = on,
             SettingId::FinalNewline => self.final_newline = on,
+            SettingId::ShowHidden => self.show_hidden = on,
             _ => {}
         }
     }
@@ -1576,6 +1586,7 @@ impl FilePrefs {
         match id {
             SettingId::TrimTrailingSpace => self.trim_trailing_space = false,
             SettingId::FinalNewline => self.final_newline = false,
+            SettingId::ShowHidden => self.show_hidden = false,
             _ => {}
         }
     }
@@ -1881,6 +1892,11 @@ pub fn sections() -> &'static [Section] {
                             label: "Final newline",
                             detail: "Add a newline at the end of a file on save.",
                             id: SettingId::FinalNewline,
+                        },
+                        Item {
+                            label: "Show hidden files",
+                            detail: "List dot files and folders like .claude and .env. .git stays hidden.",
+                            id: SettingId::ShowHidden,
                         },
                     ],
                 ),

@@ -483,7 +483,7 @@ mod tests {
                     );
                     assert!(path.ends_with("note.rs") || path.ends_with("other.rs"));
                 }
-                crate::jobs::Job::ScanTree(_) | crate::jobs::Job::GitStatus(_) => continue,
+                crate::jobs::Job::ScanTree(..) | crate::jobs::Job::GitStatus(_) => continue,
                 other => panic!("unexpected job {other:?}"),
             }
             loads.push(job);

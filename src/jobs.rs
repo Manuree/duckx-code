@@ -74,7 +74,8 @@ pub struct DiskEdit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
-    ScanTree(PathBuf),
+    /// Walk the explorer root. The flag is Show hidden files.
+    ScanTree(PathBuf, bool),
     GitStatus(PathBuf),
     /// `fingerprint` is the hash of `text`. `epoch` is the editor generation that owned those bytes.
     SaveFile {
@@ -137,6 +138,8 @@ pub enum Job {
     IndexFiles {
         root: PathBuf,
         generation: u64,
+        /// Show hidden files.
+        hidden: bool,
     },
     /// Score `files` against `query`. `recent` is most-recent first.
     FilterFiles {
@@ -295,8 +298,8 @@ pub enum AppEvent {
 /// Runs a job to completion. Blocking (file system walks, `git` subprocesses).
 pub fn run(job: Job) -> AppEvent {
     match job {
-        Job::ScanTree(root) => AppEvent::TreeScanned {
-            entries: tree::scan(&root),
+        Job::ScanTree(root, hidden) => AppEvent::TreeScanned {
+            entries: tree::scan(&root, hidden),
             root,
         },
         Job::GitStatus(root) => AppEvent::GitStatus {
@@ -386,8 +389,12 @@ pub fn run(job: Job) -> AppEvent {
                 errors,
             }
         }
-        Job::IndexFiles { root, generation } => {
-            let (files, truncated) = picker::index_workspace(&root);
+        Job::IndexFiles {
+            root,
+            generation,
+            hidden,
+        } => {
+            let (files, truncated) = picker::index_workspace(&root, hidden);
             AppEvent::FilesIndexed {
                 root,
                 generation,

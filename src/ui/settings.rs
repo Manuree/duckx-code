@@ -338,7 +338,7 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => {
             format!("{} {mark}", app.editor_prefs.choice_label(id))
         }
-        SettingId::TrimTrailingSpace | SettingId::FinalNewline => {
+        SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
             format!("{} {mark}", app.file_prefs.choice_label(id))
         }
         SettingId::ColorTheme => format!("{} {mark}", app.appearance.color.name),
@@ -570,7 +570,7 @@ fn paint_menu(
         SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => {
             crate::settings::EditorPrefs::choice_names(id)
         }
-        SettingId::TrimTrailingSpace | SettingId::FinalNewline => {
+        SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
             crate::settings::FilePrefs::choice_names(id)
         }
         id @ (SettingId::LanguageServer

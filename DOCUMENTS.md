@@ -164,7 +164,7 @@ The text to replace is the selection, or the last search when nothing is selecte
 
 `file-picker` or `Ctrl + P` opens a rounded list over the editor. The status badge reads `OPEN`. Printable keys edit the query and do not change the file.
 
-The list is the workspace, with `.gitignore` respected and hidden files skipped. The scan runs in the background. Opening the picker again shows the previous list immediately, then replaces it when the new scan finishes. A `+` after the count means the walk stopped at 100,000 files.
+The list is the workspace, with `.gitignore` respected. Dot files and folders are skipped unless **Show hidden files** is On (Settings → Files, or the `hidden` command); `.git` is never listed. The scan runs in the background. Opening the picker again shows the previous list immediately, then replaces it when the new scan finishes. A `+` after the count means the walk stopped at 100,000 files.
 
 | Keys | Action |
 | :--- | :--- |
@@ -372,6 +372,7 @@ If no OS clipboard is available (e.g. a headless session), `copy`, `cut`, and `p
 | `explorer` | — | Toggle the file explorer sidebar (same cycle as `Ctrl + B`) | `Ctrl + B` |
 | `reveal` | — | Show the focused file in the explorer. See [Explorer Sidebar](#8-explorer-sidebar). | — |
 | `diff` | — | Show or hide changes against HEAD in the gutter. See [Editor Windows](#7-editor-windows). | — |
+| `hidden` | — | Show or hide dot files and folders (`.claude`, `.env`) in the explorer, the file picker, and searches. Flips and saves **Show hidden files** (Settings → Files). `.git` stays hidden. | — |
 | `focus` | — | Show only the buffer in use. The title, status bar, diagnostic line, sidebar, and other windows hide. The command bar, and find or replace, appear only while they are open. Only `focus` again brings the rest back. See [Editor Windows](#7-editor-windows). | — |
 | `split-right` | — | Open an empty editor to the right of the focused one | — |
 | `split-down` | — | Open an empty editor below the focused one | — |
@@ -497,7 +498,7 @@ Open the Command Bar while the explorer is focused (`Shift + Space` works in FIL
 
 ### 8.5 What Is Shown
 
-* **Hidden entries:** files and folders matched by `.gitignore` (and `.ignore`) and dotfiles are hidden.
+* **Hidden entries:** files and folders matched by `.gitignore` (and `.ignore`) are hidden. Dot files and folders (`.claude`, `.github`, `.env`, `.gitignore`) are hidden too unless **Show hidden files** is On; then they appear in their usual sorted place with a dim name. `.git` is always hidden. Turning the setting on or off (Settings → Files, or `hidden` in the Command Bar) refreshes the open tree at once, and folders that were open stay open.
 * **Order:** folders first, then files, alphabetically (case-insensitive).
 * **Size limit:** very large trees are cut off after 20,000 entries.
 * **Refresh:** the tree and git status are reloaded each time the sidebar is opened, after a file is saved while it is open, and after `move`, `rename`, or `delete`.
@@ -585,6 +586,7 @@ Editor, Files, and Keybindings are saved in the same `settings.json` as the them
 | Line endings | Auto, LF, CRLF | Auto keeps the ending detected in the file. LF or CRLF is the ending written the next time the file is saved. |
 | Trim trailing space | On, Off | On removes spaces and tabs at the end of a line when the file is saved. The default is Off. |
 | Final newline | On, Off | On adds a newline at the end of a non-empty file when it is saved. The default is Off. |
+| Show hidden files | On, Off | On lists dot files and folders (`.claude`, `.github`, `.env`) in the explorer, the file picker, `@` mentions, find in files, and the assistant's `search` tool. `.git` stays hidden either way, and `.gitignore` rules still apply. Saved as `files.show_hidden`; the default is Off. The `hidden` command flips it. |
 
 **Keybindings** is one row per command. The value is the chord, such as `Ctrl+S`. `Enter` waits for the next key, and `Esc` cancels. The new chord is saved. `Delete` on that row restores its built-in chord. A chord another command already uses is refused, and a notice names that command.
 
@@ -774,7 +776,7 @@ The assistant can run these tools. A path that climbs out of the workspace with 
 | `list_dir` | List one directory. |
 | `editor_state` | Focused path, cursor line, and the selection. |
 | `diagnostics` | Errors and warnings for a file. |
-| `search` | Find text in the workspace (`path:line: text`, up to 60 hits). A lowercase query ignores case. `glob` limits the files (`*.rs`). Files in `.gitignore` and hidden files are skipped. An open file is searched as it is in the editor, unsaved text included. |
+| `search` | Find text in the workspace (`path:line: text`, up to 60 hits). A lowercase query ignores case. `glob` limits the files (`*.rs`). Files in `.gitignore` are skipped, and so are dot files unless Show hidden files is On. `.git` is never searched. An open file is searched as it is in the editor, unsaved text included. |
 | `lsp` | Ask the language server: `definition`, `references`, or `hover` at a line and a symbol (or column). A closed file opens in a background tab first. Needs a running language server for that file. |
 | `apply_edit` | Replace a line range, or a snippet. A snippet must be unique, or set `replace_all` to change every copy. A snippet still matches when only line endings, curly quotes, or `12\|` line-number prefixes differ. The edit always goes to an editor buffer, never straight to disk: an open file, or a closed file opened in a background tab. It is one undo step (`Ctrl + Z`) and stays unsaved until you or `save` save it. A line-range edit is refused when the model has not read the file, or the file changed since it read it (you typed). The result shows the changed lines, and, when a language server runs for the file, the errors and warnings after the edit (it waits up to 4 seconds; the title says `checking`). |
 | `create_file` | Write a new file and open it. A path that already exists is refused. |

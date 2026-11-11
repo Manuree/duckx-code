@@ -512,6 +512,8 @@ pub struct App {
     pub message: Option<String>,
     /// The message [`App::flush_notice`] last looked at, so it is shown once.
     notice_seen: Option<String>,
+    /// The Show hidden files value the tree and file index were last asked for.
+    hidden_applied: bool,
     /// A reply that arrived while the assistant panel was hidden. Drawn above
     /// the status bar until it expires or the panel opens.
     pub snackbar: Option<Snackbar>,
@@ -666,6 +668,7 @@ impl App {
             message: None,
             snackbar: None,
             notice_seen: None,
+            hidden_applied: false,
             clipboard: Clipboard::in_memory(),
             branch: None,
             explorer: Explorer::new(PathBuf::from(".")),
@@ -905,6 +908,7 @@ impl App {
         self.keys = crate::keys::KeyMap::resolve(&self.key_overrides);
         self.apply_editor_prefs();
         self.lsp_prefs_dirty = true;
+        self.sync_show_hidden();
         if let Some(warning) = warning {
             self.message = Some(warning);
         }
@@ -1731,7 +1735,11 @@ impl App {
         let root = self.explorer.root.clone();
         self.jobs
             .retain(|job| !matches!(job, Job::IndexFiles { .. }));
-        self.jobs.push(Job::IndexFiles { root, generation });
+        self.jobs.push(Job::IndexFiles {
+            root,
+            generation,
+            hidden: self.file_prefs.show_hidden,
+        });
         let cached = self
             .file_index
             .as_ref()
@@ -1984,9 +1992,16 @@ impl App {
             return;
         }
         let root = self.explorer.root.clone();
-        let queued = self.jobs.iter().any(
-            |job| matches!(job, Job::ScanTree(path) if crate::session::same_directory(path, &root)),
-        );
+        let hidden = self.file_prefs.show_hidden;
+        let mut queued = false;
+        for job in &mut self.jobs {
+            if let Job::ScanTree(path, show) = job
+                && crate::session::same_directory(path, &root)
+            {
+                *show = hidden;
+                queued = true;
+            }
+        }
         if queued {
             return;
         }
@@ -2003,7 +2018,7 @@ impl App {
         if self.explorer.entries().is_empty() {
             self.explorer.loading = true;
         }
-        self.jobs.push(Job::ScanTree(root.clone()));
+        self.jobs.push(Job::ScanTree(root.clone(), hidden));
         let status_queued = self.jobs.iter().any(|job| {
             matches!(job, Job::GitStatus(path) if crate::session::same_directory(path, &root))
         });
@@ -2384,6 +2399,40 @@ impl App {
         }
         self.handle_inner(action);
         self.prune_previews();
+        self.sync_show_hidden();
+    }
+
+    /// Show hidden files changed (Settings, `hidden`, or a reloaded settings file):
+    /// rescan the tree in place, keeping expanded folders, and drop the file index so
+    /// the picker and `@` mentions walk again.
+    fn sync_show_hidden(&mut self) {
+        let show = self.file_prefs.show_hidden;
+        if self.hidden_applied == show {
+            return;
+        }
+        self.hidden_applied = show;
+        self.file_index = None;
+        self.index_generation = self.index_generation.wrapping_add(1);
+        if self.file_picker.is_some() {
+            self.queue_index();
+        }
+        if self.explorer.open || !self.explorer.entries().is_empty() {
+            self.queue_tree_scan(false);
+        }
+    }
+
+    /// `hidden`: flip Show hidden files and save it.
+    fn toggle_hidden(&mut self) {
+        self.file_prefs.show_hidden = !self.file_prefs.show_hidden;
+        self.queue_settings_save();
+        self.message = Some(
+            if self.file_prefs.show_hidden {
+                "Showing hidden files"
+            } else {
+                "Hidden files are hidden"
+            }
+            .to_string(),
+        );
     }
 
     fn handle_inner(&mut self, action: SemanticAction) {
@@ -3306,7 +3355,7 @@ impl App {
                 self.editor_prefs.set_choice(id, index);
                 self.apply_editor_prefs();
             }
-            SettingId::TrimTrailingSpace | SettingId::FinalNewline => {
+            SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
                 self.file_prefs.set_choice(id, index);
             }
             id @ (SettingId::LanguageServer
@@ -3365,7 +3414,7 @@ impl App {
                 self.editor_prefs.restore_choice(id, origin);
                 self.apply_editor_prefs();
             }
-            SettingId::TrimTrailingSpace | SettingId::FinalNewline => {
+            SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
                 self.file_prefs.restore_choice(id, origin);
             }
             id @ (SettingId::LanguageServer
@@ -3416,7 +3465,7 @@ impl App {
             SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => {
                 self.editor_prefs.choice_token(id)
             }
-            SettingId::TrimTrailingSpace | SettingId::FinalNewline => {
+            SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
                 self.file_prefs.choice_token(id)
             }
             id @ (SettingId::LanguageServer
@@ -3473,7 +3522,7 @@ impl App {
                 self.editor_prefs.choice_token(id),
                 EditorPrefs::choice_names(id).len(),
             ),
-            SettingId::TrimTrailingSpace | SettingId::FinalNewline => (
+            SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => (
                 self.file_prefs.choice_index(id),
                 self.file_prefs.choice_token(id),
                 FilePrefs::choice_names(id).len(),
@@ -3577,7 +3626,9 @@ impl App {
             SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => {
                 self.editor_prefs.reset(id);
             }
-            SettingId::TrimTrailingSpace | SettingId::FinalNewline => self.file_prefs.reset(id),
+            SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
+                self.file_prefs.reset(id)
+            }
             SettingId::ColorTheme => {
                 self.appearance.select_color_id("tokyo-night");
             }
@@ -4761,6 +4812,7 @@ impl App {
             CommandId::FilePicker => self.open_file_picker(),
             CommandId::Workspace => self.request_workspace(arg.unwrap_or(""))?,
             CommandId::Diff => self.toggle_diff(),
+            CommandId::ShowHidden => self.toggle_hidden(),
             CommandId::Focus => self.toggle_focus(),
             CommandId::Preview => self.open_preview(arg.unwrap_or(""))?,
         }
@@ -7931,7 +7983,7 @@ mod tests {
         assert_eq!(
             app.take_jobs(),
             [
-                Job::ScanTree(PathBuf::from("/work/repo")),
+                Job::ScanTree(PathBuf::from("/work/repo"), false),
                 Job::GitStatus(PathBuf::from("/work/repo"))
             ]
         );
@@ -8075,7 +8127,10 @@ mod tests {
         app.note_fs_changed(&root);
         assert_eq!(
             app.take_jobs(),
-            [Job::ScanTree(root.clone()), Job::GitStatus(root.clone())]
+            [
+                Job::ScanTree(root.clone(), false),
+                Job::GitStatus(root.clone())
+            ]
         );
         assert!(!app.explorer.loading);
         assert_eq!(app.explorer.selected(), Some(Path::new("keep.rs")));
@@ -8096,7 +8151,7 @@ mod tests {
         );
         assert_eq!(
             app.take_jobs(),
-            [Job::ScanTree(root.clone()), Job::GitStatus(root)]
+            [Job::ScanTree(root.clone(), false), Job::GitStatus(root)]
         );
     }
 
@@ -8113,7 +8168,7 @@ mod tests {
         app.explorer = Explorer::new(dir.clone());
         app.explorer.open = true;
         // Seed the tree the way a first scan would.
-        let first = crate::jobs::run(Job::ScanTree(dir.clone()));
+        let first = crate::jobs::run(Job::ScanTree(dir.clone(), false));
         app.handle_event(first);
         app.take_jobs();
         let names: Vec<_> = app
@@ -8133,12 +8188,12 @@ mod tests {
         app.note_fs_changed(&dir);
         let jobs = app.take_jobs();
         assert!(
-            jobs.iter().any(|j| matches!(j, Job::ScanTree(_))),
+            jobs.iter().any(|j| matches!(j, Job::ScanTree(..))),
             "disk change must queue ScanTree while Explorer is open: {jobs:?}"
         );
         let scan = jobs
             .into_iter()
-            .find(|j| matches!(j, Job::ScanTree(_)))
+            .find(|j| matches!(j, Job::ScanTree(..)))
             .expect("ScanTree");
         let event = crate::jobs::run(scan);
         app.handle_event(event);
@@ -8481,7 +8536,7 @@ mod tests {
         let jobs = app.take_jobs();
         assert!(
             jobs.iter()
-                .any(|job| matches!(job, Job::ScanTree(root) if root == &dir)),
+                .any(|job| matches!(job, Job::ScanTree(root, _) if root == &dir)),
             "{jobs:?}"
         );
         assert!(
@@ -9016,6 +9071,7 @@ mod tests {
                 "explorer",
                 "wider",
                 "narrower",
+                "hidden",
                 "setting",
                 "about",
                 "quit"
@@ -9129,6 +9185,130 @@ mod tests {
         assert!(warning.is_none(), "{warning:?}");
         assert_eq!(loaded.color.id, "catppuccin-latte");
         assert_eq!(loaded.syntax.id, "catppuccin-latte");
+    }
+
+    fn hidden_workspace() -> (PathBuf, impl Drop) {
+        let (dir, guard) = temp_dir();
+        for folder in [".claude", ".git", "crates/core", "target"] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+        }
+        for file in [
+            ".claude/settings.json",
+            ".git/HEAD",
+            "crates/core/lib.rs",
+            "Cargo.toml",
+        ] {
+            std::fs::write(dir.join(file), "x\n").unwrap();
+        }
+        (dir, guard)
+    }
+
+    fn tree_names(app: &App) -> Vec<String> {
+        app.explorer
+            .visible_rows()
+            .iter()
+            .map(|row| row.entry.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn show_hidden_refreshes_the_open_tree_and_keeps_folders_expanded() {
+        let (dir, _guard) = hidden_workspace();
+        let (config, _config_guard) = temp_dir();
+        let mut app = App::new(Buffer::new(), None);
+        app.load_appearance(&config);
+        assert!(!app.file_prefs.show_hidden, "off by default");
+        app.explorer = Explorer::new(dir.clone());
+        app.explorer.open = true;
+        app.queue_tree_scan(true);
+        finish_jobs(&mut app);
+        app.explorer.set_expanded([PathBuf::from("crates")]);
+        assert_eq!(tree_names(&app), ["crates", "core", "target", "Cargo.toml"]);
+
+        run(&mut app, "hidden");
+        assert!(app.file_prefs.show_hidden);
+        assert_eq!(app.message.as_deref(), Some("Showing hidden files"));
+        let jobs = app.take_jobs();
+        assert!(
+            jobs.iter().any(|job| matches!(job, Job::ScanTree(_, true))),
+            "the open tree rescans at once: {jobs:?}"
+        );
+        for job in jobs {
+            let event = crate::jobs::run(job);
+            app.handle_event(event);
+        }
+        assert_eq!(
+            tree_names(&app),
+            [".claude", "crates", "core", "target", "Cargo.toml"],
+            ".git stays hidden; crates stays expanded"
+        );
+        let saved = std::fs::read_to_string(config.join("settings.json")).unwrap();
+        assert!(saved.contains("\"show_hidden\": true"), "{saved}");
+
+        run(&mut app, "hidden");
+        finish_jobs(&mut app);
+        assert_eq!(tree_names(&app), ["crates", "core", "target", "Cargo.toml"]);
+    }
+
+    #[test]
+    fn show_hidden_reindexes_the_file_picker() {
+        let (dir, _guard) = hidden_workspace();
+        let mut app = App::new(Buffer::new(), None);
+        app.explorer = Explorer::new(dir.clone());
+        app.queue_index();
+        finish_jobs(&mut app);
+        let listed = |app: &App| -> Vec<String> {
+            let mut files: Vec<String> = app
+                .file_index
+                .as_ref()
+                .map(|index| index.files.iter().map(|f| f.relative.clone()).collect())
+                .unwrap_or_default();
+            files.sort();
+            files
+        };
+        assert_eq!(listed(&app), ["Cargo.toml", "crates/core/lib.rs"]);
+
+        app.file_prefs.show_hidden = true;
+        app.handle(SemanticAction::OpenFilePicker);
+        finish_jobs(&mut app);
+        assert_eq!(
+            listed(&app),
+            [".claude/settings.json", "Cargo.toml", "crates/core/lib.rs"],
+            "no .git files"
+        );
+    }
+
+    #[test]
+    fn show_hidden_is_a_files_row_saved_in_settings_json() {
+        use crate::settings::{SettingId, SettingsFile};
+        let files = crate::settings::sections()
+            .iter()
+            .find(|section| section.name == "Files")
+            .expect("Files section");
+        assert!(
+            files
+                .items
+                .iter()
+                .any(|item| item.label == "Show hidden files" && item.id == SettingId::ShowHidden)
+        );
+        let older: SettingsFile =
+            serde_json::from_str(r#"{"files": {"final_newline": true}}"#).unwrap();
+        assert!(
+            !older.files.show_hidden,
+            "an older file keeps dot files hidden"
+        );
+        let on: SettingsFile = serde_json::from_str(r#"{"files": {"show_hidden": true}}"#).unwrap();
+        assert!(on.files.show_hidden);
+        let text = serde_json::to_string(&on).unwrap();
+        let back: SettingsFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, on);
+
+        let mut prefs = crate::settings::FilePrefs::default();
+        assert_eq!(prefs.choice_label(SettingId::ShowHidden), "Off");
+        prefs.set_choice(SettingId::ShowHidden, 0);
+        assert!(prefs.show_hidden);
+        prefs.reset(SettingId::ShowHidden);
+        assert!(!prefs.show_hidden);
     }
 
     #[test]
