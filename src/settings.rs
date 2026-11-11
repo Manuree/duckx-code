@@ -17,6 +17,10 @@ pub enum SettingId {
     IndentWithSpaces,
     /// Ending written when a file is saved. Auto keeps the ending the file already has.
     LineEnding,
+    /// Highlight the bracket at the cursor and its partner.
+    MatchBrackets,
+    /// Color brackets by nesting depth.
+    ColorizeBrackets,
     /// Interface colors. `Enter` opens the theme list.
     ColorTheme,
     /// Code colors. `Enter` opens the theme list.
@@ -1163,6 +1167,8 @@ impl AiPrefs {
             SettingId::TabWidth
                 | SettingId::IndentWithSpaces
                 | SettingId::LineEnding
+                | SettingId::MatchBrackets
+                | SettingId::ColorizeBrackets
                 | SettingId::ColorTheme
                 | SettingId::SyntaxTheme
                 | SettingId::TrimTrailingSpace
@@ -1468,6 +1474,12 @@ pub struct EditorPrefs {
     pub indent_with_spaces: bool,
     #[serde(default)]
     pub line_ending: LineEndingPref,
+    /// Highlight the bracket at the cursor and its partner. On by default.
+    #[serde(default = "enabled")]
+    pub match_brackets: bool,
+    /// Color `()[]{}` by nesting depth. On by default.
+    #[serde(default = "enabled")]
+    pub colorize_brackets: bool,
 }
 
 impl Default for EditorPrefs {
@@ -1476,6 +1488,8 @@ impl Default for EditorPrefs {
             tab_width: 4,
             indent_with_spaces: true,
             line_ending: LineEndingPref::Auto,
+            match_brackets: true,
+            colorize_brackets: true,
         }
     }
 }
@@ -1489,7 +1503,9 @@ impl EditorPrefs {
                 .iter()
                 .map(|width| width.to_string())
                 .collect(),
-            SettingId::IndentWithSpaces => vec!["On".into(), "Off".into()],
+            SettingId::IndentWithSpaces
+            | SettingId::MatchBrackets
+            | SettingId::ColorizeBrackets => vec!["On".into(), "Off".into()],
             SettingId::LineEnding => vec!["Auto".into(), "LF".into(), "CRLF".into()],
             _ => Vec::new(),
         }
@@ -1502,6 +1518,8 @@ impl EditorPrefs {
                 .position(|width| *width == self.tab_width)
                 .unwrap_or(1),
             SettingId::IndentWithSpaces => usize::from(!self.indent_with_spaces),
+            SettingId::MatchBrackets => usize::from(!self.match_brackets),
+            SettingId::ColorizeBrackets => usize::from(!self.colorize_brackets),
             SettingId::LineEnding => self.line_ending.index(),
             _ => 0,
         }
@@ -1511,6 +1529,8 @@ impl EditorPrefs {
         match id {
             SettingId::TabWidth => self.tab_width.to_string(),
             SettingId::IndentWithSpaces => on_off(self.indent_with_spaces),
+            SettingId::MatchBrackets => on_off(self.match_brackets),
+            SettingId::ColorizeBrackets => on_off(self.colorize_brackets),
             SettingId::LineEnding => self.line_ending.as_str().to_string(),
             _ => String::new(),
         }
@@ -1531,6 +1551,8 @@ impl EditorPrefs {
                 }
             }
             SettingId::IndentWithSpaces => self.indent_with_spaces = index == 0,
+            SettingId::MatchBrackets => self.match_brackets = index == 0,
+            SettingId::ColorizeBrackets => self.colorize_brackets = index == 0,
             SettingId::LineEnding => self.line_ending = LineEndingPref::from_index(index),
             _ => {}
         }
@@ -1546,6 +1568,8 @@ impl EditorPrefs {
                     .unwrap_or(4);
             }
             SettingId::IndentWithSpaces => self.indent_with_spaces = token != "off",
+            SettingId::MatchBrackets => self.match_brackets = token != "off",
+            SettingId::ColorizeBrackets => self.colorize_brackets = token != "off",
             SettingId::LineEnding => {
                 self.line_ending = match token {
                     "lf" => LineEndingPref::Lf,
@@ -1562,6 +1586,8 @@ impl EditorPrefs {
         match id {
             SettingId::TabWidth => self.tab_width = defaults.tab_width,
             SettingId::IndentWithSpaces => self.indent_with_spaces = defaults.indent_with_spaces,
+            SettingId::MatchBrackets => self.match_brackets = defaults.match_brackets,
+            SettingId::ColorizeBrackets => self.colorize_brackets = defaults.colorize_brackets,
             SettingId::LineEnding => self.line_ending = defaults.line_ending,
             _ => {}
         }
@@ -1917,6 +1943,16 @@ pub fn sections() -> &'static [Section] {
                             label: "Line endings",
                             detail: "Ending written when a file is saved.",
                             id: SettingId::LineEnding,
+                        },
+                        Item {
+                            label: "Match brackets",
+                            detail: "Highlight the bracket at the cursor and its pair.",
+                            id: SettingId::MatchBrackets,
+                        },
+                        Item {
+                            label: "Colorize bracket pairs",
+                            detail: "Color ( ) [ ] { } by how deep they are nested.",
+                            id: SettingId::ColorizeBrackets,
                         },
                     ],
                 ),

@@ -315,7 +315,11 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
     }
     let mark = if open { "▴" } else { "▾" };
     match id {
-        SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => {
+        SettingId::TabWidth
+        | SettingId::IndentWithSpaces
+        | SettingId::LineEnding
+        | SettingId::MatchBrackets
+        | SettingId::ColorizeBrackets => {
             format!("{} {mark}", app.editor_prefs.choice_label(id))
         }
         SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
@@ -547,9 +551,11 @@ fn paint_menu(
     let names = match id {
         SettingId::ColorTheme => app.appearance.color_names(),
         SettingId::SyntaxTheme => app.appearance.syntax_names(),
-        SettingId::TabWidth | SettingId::IndentWithSpaces | SettingId::LineEnding => {
-            crate::settings::EditorPrefs::choice_names(id)
-        }
+        SettingId::TabWidth
+        | SettingId::IndentWithSpaces
+        | SettingId::LineEnding
+        | SettingId::MatchBrackets
+        | SettingId::ColorizeBrackets => crate::settings::EditorPrefs::choice_names(id),
         SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
             crate::settings::FilePrefs::choice_names(id)
         }

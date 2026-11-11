@@ -122,6 +122,9 @@ pub struct EditorColors {
     pub gutter_active: Rgb,
     pub selection: Rgb,
     pub divider: Rgb,
+    /// Background of a matched bracket pair at the cursor. Missing uses [`Self::divider`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bracket_match: Option<Rgb>,
 }
 
 fn default_select_color() -> Rgb {
@@ -227,6 +230,13 @@ pub struct SyntaxTheme {
     /// Lifetimes. Missing uses [`Self::attribute`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<Rgb>,
+    /// Bracket pair colors by nesting depth, cycled. Missing or empty uses
+    /// [`Self::constant`], [`Self::keyword`], [`Self::function`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brackets: Option<Vec<Rgb>>,
+    /// An unmatched bracket. Missing uses [`Self::error`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bracket_error: Option<Rgb>,
 }
 
 /// Roles a highlighter can ask the syntax theme to color.
@@ -284,6 +294,24 @@ impl SyntaxTheme {
     }
 }
 
+impl SyntaxTheme {
+    /// Color for a bracket at nesting `depth` (0 is outermost); the palette repeats.
+    pub fn bracket_color(&self, depth: usize) -> Color {
+        match self.brackets.as_deref() {
+            Some(palette) if !palette.is_empty() => palette[depth % palette.len()].into(),
+            _ => {
+                let palette = [self.constant, self.keyword, self.function];
+                palette[depth % palette.len()].into()
+            }
+        }
+    }
+
+    /// Color for an unmatched bracket.
+    pub fn bracket_error_color(&self) -> Color {
+        self.bracket_error.unwrap_or(self.error).into()
+    }
+}
+
 /// Styles the widgets read. Built from the active [`ColorTheme`].
 #[derive(Clone, Copy, Debug)]
 pub struct UiStyles {
@@ -292,6 +320,8 @@ pub struct UiStyles {
     pub gutter: Style,
     pub gutter_active: Style,
     pub selection: Style,
+    /// The bracket at the cursor and its partner: a background and bold.
+    pub bracket_match: Style,
     pub status_a_bg: Color,
     pub status_b_bg: Color,
     pub status_c_bg: Color,
@@ -375,6 +405,9 @@ impl UiStyles {
             gutter: fg_bg(editor.gutter, editor.bg),
             gutter_active: bold(fg_bg(editor.gutter_active, editor.bg)),
             selection: Style::new().bg(editor.selection.into()),
+            bracket_match: bold(
+                Style::new().bg(editor.bracket_match.unwrap_or(editor.divider).into()),
+            ),
             status_a_bg: status.normal.into(),
             status_b_bg: status.b_bg.into(),
             status_c_bg: status.c_bg.into(),
@@ -817,6 +850,54 @@ mod tests {
             }
         }
         (path.clone(), Guard(path))
+    }
+
+    #[test]
+    fn every_builtin_theme_sets_the_bracket_colors() {
+        for theme in builtin_syntax() {
+            let palette = theme.brackets.as_deref().unwrap_or_default();
+            assert_eq!(palette.len(), 3, "{}", theme.id);
+            assert!(theme.bracket_error.is_some(), "{}", theme.id);
+            assert_ne!(
+                theme.bracket_color(0),
+                theme.bracket_color(1),
+                "{}",
+                theme.id
+            );
+        }
+        for theme in builtin_colors() {
+            let match_bg = theme.editor.bracket_match.expect("bracket_match");
+            assert_ne!(match_bg, theme.editor.selection, "{}", theme.id);
+            assert_ne!(match_bg, theme.editor.bg, "{}", theme.id);
+        }
+    }
+
+    #[test]
+    fn themes_without_bracket_keys_still_load_and_fall_back() {
+        let mut syntax: serde_json::Value = serde_json::from_str(SYNTAX_THEME_JSON[0]).unwrap();
+        let object = syntax.as_object_mut().unwrap();
+        object.remove("brackets");
+        object.remove("bracket_error");
+        let syntax: SyntaxTheme = serde_json::from_value(syntax).unwrap();
+        assert_eq!(syntax.bracket_color(0), Color::from(syntax.constant));
+        assert_eq!(syntax.bracket_color(1), Color::from(syntax.keyword));
+        assert_eq!(syntax.bracket_color(2), Color::from(syntax.function));
+        assert_eq!(syntax.bracket_error_color(), Color::from(syntax.error));
+        let empty = SyntaxTheme {
+            brackets: Some(Vec::new()),
+            ..syntax.clone()
+        };
+        assert_eq!(empty.bracket_color(4), syntax.bracket_color(4));
+
+        let mut color: serde_json::Value = serde_json::from_str(COLOR_THEME_JSON[0]).unwrap();
+        color["editor"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bracket_match");
+        let color: ColorTheme = serde_json::from_value(color).unwrap();
+        let styles = UiStyles::from_color(&color);
+        assert_eq!(styles.bracket_match.bg, Some(color.editor.divider.into()));
+        assert!(styles.bracket_match.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
