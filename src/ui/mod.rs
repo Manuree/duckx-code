@@ -1281,7 +1281,12 @@ mod tests {
         use crate::settings::SettingId;
         let mut app = ai_settings_app(SettingId::AiProvider);
         let screen = draw(&app, 110, 44);
-        assert!(screen.contains("(built-in) · named only"), "{screen}");
+        assert!(
+            !screen.contains("│ Provider name"),
+            "hidden for a built-in: {screen}"
+        );
+        assert!(!screen.contains("│ Delete provider"), "{screen}");
+        assert!(screen.contains("│ Add provider"), "{screen}");
         app.ai.add_named("Lab").unwrap();
         app.ai.named[0].models = vec!["qwen3:32b".into()];
         let screen = draw(&app, 110, 44);
@@ -1301,7 +1306,11 @@ mod tests {
         use crate::settings::SettingId;
         let mut app = ai_settings_app(SettingId::AiModelTools);
         let screen = draw(&app, 110, 40);
-        assert!(screen.contains("(set a model first)"), "{screen}");
+        assert!(
+            !screen.contains("│ Model tools"),
+            "hidden until a model is set: {screen}"
+        );
+        assert!(!screen.contains("│ Detected limits"), "{screen}");
         app.ai.model = "gemma3".into();
         app.ai.set_choice(SettingId::AiModelTools, 2);
         let key = crate::agent::capability_key_for(&app.ai.endpoint(), "gemma3", true);
@@ -1326,7 +1335,8 @@ mod tests {
         use crate::settings::{ModelLimits, SettingId};
         let mut app = ai_settings_app(SettingId::AiModelContext);
         let screen = draw(&app, 110, 40);
-        assert!(screen.contains("(set a model first)"), "{screen}");
+        assert!(!screen.contains("│ Model context"), "{screen}");
+        assert!(!screen.contains("│ Model max output"), "{screen}");
         app.ai.model = "qwen3:8b".into();
         let screen = draw(&app, 110, 40);
         assert!(screen.contains("16384 (Context size)"), "{screen}");
@@ -1352,17 +1362,30 @@ mod tests {
     }
 
     #[test]
-    fn rows_for_another_provider_are_greyed_and_say_which() {
+    fn rows_for_another_provider_are_hidden_not_greyed() {
         use crate::settings::{AiProvider, SettingId};
         let mut app = ai_settings_app(SettingId::AiProvider);
         let screen = draw(&app, 110, 40);
-        assert!(!screen.contains("· Ollama only"), "{screen}");
-        assert!(screen.contains("duckx-code · OpenRouter only"), "{screen}");
+        assert!(screen.contains("│ Thinking"), "Ollama: {screen}");
+        assert!(!screen.contains("OpenRouter app name"), "{screen}");
+        for tag in [
+            "· Ollama only",
+            "· OpenRouter only",
+            "· named only",
+            "set a model first",
+        ] {
+            assert!(!screen.contains(tag), "nothing is greyed: {screen}");
+        }
         app.ai.switch_provider(AiProvider::OpenRouter);
         let screen = draw(&app, 110, 40);
-        assert!(!screen.contains("16384 · Ollama only"), "{screen}");
-        assert!(screen.contains("On · Ollama only"), "{screen}");
-        assert!(!screen.contains("· OpenRouter only"), "{screen}");
+        assert!(!screen.contains("│ Thinking"), "{screen}");
+        assert!(screen.contains("│ OpenRouter app name"), "{screen}");
+        assert!(screen.contains("│ OpenRouter referer"), "{screen}");
+        assert!(
+            screen.contains("│ Context size"),
+            "every provider: {screen}"
+        );
+        assert!(!screen.contains("· Ollama only"), "{screen}");
         assert!(screen.contains("OpenRouter ▾"), "{screen}");
         assert!(
             screen.contains("https://openrouter.ai/api/v1 (default)"),

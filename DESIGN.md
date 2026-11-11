@@ -298,3 +298,10 @@ These are **mandatory** rules for every UI element. A change that breaks one of 
 * **Scrolling:** while a panel is open, a window it covers counts only the rows above the panel, so the cursor line scrolls into view above it. Closing the panel gives the rows back without jumping.
 * **PANE mode:** for `Ctrl + W` arrows the assistant panel still counts as a strip under the windows, so `Up` from it reaches the window it covers.
 
+### R5. Settings rows that don't apply are hidden, not greyed
+* **Rule:** a settings row that cannot do anything with the current choices is left out of the page, not drawn greyed with a reason. It comes back as soon as the choice it waits for is made, so every row stays reachable. Values are never changed by hiding; a hidden row keeps its saved value.
+* **AI:** Assistant Off leaves only the Assistant row. Thinking shows for Ollama only; OpenRouter app name and OpenRouter referer for OpenRouter only. Model context, Model max output, Model tools, and Detected limits wait for a Model. Keep tokens and Compact buffer show only while Auto compact is On. Provider name, Provider kind, API key variable, Saved models, and Delete provider show only while a named provider is selected; Add provider is always there. Context size stays for every provider (it is the auto compact budget and the `ctx` limit).
+* **Language:** Check on save, Format on save, and Python checking show only while Language server is On.
+* **Navigation:** `Page::row` stays an index into the section's items, so code that reads the highlighted item is unchanged. `Up` / `Down` / `Home` / `End` / `Enter` step over hidden rows (`Page::shown_rows`). After any action, a highlight whose row was just hidden moves to the nearest shown row above it (`Page::settle`). `Del` on a section name still restores every row in it, hidden ones included.
+* **Implementation:** `App::setting_visible` = `AiPrefs::visible` and `LspPrefs::visible`. A new conditional row needs a case there and a test, never a greyed label.
+
