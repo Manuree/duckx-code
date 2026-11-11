@@ -197,7 +197,6 @@ fn render_sections(
             footer_row,
             &theme,
             None,
-            false,
         );
     }
 }
@@ -215,17 +214,21 @@ fn render_items(
     footer_row: u16,
 ) -> Option<u16> {
     let section = page.section();
-    let item_height = if slots >= section.items.len().saturating_mul(2) {
+    // Rows that do not apply are left out, not greyed (R5).
+    let shown = page.shown_rows(|id| app.setting_visible(id));
+    let item_height = if slots >= shown.len().saturating_mul(2) {
         2
     } else {
         1
     };
     let visible = (slots / item_height).max(1);
-    let start = window_start(page.row, section.items.len(), visible);
+    let at = shown.iter().position(|row| *row == page.row).unwrap_or(0);
+    let start = window_start(at, shown.len(), visible);
     let theme = *app.styles();
     let mut anchor = None;
-    for (offset, item) in section.items.iter().enumerate().skip(start) {
-        let row = y + ((offset - start) * item_height) as u16;
+    for (place, &offset) in shown.iter().enumerate().skip(start) {
+        let item = &section.items[offset];
+        let row = y + ((place - start) * item_height) as u16;
         if row >= footer_row {
             break;
         }
@@ -235,7 +238,6 @@ fn render_items(
             .text
             .as_ref()
             .filter(|_| page.inside && offset == page.row);
-        let dim = !app.ai.applies(item.id);
         let syntax = (item.id == SettingId::SyntaxTheme).then(|| app.appearance.syntax.clone());
         let label = format!(" {}", item.label);
         let (value, draft_column) = match draft {
@@ -244,15 +246,7 @@ fn render_items(
                     draft_window(draft, item.id == SettingId::AiApiKey, &label, width);
                 (value, Some(column))
             }
-            None => {
-                let value = choice_label(app, item.id, open, capturing);
-                let value = if dim {
-                    format!("{} · {}", value.trim_end_matches(" ▾"), only_for(item.id))
-                } else {
-                    value
-                };
-                (value, None)
-            }
+            None => (choice_label(app, item.id, open, capturing), None),
         };
         paint_row(
             frame,
@@ -269,7 +263,6 @@ fn render_items(
             footer_row,
             &theme,
             syntax.as_ref(),
-            dim,
         );
         if let Some(column) = draft_column {
             place_draft_cursor(inner, x, row, column, width);
@@ -279,19 +272,6 @@ fn render_items(
         }
     }
     anchor
-}
-
-/// Which provider a greyed row waits for.
-fn only_for(id: SettingId) -> &'static str {
-    match id {
-        SettingId::AiAppName | SettingId::AiReferer => "OpenRouter only",
-        SettingId::AiProviderName
-        | SettingId::AiProviderKind
-        | SettingId::AiProviderKeyEnv
-        | SettingId::AiProviderModels
-        | SettingId::AiProviderDelete => "named only",
-        _ => "Ollama only",
-    }
 }
 
 /// The part of a draft that fits beside the label, with the cursor kept on screen,
@@ -637,16 +617,13 @@ fn paint_row(
     footer_row: u16,
     theme: &UiStyles,
     syntax: Option<&SyntaxTheme>,
-    dim: bool,
 ) {
     let bg = if selected {
         theme.sidebar_selected
     } else {
         canvas
     };
-    let label_style = if dim {
-        theme.sidebar_dim.bg(bg)
-    } else if selected {
+    let label_style = if selected {
         theme.title_active.bg(bg)
     } else {
         theme.sidebar.bg(bg)

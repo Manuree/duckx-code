@@ -191,6 +191,19 @@ pub struct LspPrefs {
     pub python: PythonCheck,
 }
 
+impl LspPrefs {
+    /// Check on save, Format on save, and Python checking are shown only while
+    /// the language server is On. Other rows are always shown.
+    pub fn visible(&self, id: SettingId) -> bool {
+        match id {
+            SettingId::CheckOnSave | SettingId::FormatOnSave | SettingId::PythonChecking => {
+                self.enabled
+            }
+            _ => true,
+        }
+    }
+}
+
 fn enabled() -> bool {
     true
 }
@@ -1122,7 +1135,49 @@ impl AiPrefs {
         headers
     }
 
-    /// Context size and Thinking only reach Ollama's native API.
+    /// Whether an AI row is shown on the settings page. A row that does not apply
+    /// is hidden, not greyed (DESIGN.md R5): rows for another provider, rows for a
+    /// named provider while a built-in one is selected, rows for the current model
+    /// before a model is set, and the auto compact numbers while it is Off. With the
+    /// assistant Off only the Assistant row is left. Rows of other sections are shown.
+    pub fn visible(&self, id: SettingId) -> bool {
+        if !Self::is_ai_row(id) {
+            return true;
+        }
+        if id != SettingId::AiEnabled && !self.enabled {
+            return false;
+        }
+        match id {
+            SettingId::AiModelContext
+            | SettingId::AiModelMaxOutput
+            | SettingId::AiModelTools
+            | SettingId::AiDetected => self.model_key().is_some(),
+            SettingId::AiCompactKeep | SettingId::AiCompactBuffer => self.auto_compact,
+            _ => self.applies(id),
+        }
+    }
+
+    fn is_ai_row(id: SettingId) -> bool {
+        !matches!(
+            id,
+            SettingId::TabWidth
+                | SettingId::IndentWithSpaces
+                | SettingId::LineEnding
+                | SettingId::ColorTheme
+                | SettingId::SyntaxTheme
+                | SettingId::TrimTrailingSpace
+                | SettingId::FinalNewline
+                | SettingId::ShowHidden
+                | SettingId::Binding(_)
+                | SettingId::LanguageServer
+                | SettingId::CheckOnSave
+                | SettingId::FormatOnSave
+                | SettingId::PythonChecking
+        )
+    }
+
+    /// Thinking only reaches Ollama's native API; the OpenRouter headers only go
+    /// to OpenRouter; the named-provider rows need a named provider.
     pub fn applies(&self, id: SettingId) -> bool {
         match id {
             SettingId::AiThink => self.provider == AiProvider::Ollama,
@@ -2004,7 +2059,7 @@ pub fn sections() -> &'static [Section] {
                         },
                         Item {
                             label: "Thinking",
-                            detail: "Ollama only: ask for think: true when the model supports it.",
+                            detail: "Ask Ollama for think: true when the model supports it.",
                             id: SettingId::AiThink,
                         },
                         Item {
@@ -2029,12 +2084,12 @@ pub fn sections() -> &'static [Section] {
                         },
                         Item {
                             label: "OpenRouter app name",
-                            detail: "OpenRouter only: sent as X-Title so the app shows on openrouter.ai.",
+                            detail: "Sent as X-Title so the app shows on openrouter.ai.",
                             id: SettingId::AiAppName,
                         },
                         Item {
                             label: "OpenRouter referer",
-                            detail: "OpenRouter only: sent as HTTP-Referer. Empty sends none.",
+                            detail: "Sent as HTTP-Referer. Empty sends none.",
                             id: SettingId::AiReferer,
                         },
                         Item {
@@ -2096,35 +2151,73 @@ impl Page {
         &sections[self.section.min(sections.len().saturating_sub(1))]
     }
 
-    fn len(&self) -> usize {
-        if self.inside {
-            self.section().items.len()
-        } else {
-            sections().len()
-        }
+    /// Item indexes of the open section that are shown, in order. `page.row` is
+    /// always an index into `section().items`, so code that reads the highlighted
+    /// item keeps working; only these rows are drawn and reachable.
+    pub fn shown_rows(&self, visible: impl Fn(SettingId) -> bool) -> Vec<usize> {
+        self.section()
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| visible(item.id))
+            .map(|(index, _)| index)
+            .collect()
     }
 
-    /// Moves the highlight in the menu that is open. The highlight wraps.
-    pub fn move_cursor(&mut self, delta: isize) {
-        let len = self.len();
-        if len == 0 {
+    /// Moves the highlight in the menu that is open. The highlight wraps and
+    /// skips hidden rows.
+    pub fn move_cursor(&mut self, delta: isize, visible: impl Fn(SettingId) -> bool) {
+        if !self.inside {
+            let len = sections().len();
+            if len > 0 {
+                self.section = (self.section as isize + delta).rem_euclid(len as isize) as usize;
+            }
             return;
         }
-        let cursor = if self.inside { self.row } else { self.section } as isize;
-        let next = (cursor + delta).rem_euclid(len as isize) as usize;
-        if self.inside {
-            self.row = next;
-        } else {
-            self.section = next;
+        let shown = self.shown_rows(visible);
+        if shown.is_empty() {
+            return;
         }
+        let at = shown.iter().position(|row| *row == self.row);
+        let next = match at {
+            Some(at) => (at as isize + delta).rem_euclid(shown.len() as isize) as usize,
+            // The highlighted row was hidden: step to the nearest one on that side.
+            None if delta >= 0 => shown.iter().position(|row| *row > self.row).unwrap_or(0),
+            None => shown
+                .iter()
+                .rposition(|row| *row < self.row)
+                .unwrap_or(shown.len() - 1),
+        };
+        self.row = shown[next];
     }
 
-    pub fn enter(&mut self) {
+    pub fn enter(&mut self, visible: impl Fn(SettingId) -> bool) {
         if self.inside || sections().is_empty() {
             return;
         }
         self.inside = true;
-        self.row = 0;
+        self.row = self.shown_rows(visible).first().copied().unwrap_or(0);
+    }
+
+    /// When the highlighted row was just hidden (the provider changed, the model
+    /// was cleared, a named provider was deleted), move to the nearest shown row
+    /// above it, else below it.
+    pub fn settle(&mut self, visible: impl Fn(SettingId) -> bool) {
+        if !self.inside {
+            return;
+        }
+        let shown = self.shown_rows(visible);
+        if shown.contains(&self.row) {
+            return;
+        }
+        if let Some(row) = shown
+            .iter()
+            .rev()
+            .find(|row| **row < self.row)
+            .or_else(|| shown.first())
+        {
+            self.row = *row;
+        }
     }
 
     /// Leaves the open section. Returns `true` when the page itself should close.
@@ -2137,20 +2230,19 @@ impl Page {
         }
     }
 
-    pub fn first(&mut self) {
+    pub fn first(&mut self, visible: impl Fn(SettingId) -> bool) {
         if self.inside {
-            self.row = 0;
+            self.row = self.shown_rows(visible).first().copied().unwrap_or(0);
         } else {
             self.section = 0;
         }
     }
 
-    pub fn last(&mut self) {
-        let last = self.len().saturating_sub(1);
+    pub fn last(&mut self, visible: impl Fn(SettingId) -> bool) {
         if self.inside {
-            self.row = last;
+            self.row = self.shown_rows(visible).last().copied().unwrap_or(0);
         } else {
-            self.section = last;
+            self.section = sections().len().saturating_sub(1);
         }
     }
 }
@@ -2162,17 +2254,199 @@ mod tests {
     #[test]
     fn menus_open_one_at_a_time_and_back_returns_to_the_list() {
         let mut page = Page::new();
-        page.enter();
+        page.enter(|_| true);
         assert!(page.inside);
         assert_eq!(page.row, 0);
-        page.move_cursor(1);
+        page.move_cursor(1, |_| true);
         assert_eq!(page.row, 1);
         assert!(!page.back());
         assert!(!page.inside);
         assert_eq!(page.section, 0);
-        page.move_cursor(-1);
+        page.move_cursor(-1, |_| true);
         assert_eq!(page.section, sections().len() - 1);
         assert!(page.back());
+    }
+
+    fn ai_rows(ai: &AiPrefs) -> Vec<&'static str> {
+        sections()
+            .iter()
+            .find(|section| section.name == "AI")
+            .unwrap()
+            .items
+            .iter()
+            .filter(|item| ai.visible(item.id))
+            .map(|item| item.label)
+            .collect()
+    }
+
+    #[test]
+    fn provider_rows_show_only_for_their_provider() {
+        let mut ai = AiPrefs::default();
+        for (provider, thinking, openrouter) in [
+            (AiProvider::Ollama, true, false),
+            (AiProvider::LmStudio, false, false),
+            (AiProvider::OpenaiCompatible, false, false),
+            (AiProvider::OpenRouter, false, true),
+        ] {
+            ai.switch_provider(provider);
+            let rows = ai_rows(&ai);
+            assert_eq!(
+                rows.contains(&"Thinking"),
+                thinking,
+                "{provider:?}: {rows:?}"
+            );
+            assert_eq!(
+                rows.contains(&"OpenRouter app name") && rows.contains(&"OpenRouter referer"),
+                openrouter,
+                "{provider:?}: {rows:?}"
+            );
+            for always in [
+                "Assistant",
+                "Provider",
+                "Server",
+                "Model",
+                "API key",
+                "Max tokens",
+                "Context size",
+                "Auto compact",
+                "Add provider",
+                "Clear recent history",
+            ] {
+                assert!(rows.contains(&always), "{provider:?} {always}: {rows:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn model_rows_wait_for_a_model() {
+        let mut ai = AiPrefs::default();
+        ai.switch_provider(AiProvider::OpenaiCompatible);
+        ai.model = "  ".into();
+        let model_rows = [
+            "Model context",
+            "Model max output",
+            "Model tools",
+            "Detected limits",
+        ];
+        let rows = ai_rows(&ai);
+        for row in model_rows {
+            assert!(!rows.contains(&row), "{row} without a model: {rows:?}");
+        }
+        ai.model = "gpt-4.1-mini".into();
+        let rows = ai_rows(&ai);
+        for row in model_rows {
+            assert!(rows.contains(&row), "{row} with a model: {rows:?}");
+        }
+    }
+
+    #[test]
+    fn compact_numbers_show_only_while_auto_compact_is_on() {
+        let mut ai = AiPrefs::default();
+        assert!(ai.auto_compact);
+        let rows = ai_rows(&ai);
+        assert!(rows.contains(&"Keep tokens") && rows.contains(&"Compact buffer"));
+        ai.auto_compact = false;
+        let rows = ai_rows(&ai);
+        assert!(rows.contains(&"Auto compact"));
+        assert!(!rows.contains(&"Keep tokens") && !rows.contains(&"Compact buffer"));
+    }
+
+    #[test]
+    fn named_provider_rows_show_only_for_a_named_provider() {
+        let named = [
+            "Provider name",
+            "Provider kind",
+            "API key variable",
+            "Saved models",
+            "Delete provider",
+        ];
+        let mut ai = AiPrefs::default();
+        let rows = ai_rows(&ai);
+        assert!(rows.contains(&"Add provider"));
+        for row in named {
+            assert!(!rows.contains(&row), "{row} for a built-in: {rows:?}");
+        }
+        ai.add_named("Lab").unwrap();
+        let rows = ai_rows(&ai);
+        for row in named {
+            assert!(rows.contains(&row), "{row} for Lab: {rows:?}");
+        }
+        assert!(rows.contains(&"Add provider"));
+    }
+
+    #[test]
+    fn assistant_off_leaves_only_its_own_row() {
+        let mut ai = AiPrefs {
+            enabled: false,
+            ..AiPrefs::default()
+        };
+        assert_eq!(ai_rows(&ai), ["Assistant"]);
+        assert!(
+            ai.visible(SettingId::TabWidth),
+            "other sections are untouched"
+        );
+        ai.enabled = true;
+        assert!(ai_rows(&ai).len() > 10);
+    }
+
+    #[test]
+    fn language_rows_follow_the_language_server() {
+        let mut lsp = LspPrefs::default();
+        assert!(lsp.visible(SettingId::FormatOnSave));
+        lsp.enabled = false;
+        assert!(lsp.visible(SettingId::LanguageServer));
+        for id in [
+            SettingId::CheckOnSave,
+            SettingId::FormatOnSave,
+            SettingId::PythonChecking,
+        ] {
+            assert!(!lsp.visible(id), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn navigation_skips_hidden_rows_and_settles_on_a_neighbour() {
+        let mut ai = AiPrefs::default();
+        ai.switch_provider(AiProvider::OpenaiCompatible);
+        let ai_section = sections().iter().position(|s| s.name == "AI").unwrap();
+        let index = |id: SettingId| {
+            sections()[ai_section]
+                .items
+                .iter()
+                .position(|item| item.id == id)
+                .unwrap()
+        };
+        let mut page = Page::new();
+        page.section = ai_section;
+        page.enter(|id| ai.visible(id));
+        assert_eq!(page.row, index(SettingId::AiEnabled));
+        page.row = index(SettingId::AiApiKey);
+        page.move_cursor(1, |id| ai.visible(id));
+        assert_eq!(
+            page.row,
+            index(SettingId::AiMaxTokens),
+            "model rows skipped"
+        );
+        page.move_cursor(-1, |id| ai.visible(id));
+        assert_eq!(page.row, index(SettingId::AiApiKey));
+        page.last(|id| ai.visible(id));
+        assert_eq!(page.row, index(SettingId::AiClearRecent));
+        page.move_cursor(-1, |id| ai.visible(id));
+        assert_eq!(
+            page.row,
+            index(SettingId::AiProviderAdd),
+            "named rows skipped"
+        );
+
+        ai.model = "gpt-4.1-mini".into();
+        page.row = index(SettingId::AiModelTools);
+        ai.model.clear();
+        page.settle(|id| ai.visible(id));
+        assert_eq!(
+            page.row,
+            index(SettingId::AiApiKey),
+            "the nearest shown row above"
+        );
     }
 
     #[test]

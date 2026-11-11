@@ -2400,6 +2400,7 @@ impl App {
         self.handle_inner(action);
         self.prune_previews();
         self.sync_show_hidden();
+        self.settle_settings_row();
     }
 
     /// Show hidden files changed (Settings, `hidden`, or a reloaded settings file):
@@ -2752,29 +2753,30 @@ impl App {
             self.open_choice_menu(id);
             return;
         }
-        let Some(page) = self.settings.as_mut() else {
+        let Some(mut page) = self.settings.take() else {
             return;
         };
+        let visible = |id| self.setting_visible(id);
         let close = match action {
             SettingsAction::Up => {
-                page.move_cursor(-1);
+                page.move_cursor(-1, visible);
                 false
             }
             SettingsAction::Down => {
-                page.move_cursor(1);
+                page.move_cursor(1, visible);
                 false
             }
             SettingsAction::Enter => {
-                page.enter();
+                page.enter(visible);
                 false
             }
             SettingsAction::Back => page.back(),
             SettingsAction::First => {
-                page.first();
+                page.first(visible);
                 false
             }
             SettingsAction::Last => {
-                page.last();
+                page.last(visible);
                 false
             }
             SettingsAction::Reset | SettingsAction::Assign(_) => false,
@@ -2784,8 +2786,21 @@ impl App {
             | SettingsAction::DeleteWordBack
             | SettingsAction::Cursor(_) => false,
         };
-        if close {
-            self.settings = None;
+        if !close {
+            self.settings = Some(page);
+        }
+    }
+
+    /// Whether a settings row is shown. Rows that do not apply are hidden (R5).
+    pub fn setting_visible(&self, id: crate::settings::SettingId) -> bool {
+        self.ai.visible(id) && self.appearance.lsp.visible(id)
+    }
+
+    /// Keeps the settings highlight on a shown row after a change hid it.
+    fn settle_settings_row(&mut self) {
+        if let Some(mut page) = self.settings.take() {
+            page.settle(|id| self.setting_visible(id));
+            self.settings = Some(page);
         }
     }
 
@@ -9309,6 +9324,53 @@ mod tests {
         assert!(prefs.show_hidden);
         prefs.reset(SettingId::ShowHidden);
         assert!(!prefs.show_hidden);
+    }
+
+    #[test]
+    fn hidden_settings_rows_are_skipped_and_a_vanished_row_settles() {
+        use crate::settings::{Page, SettingId, sections};
+        let mut app = App::new(Buffer::new(), None);
+        app.ai.add_named("Lab").unwrap();
+        let ai = sections().iter().position(|s| s.name == "AI").unwrap();
+        let index = |id: SettingId| {
+            sections()[ai]
+                .items
+                .iter()
+                .position(|item| item.id == id)
+                .unwrap()
+        };
+        let mut page = Page::new();
+        page.section = ai;
+        page.inside = true;
+        page.row = index(SettingId::AiProviderDelete);
+        app.settings = Some(page);
+        app.handle(SemanticAction::Settings(SettingsAction::Enter));
+        app.handle(SemanticAction::Settings(SettingsAction::Enter));
+        assert!(app.ai.active_named().is_none(), "{:?}", app.message);
+        assert_eq!(
+            app.settings.as_ref().unwrap().row,
+            index(SettingId::AiProviderAdd),
+            "Delete provider is gone; the highlight moves to the row above"
+        );
+        app.handle(SemanticAction::Settings(SettingsAction::Down));
+        assert_eq!(
+            app.settings.as_ref().unwrap().row,
+            index(SettingId::AiClearRecent),
+            "Down skips the named rows"
+        );
+
+        // Turning the assistant off leaves one row; the highlight lands on it.
+        app.ai.enabled = false;
+        app.handle(SemanticAction::Settings(SettingsAction::Up));
+        assert_eq!(
+            app.settings.as_ref().unwrap().row,
+            index(SettingId::AiEnabled)
+        );
+        app.handle(SemanticAction::Settings(SettingsAction::Down));
+        assert_eq!(
+            app.settings.as_ref().unwrap().row,
+            index(SettingId::AiEnabled)
+        );
     }
 
     #[test]
