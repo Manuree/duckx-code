@@ -10,20 +10,32 @@ Keybindings and Command Bar commands are listed in [DOCUMENTS.md](DOCUMENTS.md).
 
 ## Install
 
-Download a build from [Releases](https://github.com/Manuree/duckx-code/releases):
+There are no prebuilt downloads yet; they will come with the first GitHub Release. Until then, install with Cargo. duckx-code is not on crates.io, so Cargo builds it from this repository:
 
-| System | Archive |
-| :--- | :--- |
-| Windows (x86_64) | `duckx-code-windows-x86_64.zip` |
-| Linux (x86_64) | `duckx-code-linux-x86_64.tar.gz` |
-| macOS (Apple silicon) | `duckx-code-macos-aarch64.tar.gz` |
+```sh
+cargo install --git https://github.com/Manuree/duckx-code --locked
+```
 
-On Windows, unzip and run `duckx-code.exe`. On Linux and macOS, extract the archive and run `duckx-code`. A terminal that can draw a full-screen TUI is required. The status bar uses [Nerd Font](https://www.nerdfonts.com/) icons.
+This builds one program, `duckx-code`, into Cargo's bin folder (`~/.cargo/bin`, or `%USERPROFILE%\.cargo\bin` on Windows), which rustup puts on `PATH`. `--locked` uses the dependency versions in `Cargo.lock`.
 
-From source, with Rust 1.85 or newer (edition 2024):
+From a clone instead:
 
-```powershell
-cargo install --git https://github.com/Manuree/duckx-code
+```sh
+git clone https://github.com/Manuree/duckx-code
+cd duckx-code
+cargo install --path . --locked
+```
+
+Requirements:
+
+* **Rust 1.91 or newer**, installed with [rustup](https://rustup.rs/). Edition 2024 needs 1.85, the locked `tree-sitter` 0.27 needs 1.90, and duckx-code itself uses `str::floor_char_boundary`, stable since 1.91. `rustup update` brings an older toolchain up to date.
+* **A C compiler.** The tree-sitter grammars and `ring` (TLS for the assistant) compile C code. On Windows, install the [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with **Desktop development with C++** (rustup asks for these too). On macOS, run `xcode-select --install`. On Linux, install `gcc` or `clang` (for example `sudo apt install build-essential`).
+* A terminal that can draw a full-screen TUI. The status bar uses [Nerd Font](https://www.nerdfonts.com/) icons.
+
+To update, run the same `cargo install` command again with `--force`. To remove it:
+
+```sh
+cargo uninstall duckx-code
 ```
 
 ## Usage
