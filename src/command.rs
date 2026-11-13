@@ -43,6 +43,8 @@ pub enum CommandId {
     BracketMatch,
     /// Turn bracket pair colors on or off (Settings → Editor → Colorize bracket pairs).
     BracketColors,
+    /// Restart the language server of the focused file, looking for it on `PATH` again.
+    LspRestart,
     /// Show only the focused buffer, without the title or status bar.
     Focus,
     /// Open a read-only Markdown preview beside the focused file.
@@ -246,6 +248,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         id: CommandId::BracketColors,
         name: "bracket-colors",
         description: "Color brackets by nesting depth, or stop",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::LspRestart,
+        name: "lsp-restart",
+        description: "Restart this file's language server and look for it on PATH again",
         shortcut: "",
         arg: None,
         editor: true,
@@ -788,6 +799,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::ShowHidden => 266,
         CommandId::BracketMatch => 267,
         CommandId::BracketColors => 268,
+        CommandId::LspRestart => 269,
         CommandId::Focus => 258,
         CommandId::Preview => 257,
         CommandId::Reveal => 259,
@@ -1255,6 +1267,7 @@ mod tests {
                 "hidden",
                 "bracket-match",
                 "bracket-colors",
+                "lsp-restart",
                 "select-all",
                 "deselect",
                 "indent",

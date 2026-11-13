@@ -30,6 +30,8 @@ use ropey::Rope;
 mod agent;
 mod convert;
 mod lsp_nav;
+mod lsp_servers;
+pub use lsp_servers::{Dot, Found, ServerView};
 mod lsp_sync;
 mod notice;
 mod preview;
@@ -740,9 +742,20 @@ pub struct App {
     /// Semantic tokens, byte ranges, painted over the tree-sitter colors.
     pub(crate) semantic: crate::lsp::semantic::SemanticTokens,
     /// Latest state per server group, with the program name that reported it.
-    lsp_servers: HashMap<&'static str, (&'static str, crate::lsp::ServerStatus)>,
+    lsp_servers: HashMap<String, (String, crate::lsp::ServerStatus)>,
     /// The worker has not yet been told the language-server settings.
     lsp_prefs_dirty: bool,
+    /// Which server each file goes to, built from the language-server settings.
+    lsp_registry: crate::lsp::registry::Registry,
+    /// Where each server command was found on `PATH`; `None` when it was not.
+    /// A command missing from the map is still being looked for.
+    lsp_found: HashMap<String, Option<PathBuf>>,
+    /// Commands a background search is running for.
+    lsp_finding: std::collections::HashSet<String>,
+    /// Custom server whose fields are shown in Settings → Language servers.
+    lsp_editing: Option<String>,
+    /// `Delete` was pressed once on this custom server; the next `Delete` removes it.
+    server_delete_armed: Option<String>,
     /// `diff` is showing gutter marks for every open file.
     show_diff: bool,
     /// `focus` fills the screen with the active buffer and hides the other chrome.
@@ -858,6 +871,11 @@ impl App {
             semantic: Default::default(),
             lsp_servers: HashMap::new(),
             lsp_prefs_dirty: false,
+            lsp_registry: crate::lsp::registry::Registry::new(&crate::settings::LspPrefs::default()),
+            lsp_found: HashMap::new(),
+            lsp_finding: std::collections::HashSet::new(),
+            lsp_editing: None,
+            server_delete_armed: None,
             show_diff: false,
             focus_mode: false,
             diff_generation: 1,
@@ -1383,6 +1401,7 @@ impl App {
                     self.queue_tree_scan(true);
                 }
             }
+            AppEvent::ProgramsFound(found) => self.programs_found(found),
             AppEvent::GitStatus { root, statuses } if self.same_root(&root) => {
                 self.explorer.git = statuses;
             }
@@ -2815,6 +2834,10 @@ impl App {
     }
 
     fn handle_settings(&mut self, action: SettingsAction) {
+        if !matches!(action, SettingsAction::Reset) {
+            // A second `Delete` must follow the first straight away.
+            self.server_delete_armed = None;
+        }
         if matches!(action, SettingsAction::Reset) {
             self.reset_highlighted();
             return;
@@ -2847,11 +2870,23 @@ impl App {
             self.handle_choice_menu(action);
             return;
         }
-        let opens_menu = self.settings.as_ref().and_then(|page| {
-            (page.inside && matches!(action, SettingsAction::Enter))
+        let highlighted = self.settings.as_ref().and_then(|page| {
+            page.inside
                 .then(|| page.section().items.get(page.row).map(|item| item.id))
                 .flatten()
         });
+        if let Some(crate::settings::SettingId::LspServer(row)) = highlighted {
+            match action {
+                SettingsAction::Enter => return self.toggle_server_row(row),
+                SettingsAction::Restart => return self.restart_server_row(row),
+                SettingsAction::Edit => return self.edit_server_row(row),
+                _ => {}
+            }
+        }
+        if matches!(action, SettingsAction::Restart | SettingsAction::Edit) {
+            return;
+        }
+        let opens_menu = highlighted.filter(|_| matches!(action, SettingsAction::Enter));
         if let Some(crate::settings::SettingId::Binding(_)) = opens_menu {
             if let Some(page) = self.settings.as_mut() {
                 page.capture = true;
@@ -2892,7 +2927,7 @@ impl App {
             }
             return;
         }
-        if let Some(id) = opens_menu.filter(|id| crate::settings::AiPrefs::is_text(*id)) {
+        if let Some(id) = opens_menu.filter(|id| crate::settings::is_text_row(*id)) {
             self.begin_text_setting(id);
             return;
         }
@@ -2926,7 +2961,10 @@ impl App {
                 page.last(visible);
                 false
             }
-            SettingsAction::Reset | SettingsAction::Assign(_) => false,
+            SettingsAction::Reset
+            | SettingsAction::Assign(_)
+            | SettingsAction::Restart
+            | SettingsAction::Edit => false,
             SettingsAction::Insert(_)
             | SettingsAction::DeleteChar
             | SettingsAction::DeleteForward
@@ -2940,7 +2978,7 @@ impl App {
 
     /// Whether a settings row is shown. Rows that do not apply are hidden (R5).
     pub fn setting_visible(&self, id: crate::settings::SettingId) -> bool {
-        self.ai.visible(id) && self.appearance.lsp.visible(id)
+        self.ai.visible(id) && self.appearance.lsp.visible(id) && self.server_field_visible(id)
     }
 
     /// Keeps the settings highlight on a shown row after a change hid it.
@@ -3006,7 +3044,10 @@ impl App {
                     page.menu = None;
                 }
             }
-            SettingsAction::Reset | SettingsAction::Assign(_) => {}
+            SettingsAction::Reset
+            | SettingsAction::Assign(_)
+            | SettingsAction::Restart
+            | SettingsAction::Edit => {}
             SettingsAction::Insert(_)
             | SettingsAction::DeleteChar
             | SettingsAction::DeleteForward
@@ -3248,6 +3289,27 @@ impl App {
             SettingId::AiCompactKeep => self.ai.resolved_compact_keep().to_string(),
             SettingId::AiCompactBuffer => self.ai.resolved_compact_buffer().to_string(),
             SettingId::AiProviderAdd => String::new(),
+            SettingId::LspAddServer
+            | SettingId::LspCustomName
+            | SettingId::LspCustomCommand
+            | SettingId::LspCustomArgs
+            | SettingId::LspCustomExtensions
+            | SettingId::LspCustomLanguageId
+            | SettingId::LspCustomRootMarkers => {
+                if id == SettingId::LspAddServer
+                    && self.appearance.lsp.custom.len() >= crate::settings::MAX_CUSTOM_SERVERS
+                {
+                    self.message = Some(format!(
+                        "At most {} custom servers",
+                        crate::settings::MAX_CUSTOM_SERVERS
+                    ));
+                    return;
+                }
+                let Some(value) = self.server_field_text(id) else {
+                    return;
+                };
+                value
+            }
             SettingId::AiProviderName
             | SettingId::AiProviderKeyEnv
             | SettingId::AiProviderModels => {
@@ -3329,6 +3391,20 @@ impl App {
             let changed = *slot != next;
             *slot = next;
             changed
+        }
+        if matches!(
+            id,
+            SettingId::LspAddServer
+                | SettingId::LspCustomName
+                | SettingId::LspCustomCommand
+                | SettingId::LspCustomArgs
+                | SettingId::LspCustomExtensions
+                | SettingId::LspCustomLanguageId
+                | SettingId::LspCustomRootMarkers
+        ) {
+            let changed = self.store_server_field(id, value)?;
+            self.settle_settings_row();
+            return Ok(changed);
         }
         Ok(match id {
             SettingId::AiServer => {
@@ -3560,6 +3636,14 @@ impl App {
             | SettingId::AiCompactKeep
             | SettingId::AiCompactBuffer
             | SettingId::AiDetected
+            | SettingId::LspServer(_)
+            | SettingId::LspAddServer
+            | SettingId::LspCustomName
+            | SettingId::LspCustomCommand
+            | SettingId::LspCustomArgs
+            | SettingId::LspCustomExtensions
+            | SettingId::LspCustomLanguageId
+            | SettingId::LspCustomRootMarkers
             | SettingId::Binding(_) => return,
         }
         if let Some(menu) = self.settings.as_mut().and_then(|page| page.menu.as_mut()) {
@@ -3623,6 +3707,14 @@ impl App {
             | SettingId::AiCompactKeep
             | SettingId::AiCompactBuffer
             | SettingId::AiDetected
+            | SettingId::LspServer(_)
+            | SettingId::LspAddServer
+            | SettingId::LspCustomName
+            | SettingId::LspCustomCommand
+            | SettingId::LspCustomArgs
+            | SettingId::LspCustomExtensions
+            | SettingId::LspCustomLanguageId
+            | SettingId::LspCustomRootMarkers
             | SettingId::Binding(_) => {}
         }
     }
@@ -3672,6 +3764,14 @@ impl App {
             | SettingId::AiCompactKeep
             | SettingId::AiCompactBuffer
             | SettingId::AiDetected
+            | SettingId::LspServer(_)
+            | SettingId::LspAddServer
+            | SettingId::LspCustomName
+            | SettingId::LspCustomCommand
+            | SettingId::LspCustomArgs
+            | SettingId::LspCustomExtensions
+            | SettingId::LspCustomLanguageId
+            | SettingId::LspCustomRootMarkers
             | SettingId::Binding(_) => String::new(),
         }
     }
@@ -3743,6 +3843,14 @@ impl App {
             | SettingId::AiCompactKeep
             | SettingId::AiCompactBuffer
             | SettingId::AiDetected
+            | SettingId::LspServer(_)
+            | SettingId::LspAddServer
+            | SettingId::LspCustomName
+            | SettingId::LspCustomCommand
+            | SettingId::LspCustomArgs
+            | SettingId::LspCustomExtensions
+            | SettingId::LspCustomLanguageId
+            | SettingId::LspCustomRootMarkers
             | SettingId::Binding(_) => return None,
         };
         Some((index, token, len))
@@ -3776,6 +3884,13 @@ impl App {
             page.capture = false;
             page.menu = None;
             page.text = None;
+        }
+        if page.inside
+            && let Some(crate::settings::SettingId::LspServer(row)) =
+                page.section().items.get(page.row).map(|item| item.id)
+        {
+            self.reset_server_row(row);
+            return;
         }
         if page.inside {
             if let Some(item) = page.section().items.get(page.row) {
@@ -3850,6 +3965,20 @@ impl App {
             | SettingId::AiProviderModels
             | SettingId::AiProviderDelete) => self.ai.reset(id),
             SettingId::AiDetected => self.forget_detected(),
+            // Restoring the whole section turns built-ins back on; custom
+            // servers are kept and turned on. Deleting one is `Delete` on its row.
+            SettingId::LspServer(row) => {
+                if let Some(name) = self.appearance.lsp.server_row_name(row) {
+                    self.appearance.lsp.set_server_enabled(&name, true);
+                }
+            }
+            SettingId::LspAddServer
+            | SettingId::LspCustomName
+            | SettingId::LspCustomCommand
+            | SettingId::LspCustomArgs
+            | SettingId::LspCustomExtensions
+            | SettingId::LspCustomLanguageId
+            | SettingId::LspCustomRootMarkers => {}
         }
     }
 
@@ -4981,6 +5110,7 @@ impl App {
                 self.close_picker();
                 self.about = false;
                 self.settings = Some(crate::settings::Page::new());
+                self.find_lsp_programs(false);
             }
             CommandId::About => {
                 self.close_picker();
@@ -4995,6 +5125,7 @@ impl App {
             CommandId::ShowHidden => self.toggle_hidden(),
             CommandId::BracketMatch => self.toggle_bracket_pref(false),
             CommandId::BracketColors => self.toggle_bracket_pref(true),
+            CommandId::LspRestart => self.restart_current_server(),
             CommandId::Focus => self.toggle_focus(),
             CommandId::Preview => self.open_preview(arg.unwrap_or(""))?,
         }

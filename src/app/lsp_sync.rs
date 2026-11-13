@@ -4,14 +4,15 @@
 //! file tab with what the worker was last told: new tabs are opened, closed or
 //! renamed tabs are closed, and edited tabs send one merged change.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::{App, Tab};
 use crate::layout::TabId;
 use crate::lsp::diagnostics::{self, Span};
-use crate::lsp::{self, LspEvent, LspRequest, ServerStatus, Severity, TextChange, registry};
-use crate::syntax::Language;
+use crate::lsp::registry::{Registry, ServerSpec};
+use crate::lsp::{self, LspEvent, LspRequest, ServerStatus, Severity, TextChange};
 
 /// Changes remembered so diagnostics computed against an older version can be moved forward.
 const HISTORY: usize = 64;
@@ -19,7 +20,8 @@ const HISTORY: usize = 64;
 #[derive(Debug)]
 pub(super) struct SyncedDoc {
     path: PathBuf,
-    language: Language,
+    /// Names of the servers it was opened with, most preferred first. The first is its group.
+    servers: Vec<String>,
     epoch: u64,
     revision: u64,
     version: u64,
@@ -31,25 +33,39 @@ pub(super) struct SyncedDoc {
 /// The status bar text for the active file's language server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspLabel {
-    pub name: &'static str,
+    pub name: String,
     pub status: ServerStatus,
 }
 
-/// A tab as the sync pass sees it: id, the file and language when it should have a server, epoch, revision.
-type TabState = (TabId, Option<(PathBuf, Language)>, u64, u64);
+/// A tab as the sync pass sees it: id, the file and its servers when it should have one, epoch, revision.
+type TabState = (TabId, Option<(PathBuf, Vec<Arc<ServerSpec>>)>, u64, u64);
 
-fn eligible(tab: &Tab, enabled: bool) -> Option<(PathBuf, Language)> {
+fn eligible(
+    tab: &Tab,
+    enabled: bool,
+    registry: &Registry,
+) -> Option<(PathBuf, Vec<Arc<ServerSpec>>)> {
     if !enabled {
         return None;
     }
     let path = tab.path.as_ref()?;
-    let language = Language::detect(path).filter(|language| registry::supports(*language))?;
-    (tab.buffer.rope().len_bytes() <= lsp::MAX_DOCUMENT_BYTES).then(|| (path.clone(), language))
+    let servers = registry.candidates(path);
+    if servers.is_empty() {
+        return None;
+    }
+    (tab.buffer.rope().len_bytes() <= lsp::MAX_DOCUMENT_BYTES).then(|| (path.clone(), servers))
+}
+
+fn names(servers: &[Arc<ServerSpec>]) -> Vec<String> {
+    servers.iter().map(|spec| spec.name.clone()).collect()
 }
 
 impl App {
     /// Brings the worker up to date with every tab, then hands over the queued requests.
     pub fn take_lsp_requests(&mut self) -> Vec<LspRequest> {
+        if self.lsp_prefs_dirty {
+            self.refresh_lsp_registry();
+        }
         self.sync_lsp();
         let mut requests = std::mem::take(&mut self.lsp_requests);
         if self.lsp_prefs_dirty {
@@ -60,8 +76,85 @@ impl App {
         requests
     }
 
+    /// Rebuilds the server list from the settings. A file whose servers changed
+    /// is closed so the next pass opens it with the new list; the server it was
+    /// using is stopped first, together with every other file on that server.
+    fn refresh_lsp_registry(&mut self) {
+        let registry = Registry::new(&self.appearance.lsp);
+        if registry == self.lsp_registry {
+            return;
+        }
+        let mut stop: HashSet<String> = HashSet::new();
+        for doc in self.lsp_docs.values() {
+            if names(&registry.candidates(&doc.path)) == doc.servers {
+                continue;
+            }
+            if let Some(group) = doc.servers.first()
+                && let Some((running, _)) = self.lsp_servers.get(group)
+            {
+                stop.insert(running.clone());
+            }
+        }
+        let changed: Vec<TabId> = self
+            .lsp_docs
+            .iter()
+            .filter(|(_, doc)| names(&registry.candidates(&doc.path)) != doc.servers)
+            .map(|(id, _)| *id)
+            .collect();
+        self.lsp_registry = registry;
+        let mut stop: Vec<String> = stop.into_iter().collect();
+        stop.sort();
+        for name in stop {
+            self.stop_lsp_server(&name, false);
+        }
+        for id in changed {
+            self.drop_lsp_doc(id);
+        }
+    }
+
+    /// Stops the server called `name` (or restarts it) and closes every file
+    /// that was using it, so the next sync opens them again.
+    pub(super) fn stop_lsp_server(&mut self, name: &str, restart: bool) {
+        let name = name.to_string();
+        self.lsp_requests.push(if restart {
+            LspRequest::Restart { name: name.clone() }
+        } else {
+            LspRequest::Stop { name: name.clone() }
+        });
+        let groups: HashSet<String> = self
+            .lsp_servers
+            .iter()
+            .filter(|(_, (running, _))| *running == name)
+            .map(|(group, _)| group.clone())
+            .collect();
+        self.lsp_servers.retain(|_, (running, _)| *running != name);
+        let affected: Vec<TabId> = self
+            .lsp_docs
+            .iter()
+            .filter(|(_, doc)| {
+                doc.servers
+                    .first()
+                    .is_some_and(|group| groups.contains(group))
+                    || (restart && doc.servers.contains(&name))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in affected {
+            self.drop_lsp_doc(id);
+        }
+    }
+
+    fn drop_lsp_doc(&mut self, id: TabId) {
+        if let Some(doc) = self.lsp_docs.remove(&id) {
+            self.diagnostics.clear(&doc.path);
+            self.semantic.clear(&doc.path);
+            self.lsp_requests.push(LspRequest::Close { path: doc.path });
+        }
+    }
+
     fn sync_lsp(&mut self) {
         let enabled = self.appearance.lsp.enabled;
+        let registry = &self.lsp_registry;
         let tabs: Vec<TabState> = self
             .editors
             .iter()
@@ -69,7 +162,7 @@ impl App {
             .map(|tab| {
                 (
                     tab.id,
-                    eligible(tab, enabled),
+                    eligible(tab, enabled, registry),
                     tab.epoch,
                     tab.buffer.revision(),
                 )
@@ -82,8 +175,8 @@ impl App {
             .filter(|(id, doc)| {
                 !tabs.iter().any(|(tab_id, wanted, _, _)| {
                     tab_id == *id
-                        && wanted.as_ref().is_some_and(|(path, language)| {
-                            *path == doc.path && *language == doc.language
+                        && wanted.as_ref().is_some_and(|(path, servers)| {
+                            *path == doc.path && names(servers) == doc.servers
                         })
                 })
             })
@@ -98,7 +191,7 @@ impl App {
         }
 
         for (id, wanted, epoch, revision) in tabs {
-            let Some((path, language)) = wanted else {
+            let Some((path, servers)) = wanted else {
                 if let Some(tab) = self.find_tab_mut(id) {
                     tab.lsp_edits.clear();
                 }
@@ -117,7 +210,7 @@ impl App {
                         id,
                         SyncedDoc {
                             path: path.clone(),
-                            language,
+                            servers: names(&servers),
                             epoch,
                             revision,
                             version: 1,
@@ -127,7 +220,7 @@ impl App {
                     );
                     self.lsp_requests.push(LspRequest::Open {
                         path,
-                        language,
+                        servers,
                         text,
                         version: 1,
                         workspace: self.explorer.root.clone(),
@@ -199,17 +292,14 @@ impl App {
         if !self.appearance.lsp.enabled {
             return None;
         }
-        let (language, version) = match self.lsp_docs.get(&tab) {
-            Some(doc) => (doc.language, doc.version),
+        let (group, version) = match self.lsp_docs.get(&tab) {
+            Some(doc) => (doc.servers.first()?.clone(), doc.version),
             None => {
                 let path = self.find_tab(tab)?.path.as_ref()?;
-                let language =
-                    Language::detect(path).filter(|language| registry::supports(*language))?;
-                (language, 0)
+                (self.lsp_registry.group(path)?, 0)
             }
         };
-        let group = registry::servers_for(language).first()?.name;
-        match self.lsp_servers.get(group) {
+        match self.lsp_servers.get(&group) {
             Some((_, ServerStatus::Ready | ServerStatus::Busy(_))) => Some(version),
             _ => None,
         }
@@ -260,6 +350,15 @@ impl App {
                 status,
             } => {
                 self.lsp_servers.insert(group, (name, status));
+            }
+            LspEvent::Stopped { group, name } => {
+                if self
+                    .lsp_servers
+                    .get(&group)
+                    .is_some_and(|(running, _)| *running == name)
+                {
+                    self.lsp_servers.remove(&group);
+                }
             }
             LspEvent::Notice(text) => self.message = Some(text),
             LspEvent::ResetDone => {
@@ -381,11 +480,10 @@ impl App {
 
     /// Server for the active file, once one has reported in.
     pub fn lsp_label(&self) -> Option<LspLabel> {
-        let language = Language::detect(self.path()?)?;
-        let group = registry::servers_for(language).first()?.name;
-        let (name, status) = self.lsp_servers.get(group)?;
+        let group = self.lsp_registry.group(self.path()?)?;
+        let (name, status) = self.lsp_servers.get(&group)?;
         Some(LspLabel {
-            name,
+            name: name.clone(),
             status: status.clone(),
         })
     }
@@ -653,9 +751,9 @@ mod tests {
             requests.as_slice(),
             [LspRequest::Open {
                 version: 1,
-                language: Language::Rust,
+                servers,
                 ..
-            }]
+            }] if servers.first().is_some_and(|spec| spec.name == "rust-analyzer")
         ));
         assert!(app.take_lsp_requests().is_empty());
 
@@ -813,14 +911,14 @@ mod tests {
         let mut app = rust_app("x");
         assert!(app.lsp_label().is_none());
         app.handle_lsp(LspEvent::Status {
-            group: "rust-analyzer",
-            name: "rust-analyzer",
+            group: "rust-analyzer".into(),
+            name: "rust-analyzer".into(),
             status: ServerStatus::Busy("Indexing 3%".into()),
         });
         assert_eq!(
             app.lsp_label(),
             Some(LspLabel {
-                name: "rust-analyzer",
+                name: "rust-analyzer".into(),
                 status: ServerStatus::Busy("Indexing 3%".into())
             })
         );

@@ -2465,7 +2465,7 @@ mod tests {
             Some(PathBuf::from("src/main.rs")),
         );
         app.handle_lsp(crate::lsp::LspEvent::Features {
-            group: "rust-analyzer",
+            group: "rust-analyzer".into(),
             hover: true,
             definition: true,
             completion: true,
@@ -2534,7 +2534,7 @@ mod tests {
             Some(PathBuf::from("src/main.rs")),
         );
         app.handle_lsp(crate::lsp::LspEvent::Features {
-            group: "rust-analyzer",
+            group: "rust-analyzer".into(),
             hover: false,
             definition: false,
             completion: false,
@@ -3139,8 +3139,8 @@ mod tests {
             }],
         });
         app.handle_lsp(LspEvent::Status {
-            group: "rust-analyzer",
-            name: "rust-analyzer",
+            group: "rust-analyzer".into(),
+            name: "rust-analyzer".into(),
             status: ServerStatus::Ready,
         });
         app.handle(SemanticAction::GotoDiagnostic { next: true });
@@ -3425,5 +3425,162 @@ mod tests {
         let screen = draw(&app, 80, 12);
         assert!(!screen.contains("▸ select"), "{screen}");
         assert!(screen.contains("right two"), "{screen}");
+    }
+
+    /// Settings → Language servers with rust-analyzer running, pyright found,
+    /// zls missing, and gopls stopped.
+    fn servers_page(app: &mut App, row: crate::settings::SettingId) {
+        use crate::lsp::{LspEvent, ServerStatus};
+        app.handle_event(AppEvent::ProgramsFound(
+            crate::lsp::registry::builtins()
+                .iter()
+                .map(|spec| {
+                    let found = matches!(
+                        spec.name.as_str(),
+                        "rust-analyzer" | "pyright" | "gopls" | "clangd"
+                    )
+                    .then(|| PathBuf::from(format!("/usr/local/bin/{}", spec.command)));
+                    (spec.command.clone(), found)
+                })
+                .collect(),
+        ));
+        app.handle_lsp(LspEvent::Status {
+            group: "rust-analyzer".into(),
+            name: "rust-analyzer".into(),
+            status: ServerStatus::Ready,
+        });
+        app.handle_lsp(LspEvent::Status {
+            group: "gopls".into(),
+            name: "gopls".into(),
+            status: ServerStatus::Failed("gopls exited (code 2)".into()),
+        });
+        let mut page = crate::settings::Page::new();
+        page.section = crate::settings::sections()
+            .iter()
+            .position(|section| section.name == "Language servers")
+            .unwrap();
+        page.inside = true;
+        page.row = page
+            .section()
+            .items
+            .iter()
+            .position(|item| item.id == row)
+            .unwrap();
+        app.settings = Some(page);
+    }
+
+    #[test]
+    fn language_servers_show_where_each_program_is_and_how_it_runs() {
+        use crate::settings::SettingId;
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        servers_page(&mut app, SettingId::LspServer(0));
+        let screen = draw(&app, 100, 30);
+        let lines: Vec<&str> = screen.lines().collect();
+        let line_of = |text: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(text))
+                .unwrap_or_else(|| panic!("{text} missing:\n{screen}"))
+        };
+        assert!(screen.contains("Language servers"), "{screen}");
+        let rust = line_of("rust-analyzer  rs");
+        assert!(
+            lines[rust].contains('●') && lines[rust].trim_end().ends_with("On│"),
+            "{screen}"
+        );
+        assert!(
+            lines[rust + 1].contains("/usr/local/bin/rust-analyzer · running"),
+            "{screen}"
+        );
+        let pyright = line_of("pyright  py, pyi");
+        assert!(
+            lines[pyright + 1].contains("/usr/local/bin/pyright-langserver"),
+            "{screen}"
+        );
+        let based = line_of("basedpyright");
+        assert!(lines[based].contains('○'), "{screen}");
+        assert!(
+            lines[based + 1].contains("not found on PATH · "),
+            "the install hint shows when it is missing:\n{screen}"
+        );
+        assert!(
+            screen.contains("enter on/off    r restart    del reset"),
+            "{screen}"
+        );
+
+        // Colours: running is green, stopped is red.
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let dot_x = |y: usize| {
+            (0..100u16)
+                .find(|x| buffer[(*x, y as u16)].symbol() == "●")
+                .unwrap()
+        };
+        assert_eq!(
+            buffer[(dot_x(rust), rust as u16)].fg,
+            app.styles().git_added
+        );
+
+        app.settings.as_mut().unwrap().row = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .section()
+            .items
+            .iter()
+            .position(|item| item.id == SettingId::LspServer(6))
+            .unwrap();
+        let screen = draw(&app, 100, 30);
+        let lines: Vec<&str> = screen.lines().collect();
+        let gopls = lines
+            .iter()
+            .position(|line| line.contains("gopls  go"))
+            .unwrap();
+        assert!(
+            lines[gopls + 1].contains("stopped: gopls exited (code 2)"),
+            "{screen}"
+        );
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let x = (0..100u16)
+            .find(|x| buffer[(*x, gopls as u16)].symbol() == "●")
+            .unwrap();
+        assert_eq!(buffer[(x, gopls as u16)].fg, app.styles().diagnostic_error);
+    }
+
+    #[test]
+    fn the_custom_server_fields_open_under_add_server() {
+        use crate::action::SettingsAction;
+        use crate::settings::SettingId;
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        servers_page(&mut app, SettingId::LspAddServer);
+        let screen = draw(&app, 100, 30);
+        assert!(screen.contains("Add server"), "{screen}");
+        assert!(
+            !screen.contains("Root markers"),
+            "hidden until editing:\n{screen}"
+        );
+        app.handle(SemanticAction::Settings(SettingsAction::Enter));
+        app.handle(SemanticAction::Settings(SettingsAction::Insert(
+            "taplo".into(),
+        )));
+        app.handle(SemanticAction::Settings(SettingsAction::Enter));
+        let screen = draw(&app, 100, 30);
+        for field in [
+            "Name",
+            "Command",
+            "Arguments",
+            "File extensions",
+            "LSP language id",
+            "Root markers",
+        ] {
+            assert!(screen.contains(field), "{field} missing:\n{screen}");
+        }
+        assert!(screen.contains("taplo  (custom · editing)"), "{screen}");
+        assert!(
+            screen.contains("needs a command and a file extension"),
+            "{screen}"
+        );
     }
 }
