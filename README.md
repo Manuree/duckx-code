@@ -6,7 +6,36 @@
 
 duckx-code is a modeless terminal editor for a 75% keyboard. The cursor moves with the dedicated arrow keys, Home, End, Page Up, and Page Down. There are no vim motions: no `hjkl`, no `w`/`b`, and no operator-pending commands. Printable keys insert text immediately. Hold Shift with any navigation key to select. `F6` opens an assistant that writes and edits code through a local model on Ollama or LM Studio, or a cloud model through an OpenAI-compatible server or OpenRouter.
 
-Keybindings and Command Bar commands are listed in [DOCUMENTS.md](DOCUMENTS.md). The design notes are in [DESIGN.md](DESIGN.md).
+## Supported terminals
+
+> [!IMPORTANT]
+> **duckx-code supports only terminals that deliver every duckx-code shortcut.** Many shortcuts use `Shift`, `Ctrl + Shift`, or `Ctrl` with a symbol (`Shift + Space`, `Shift + Enter`, `Ctrl + Shift + Z`, `Ctrl + ]`, `Ctrl + /`, `Ctrl + .`, `Ctrl + Shift + O`). A terminal that only sends the old (legacy VT) key encoding cannot send these, so it is not supported.
+
+duckx-code turns on the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) at startup when the terminal says it supports it. On Windows, crossterm reads console input records, which carry the full modifier state.
+
+| Status | Terminals |
+| :--- | :--- |
+| **Supported** | Windows Terminal, the Windows console (conhost: cmd, PowerShell), Alacritty 0.13+, kitty, Ghostty, foot |
+| **Supported with a setting** | WezTerm, with `config.enable_kitty_keyboard = true` in `wezterm.lua` (it is off by default) |
+| **Not supported** | xterm, GNOME Terminal and other VTE terminals, macOS Terminal.app, PuTTY, tmux (even with `extended-keys` some shortcuts still do not arrive) |
+| **Untested** | VS Code's integrated terminal, Konsole, Rio, Warp, iTerm2 |
+
+Notes:
+
+* **Expected, not yet confirmed on every terminal.** The list follows from how each terminal encodes keys. It has not yet been tried on each terminal with a real keyboard. [docs/TERMINAL-KEYS.md](docs/TERMINAL-KEYS.md) has the per-key details and the fallbacks.
+* **Some terminals and desktops keep a few keys by default.** Windows Terminal keeps `Alt + Enter` and `Alt + arrows`; kitty, Ghostty, and foot keep some `Ctrl + Shift` keys; macOS keeps `Ctrl + arrows` and `Ctrl + Space`; Linux desktops may keep `Ctrl + Alt + arrows`. Free them in that program's settings, or change the duckx-code key in Settings → Keybindings.
+* **macOS:** set the Option key to act as Alt (Meta) in the terminal.
+* **Known gap:** even in a supported terminal, `Ctrl + Shift + ]` (select to the matching bracket) can arrive as `Ctrl + }` and is not matched yet.
+
+## Features
+
+* **Modeless editing** with arrow-key navigation, Shift selection, multi-window splits, and tabs per window ([DOCUMENTS.md](DOCUMENTS.md)).
+* **Command Bar** (`F1` or `Shift + Space`): every action also runs by name, with fuzzy matching.
+* **File explorer** sidebar (`Ctrl + B`) and a workspace **file picker** (`Ctrl + P`).
+* **Syntax highlighting** with tree-sitter for Rust, Python, JavaScript, TypeScript, Go, C, C++, C#, Java, and more.
+* **Language servers:** diagnostics, hover, go to definition, references, rename, format, code actions, and completions.
+* **Assistant** (`F6`) with Agent, Plan, and Ask modes, slash commands, and `@file` mentions. Providers: Ollama, LM Studio, OpenAI-compatible servers, and OpenRouter.
+* Markdown preview, git changes in the gutter, file encodings (UTF-8, UTF-16, Windows-1252, Windows-874), color themes, and editable keybindings in Settings.
 
 ## Install
 
@@ -30,7 +59,7 @@ Requirements:
 
 * **Rust 1.91 or newer**, installed with [rustup](https://rustup.rs/). Edition 2024 needs 1.85, the locked `tree-sitter` 0.27 needs 1.90, and duckx-code itself uses `str::floor_char_boundary`, stable since 1.91. `rustup update` brings an older toolchain up to date.
 * **A C compiler.** The tree-sitter grammars and `ring` (TLS for the assistant) compile C code. On Windows, install the [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with **Desktop development with C++** (rustup asks for these too). On macOS, run `xcode-select --install`. On Linux, install `gcc` or `clang` (for example `sudo apt install build-essential`).
-* A terminal that can draw a full-screen TUI. The status bar uses [Nerd Font](https://www.nerdfonts.com/) icons.
+* **A [supported terminal](#supported-terminals).** The status bar uses [Nerd Font](https://www.nerdfonts.com/) icons.
 
 To update, run the same `cargo install` command again with `--force`. To remove it:
 
@@ -47,7 +76,15 @@ duckx-code path\to\file.rs # open a file; a missing path opens as a new file
 
 `Ctrl+S` saves. `Ctrl+Q` quits, and asks first when a file has unsaved changes. `Ctrl+C` copies; it does not quit. `Shift+Space` or `F1` opens the Command Bar.
 
-Settings and the last session are stored in `%APPDATA%\duckx-code` on Windows, and in `$XDG_CONFIG_HOME/duckx-code` or `~/.config/duckx-code` elsewhere.
+## Configuration
+
+Settings and the last session are stored in `%APPDATA%\duckx-code` on Windows, and in `$XDG_CONFIG_HOME/duckx-code` or `~/.config/duckx-code` elsewhere. The `setting` command opens the Settings page, where you can change the theme, the assistant provider and model, language servers, and keybindings.
+
+## Documentation
+
+* [DOCUMENTS.md](DOCUMENTS.md): keybindings and Command Bar commands.
+* [docs/TERMINAL-KEYS.md](docs/TERMINAL-KEYS.md): which shortcuts can fail in which terminal, and what to use instead.
+* [DESIGN.md](DESIGN.md): design notes.
 
 ## Release
 
