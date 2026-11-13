@@ -41,6 +41,22 @@ pub enum SettingId {
     FormatOnSave,
     /// How strictly pyright checks an open Python file.
     PythonChecking,
+    /// One row of Settings → Language servers: built-ins first, then custom servers.
+    LspServer(usize),
+    /// Type a name to add a custom language server.
+    LspAddServer,
+    /// The custom server being edited: its name.
+    LspCustomName,
+    /// Program to start, found on `PATH` or a full path.
+    LspCustomCommand,
+    /// Arguments, split at spaces; quotes keep a space inside one argument.
+    LspCustomArgs,
+    /// File extensions it is used for, comma separated.
+    LspCustomExtensions,
+    /// LSP `languageId` sent for its files. Empty uses the first extension.
+    LspCustomLanguageId,
+    /// Files that mark a project root, comma separated.
+    LspCustomRootMarkers,
     /// The assistant may call tools. Off refuses a turn.
     AiEnabled,
     /// Which default server address the assistant uses.
@@ -193,19 +209,299 @@ pub struct LspPrefs {
     pub format_on_save: bool,
     #[serde(default)]
     pub python: PythonCheck,
+    /// Servers switched off (`false`) in Settings → Language servers. A server not
+    /// listed is On.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub servers: BTreeMap<String, bool>,
+    /// Servers the user added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom: Vec<CustomServer>,
+}
+
+/// A language server added in Settings → Language servers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomServer {
+    pub name: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Lowercase, without the dot.
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    /// Empty uses the first extension.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub language_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_markers: Vec<String>,
+}
+
+/// Rows typed as text: assistant text rows, Add server, and the custom server fields.
+pub fn is_text_row(id: SettingId) -> bool {
+    AiPrefs::is_text(id)
+        || matches!(
+            id,
+            SettingId::LspAddServer
+                | SettingId::LspCustomName
+                | SettingId::LspCustomCommand
+                | SettingId::LspCustomArgs
+                | SettingId::LspCustomExtensions
+                | SettingId::LspCustomLanguageId
+                | SettingId::LspCustomRootMarkers
+        )
+}
+
+/// Most custom language servers kept.
+pub const MAX_CUSTOM_SERVERS: usize = 16;
+/// Longest custom server name.
+pub const SERVER_NAME_MAX: usize = 40;
+
+/// Splits typed arguments at whitespace. `"..."` or `'...'` keeps spaces inside
+/// one argument; a backslash is kept as it is, so Windows paths need no escaping.
+pub fn split_args(text: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    for ch in text.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => current.push(ch),
+            None if ch == '"' || ch == '\'' => {
+                quote = Some(ch);
+                started = true;
+            }
+            None if ch.is_whitespace() => {
+                if started {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            None => {
+                current.push(ch);
+                started = true;
+            }
+        }
+    }
+    if let Some(q) = quote {
+        return Err(format!("Arguments have an unclosed {q}"));
+    }
+    if started {
+        args.push(current);
+    }
+    Ok(args)
+}
+
+/// Arguments as they would be typed: an argument with a space, a quote, or
+/// nothing in it is quoted.
+pub fn join_args(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if !arg.is_empty()
+                && !arg
+                    .chars()
+                    .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+            {
+                arg.clone()
+            } else if arg.contains('"') {
+                format!("'{arg}'")
+            } else {
+                format!("\"{arg}\"")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Comma-separated values, trimmed, empty ones and repeats dropped.
+pub fn split_list(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in text
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        if !out.iter().any(|have| have == item) {
+            out.push(item.to_string());
+        }
+    }
+    out
+}
+
+/// File extensions typed as `zig, .zon ZIG`: lowercase, without dots, no repeats.
+pub fn split_extensions(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in text.split([',', ' ', '\t']) {
+        let ext = item.trim().trim_start_matches('.').to_ascii_lowercase();
+        if !ext.is_empty() && !out.contains(&ext) {
+            out.push(ext);
+        }
+    }
+    out
 }
 
 impl LspPrefs {
     /// Check on save, Format on save, and Python checking are shown only while
-    /// the language server is On. Other rows are always shown.
+    /// the language server is On; so is every row of Language servers. A server
+    /// row past the custom servers that exist is hidden. Other rows are always shown.
     pub fn visible(&self, id: SettingId) -> bool {
         match id {
             SettingId::CheckOnSave | SettingId::FormatOnSave | SettingId::PythonChecking => {
                 self.enabled
             }
+            SettingId::LspServer(row) => self.enabled && self.server_row(row).is_some(),
+            SettingId::LspAddServer
+            | SettingId::LspCustomName
+            | SettingId::LspCustomCommand
+            | SettingId::LspCustomArgs
+            | SettingId::LspCustomExtensions
+            | SettingId::LspCustomLanguageId
+            | SettingId::LspCustomRootMarkers => self.enabled,
             _ => true,
         }
     }
+
+    /// What server row `row` shows: a built-in, or the custom server at that index.
+    pub fn server_row(&self, row: usize) -> Option<ServerRow> {
+        let builtins = crate::lsp::registry::builtins().len();
+        if row < builtins {
+            Some(ServerRow::Builtin(row))
+        } else {
+            let index = row - builtins;
+            (index < self.custom.len()).then_some(ServerRow::Custom(index))
+        }
+    }
+
+    /// The name a server row is known by in `servers`.
+    pub fn server_row_name(&self, row: usize) -> Option<String> {
+        match self.server_row(row)? {
+            ServerRow::Builtin(index) => Some(crate::lsp::registry::builtins()[index].name.clone()),
+            ServerRow::Custom(index) => Some(self.custom[index].name.clone()),
+        }
+    }
+
+    pub fn server_enabled(&self, name: &str) -> bool {
+        self.servers.get(name).copied().unwrap_or(true)
+    }
+
+    /// Off is stored; On removes the entry, since On is the default.
+    pub fn set_server_enabled(&mut self, name: &str, on: bool) {
+        if on {
+            self.servers.remove(name);
+        } else {
+            self.servers.insert(name.to_string(), false);
+        }
+    }
+
+    pub fn find_custom(&self, name: &str) -> Option<usize> {
+        self.custom
+            .iter()
+            .position(|server| server.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Checks a custom server name: not blank, not too long, and not used by a
+    /// built-in or another custom server. `except` is the server being renamed.
+    pub fn check_server_name(&self, name: &str, except: Option<usize>) -> Result<(), String> {
+        if name.is_empty() {
+            return Err("A server needs a name".to_string());
+        }
+        if name.chars().count() > SERVER_NAME_MAX {
+            return Err(format!(
+                "A server name is at most {SERVER_NAME_MAX} characters"
+            ));
+        }
+        if name.chars().any(char::is_control) {
+            return Err("A server name is one line of text".to_string());
+        }
+        if crate::lsp::registry::builtins()
+            .iter()
+            .any(|spec| spec.name.eq_ignore_ascii_case(name))
+        {
+            return Err(format!("{name} is a built-in server"));
+        }
+        if let Some(index) = self.find_custom(name)
+            && Some(index) != except
+        {
+            return Err(format!("A server named {name} already exists"));
+        }
+        Ok(())
+    }
+
+    /// Drops custom servers a hand-edited file got wrong (blank, clashing, or
+    /// repeated names; more than [`MAX_CUSTOM_SERVERS`]) and tidies extensions.
+    pub fn tidy(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mut kept = LspPrefs {
+            custom: Vec::new(),
+            ..self.clone()
+        };
+        for mut server in std::mem::take(&mut self.custom) {
+            server.name = server.name.trim().to_string();
+            if let Err(problem) = kept.check_server_name(&server.name, None) {
+                warnings.push(format!("Ignored language server: {problem}"));
+                continue;
+            }
+            if kept.custom.len() >= MAX_CUSTOM_SERVERS {
+                warnings.push(format!(
+                    "Ignored language server {}: at most {MAX_CUSTOM_SERVERS}",
+                    server.name
+                ));
+                continue;
+            }
+            server.extensions = split_extensions(&server.extensions.join(","));
+            kept.custom.push(server);
+        }
+        *self = kept;
+        warnings
+    }
+
+    /// Adds an empty custom server called `name`; its command and extensions are typed next.
+    pub fn add_custom(&mut self, name: &str) -> Result<usize, String> {
+        self.check_server_name(name, None)?;
+        if self.custom.len() >= MAX_CUSTOM_SERVERS {
+            return Err(format!("At most {MAX_CUSTOM_SERVERS} custom servers"));
+        }
+        self.custom.push(CustomServer {
+            name: name.to_string(),
+            ..CustomServer::default()
+        });
+        Ok(self.custom.len() - 1)
+    }
+
+    /// Removes a custom server and its On/Off entry.
+    pub fn delete_custom(&mut self, index: usize) -> Option<CustomServer> {
+        if index >= self.custom.len() {
+            return None;
+        }
+        let server = self.custom.remove(index);
+        self.servers.remove(&server.name);
+        Some(server)
+    }
+
+    /// Renames a custom server, keeping its On/Off choice.
+    pub fn rename_custom(&mut self, index: usize, name: &str) -> Result<bool, String> {
+        let Some(old) = self.custom.get(index).map(|server| server.name.clone()) else {
+            return Ok(false);
+        };
+        if old == name {
+            return Ok(false);
+        }
+        self.check_server_name(name, Some(index))?;
+        if let Some(on) = self.servers.remove(&old) {
+            self.servers.insert(name.to_string(), on);
+        }
+        self.custom[index].name = name.to_string();
+        Ok(true)
+    }
+}
+
+/// Which server a Language servers row stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerRow {
+    /// Index into [`crate::lsp::registry::builtins`].
+    Builtin(usize),
+    /// Index into [`LspPrefs::custom`].
+    Custom(usize),
 }
 
 fn enabled() -> bool {
@@ -219,6 +515,8 @@ impl Default for LspPrefs {
             check_on_save: true,
             format_on_save: false,
             python: PythonCheck::Basic,
+            servers: BTreeMap::new(),
+            custom: Vec::new(),
         }
     }
 }
@@ -1751,6 +2049,7 @@ impl SettingsFile {
             kept.insert(id, chord.token());
         }
         self.keybindings = kept;
+        warnings.extend(self.lsp.tidy());
         warnings
     }
 
@@ -1913,6 +2212,57 @@ fn fixed(name: &'static str, items: &'static [Item]) -> Section {
     }
 }
 
+/// One row per server (built-ins, then room for every custom server), then the
+/// Add server row and the fields of the custom server being edited.
+fn server_items() -> Vec<Item> {
+    let rows = crate::lsp::registry::builtins().len() + MAX_CUSTOM_SERVERS;
+    let mut items: Vec<Item> = (0..rows)
+        .map(|row| Item {
+            label: "",
+            detail: "",
+            id: SettingId::LspServer(row),
+        })
+        .collect();
+    items.extend_from_slice(&[
+        Item {
+            label: "Add server",
+            detail: "Type a name to add your own language server, then fill in its command and extensions.",
+            id: SettingId::LspAddServer,
+        },
+        Item {
+            label: "Name",
+            detail: "Name of this server, shown in the list and the status bar.",
+            id: SettingId::LspCustomName,
+        },
+        Item {
+            label: "Command",
+            detail: "Program to start, found on PATH (with PATHEXT on Windows) or a full path. Never run through a shell.",
+            id: SettingId::LspCustomCommand,
+        },
+        Item {
+            label: "Arguments",
+            detail: "Split at spaces; quotes keep a space inside one argument, e.g. --stdio.",
+            id: SettingId::LspCustomArgs,
+        },
+        Item {
+            label: "File extensions",
+            detail: "Files this server is used for, separated by commas, e.g. zig, zon.",
+            id: SettingId::LspCustomExtensions,
+        },
+        Item {
+            label: "LSP language id",
+            detail: "languageId sent for its files. Empty uses the first extension.",
+            id: SettingId::LspCustomLanguageId,
+        },
+        Item {
+            label: "Root markers",
+            detail: "Files that mark the project folder, separated by commas, e.g. build.zig.",
+            id: SettingId::LspCustomRootMarkers,
+        },
+    ]);
+    items
+}
+
 pub fn sections() -> &'static [Section] {
     static SECTIONS: OnceLock<Vec<Section>> = OnceLock::new();
     SECTIONS
@@ -2020,6 +2370,10 @@ pub fn sections() -> &'static [Section] {
                         },
                     ],
                 ),
+                Section {
+                    name: "Language servers",
+                    items: server_items(),
+                },
                 fixed(
                     "AI",
                     &[
@@ -2200,14 +2554,34 @@ impl Page {
             .collect()
     }
 
+    /// Section indexes that have at least one shown row. A section whose rows
+    /// are all hidden is left out of the list (R5).
+    pub fn shown_sections(visible: impl Fn(SettingId) -> bool) -> Vec<usize> {
+        sections()
+            .iter()
+            .enumerate()
+            .filter(|(_, section)| section.items.iter().any(|item| visible(item.id)))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     /// Moves the highlight in the menu that is open. The highlight wraps and
-    /// skips hidden rows.
+    /// skips hidden rows and hidden sections.
     pub fn move_cursor(&mut self, delta: isize, visible: impl Fn(SettingId) -> bool) {
         if !self.inside {
-            let len = sections().len();
-            if len > 0 {
-                self.section = (self.section as isize + delta).rem_euclid(len as isize) as usize;
+            let shown = Self::shown_sections(visible);
+            if shown.is_empty() {
+                return;
             }
+            let next = match shown.iter().position(|at| *at == self.section) {
+                Some(at) => (at as isize + delta).rem_euclid(shown.len() as isize) as usize,
+                None if delta >= 0 => shown.iter().position(|at| *at > self.section).unwrap_or(0),
+                None => shown
+                    .iter()
+                    .rposition(|at| *at < self.section)
+                    .unwrap_or(shown.len() - 1),
+            };
+            self.section = shown[next];
             return;
         }
         let shown = self.shown_rows(visible);
@@ -2231,6 +2605,9 @@ impl Page {
         if self.inside || sections().is_empty() {
             return;
         }
+        if !Self::shown_sections(&visible).contains(&self.section) {
+            return;
+        }
         self.inside = true;
         self.row = self.shown_rows(visible).first().copied().unwrap_or(0);
     }
@@ -2240,6 +2617,16 @@ impl Page {
     /// above it, else below it.
     pub fn settle(&mut self, visible: impl Fn(SettingId) -> bool) {
         if !self.inside {
+            let shown = Self::shown_sections(visible);
+            if !shown.is_empty() && !shown.contains(&self.section) {
+                self.section = shown
+                    .iter()
+                    .rev()
+                    .find(|at| **at < self.section)
+                    .or_else(|| shown.first())
+                    .copied()
+                    .unwrap_or(0);
+            }
             return;
         }
         let shown = self.shown_rows(visible);
@@ -2270,7 +2657,7 @@ impl Page {
         if self.inside {
             self.row = self.shown_rows(visible).first().copied().unwrap_or(0);
         } else {
-            self.section = 0;
+            self.section = Self::shown_sections(visible).first().copied().unwrap_or(0);
         }
     }
 
@@ -2278,7 +2665,10 @@ impl Page {
         if self.inside {
             self.row = self.shown_rows(visible).last().copied().unwrap_or(0);
         } else {
-            self.section = sections().len().saturating_sub(1);
+            self.section = Self::shown_sections(visible)
+                .last()
+                .copied()
+                .unwrap_or(sections().len().saturating_sub(1));
         }
     }
 }
@@ -3018,5 +3408,160 @@ mod tests {
         file.ai.reset(SettingId::AiClearRecent);
         assert!(file.ai.recent.is_empty());
         assert!(!file.to_pretty().contains("\"recent\""));
+    }
+
+    #[test]
+    fn arguments_split_at_spaces_and_keep_quoted_ones_whole() {
+        assert_eq!(split_args("").unwrap(), Vec::<String>::new());
+        assert_eq!(split_args("  --stdio  ").unwrap(), ["--stdio"]);
+        assert_eq!(
+            split_args(r#"serve --log "C:\Program Files\x.log" 'a b' """#).unwrap(),
+            ["serve", "--log", r"C:\Program Files\x.log", "a b", ""]
+        );
+        assert_eq!(
+            split_args(r"--dir C:\tools").unwrap(),
+            ["--dir", r"C:\tools"]
+        );
+        assert_eq!(
+            split_args("--x \"open").unwrap_err(),
+            "Arguments have an unclosed \""
+        );
+        let args = split_args(r#"a "b c" 'say "hi"' """#).unwrap();
+        assert_eq!(split_args(&join_args(&args)).unwrap(), args);
+    }
+
+    #[test]
+    fn extensions_and_lists_are_tidied() {
+        assert_eq!(split_extensions(" .Zig, zon ZIG\t.zon"), ["zig", "zon"]);
+        assert!(split_extensions(" , . ").is_empty());
+        assert_eq!(
+            split_list("build.zig, , .git,build.zig"),
+            ["build.zig", ".git"]
+        );
+    }
+
+    #[test]
+    fn custom_server_names_are_checked() {
+        let mut lsp = LspPrefs::default();
+        assert_eq!(lsp.add_custom("").unwrap_err(), "A server needs a name");
+        assert_eq!(
+            lsp.add_custom("Gopls").unwrap_err(),
+            "Gopls is a built-in server"
+        );
+        assert_eq!(lsp.add_custom("my-lsp"), Ok(0));
+        assert_eq!(
+            lsp.add_custom("MY-LSP").unwrap_err(),
+            "A server named MY-LSP already exists"
+        );
+        assert!(lsp.add_custom(&"x".repeat(SERVER_NAME_MAX + 1)).is_err());
+        assert!(lsp.add_custom("a\nb").is_err());
+        lsp.set_server_enabled("my-lsp", false);
+        assert_eq!(lsp.rename_custom(0, "other"), Ok(true));
+        assert!(
+            !lsp.server_enabled("other"),
+            "the Off choice follows a rename"
+        );
+        assert_eq!(lsp.rename_custom(0, "other"), Ok(false));
+        for n in 1..MAX_CUSTOM_SERVERS {
+            lsp.add_custom(&format!("s{n}")).unwrap();
+        }
+        assert_eq!(
+            lsp.add_custom("one-more").unwrap_err(),
+            format!("At most {MAX_CUSTOM_SERVERS} custom servers")
+        );
+        assert_eq!(lsp.delete_custom(0).unwrap().name, "other");
+        assert!(lsp.servers.is_empty(), "its Off entry goes with it");
+    }
+
+    #[test]
+    fn language_servers_round_trip_and_an_older_file_loads() {
+        let older = r#"{"lsp":{"enabled":true,"check_on_save":true,"format_on_save":false,"python":"basic"}}"#;
+        let mut file: SettingsFile = serde_json::from_str(older).unwrap();
+        assert!(file.sanitize().is_empty());
+        assert_eq!(file.lsp, LspPrefs::default());
+        let saved = file.to_pretty();
+        assert!(!saved.contains("\"servers\""), "{saved}");
+        assert!(!saved.contains("\"custom\""), "{saved}");
+
+        file.lsp.set_server_enabled("pyright", false);
+        file.lsp.add_custom("my-lsp").unwrap();
+        file.lsp.custom[0].command = "my-lsp".into();
+        file.lsp.custom[0].args = vec!["--stdio".into(), "a b".into()];
+        file.lsp.custom[0].extensions = vec!["foo".into()];
+        file.lsp.custom[0].root_markers = vec!["foo.toml".into()];
+        let saved = file.to_pretty();
+        let mut back: SettingsFile = serde_json::from_str(&saved).unwrap();
+        assert!(back.sanitize().is_empty());
+        assert_eq!(back.lsp, file.lsp);
+        assert!(!back.lsp.server_enabled("pyright"));
+        assert!(back.lsp.server_enabled("basedpyright"));
+
+        let partial =
+            r#"{"lsp":{"servers":{"zls":false},"custom":[{"name":"x","extensions":[".FOO"]}]}}"#;
+        let mut file: SettingsFile = serde_json::from_str(partial).unwrap();
+        assert!(file.sanitize().is_empty());
+        assert!(file.lsp.enabled, "missing keys keep their defaults");
+        assert!(!file.lsp.server_enabled("zls"));
+        assert_eq!(file.lsp.custom[0].command, "");
+        assert_eq!(file.lsp.custom[0].extensions, ["foo"]);
+    }
+
+    #[test]
+    fn a_hand_edited_file_drops_custom_servers_it_cannot_use() {
+        let text = r#"{"lsp":{"custom":[
+            {"name":"ok","command":"ok","extensions":["ok"]},
+            {"name":" ","command":"blank"},
+            {"name":"gopls","command":"mine"},
+            {"name":"OK","command":"again"}
+        ]}}"#;
+        let mut file: SettingsFile = serde_json::from_str(text).unwrap();
+        let warnings = file.sanitize();
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert_eq!(file.lsp.custom.len(), 1);
+        assert_eq!(file.lsp.custom[0].name, "ok");
+    }
+
+    #[test]
+    fn language_server_rows_are_hidden_while_the_language_server_is_off() {
+        let section = sections()
+            .iter()
+            .position(|section| section.name == "Language servers")
+            .unwrap();
+        assert_eq!(
+            sections()[section - 1].name,
+            "Language",
+            "Language servers comes right after Language"
+        );
+        let mut lsp = LspPrefs::default();
+        let rows = |lsp: &LspPrefs| {
+            sections()[section]
+                .items
+                .iter()
+                .filter(|item| lsp.visible(item.id))
+                .count()
+        };
+        let builtins = crate::lsp::registry::builtins().len();
+        // Every built-in, Add server, and the six custom fields (the App hides
+        // those until a custom server is being edited).
+        assert_eq!(rows(&lsp), builtins + 1 + 6);
+        lsp.add_custom("mine").unwrap();
+        assert_eq!(rows(&lsp), builtins + 2 + 6);
+        lsp.enabled = false;
+        assert_eq!(rows(&lsp), 0);
+        let shown = Page::shown_sections(|id| lsp.visible(id));
+        assert!(!shown.contains(&section));
+
+        // The section list skips the hidden section both ways.
+        let mut page = Page::new();
+        page.section = section - 1;
+        page.move_cursor(1, |id| lsp.visible(id));
+        assert_eq!(page.section, section + 1);
+        page.move_cursor(-1, |id| lsp.visible(id));
+        assert_eq!(page.section, section - 1);
+        page.section = section;
+        page.enter(|id| lsp.visible(id));
+        assert!(!page.inside, "a hidden section does not open");
+        page.settle(|id| lsp.visible(id));
+        assert_eq!(page.section, section - 1);
     }
 }

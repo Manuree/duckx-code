@@ -77,6 +77,8 @@ pub enum Job {
     /// Walk the explorer root. The flag is Show hidden files.
     ScanTree(PathBuf, bool),
     GitStatus(PathBuf),
+    /// Look for language server programs on `PATH`.
+    FindPrograms(Vec<String>),
     /// `fingerprint` is the hash of `text`. `epoch` is the editor generation that owned those bytes.
     SaveFile {
         editor_id: EditorId,
@@ -185,6 +187,8 @@ pub enum Job {
 
 #[derive(Debug)]
 pub enum AppEvent {
+    /// Where each command of [`Job::FindPrograms`] was found; `None` when it was not.
+    ProgramsFound(Vec<(String, Option<PathBuf>)>),
     TreeScanned {
         root: PathBuf,
         entries: Vec<FileEntry>,
@@ -302,6 +306,15 @@ pub fn run(job: Job) -> AppEvent {
             entries: tree::scan(&root, hidden),
             root,
         },
+        Job::FindPrograms(commands) => AppEvent::ProgramsFound(
+            commands
+                .into_iter()
+                .map(|command| {
+                    let found = crate::lsp::detect::find_program(&command);
+                    (command, found)
+                })
+                .collect(),
+        ),
         Job::GitStatus(root) => AppEvent::GitStatus {
             statuses: git::status(&root),
             root,

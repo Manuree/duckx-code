@@ -44,7 +44,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         .then(|| page.section().items.get(page.row).map(|item| item.id))
         .flatten();
     let binding = matches!(row_id, Some(SettingId::Binding(_)));
-    let text_row = row_id.is_some_and(crate::settings::AiPrefs::is_text);
+    let text_row = row_id.is_some_and(crate::settings::is_text_row);
     let has_picks = page.text.is_some() && app.draft_row().is_some();
     let recent_row = matches!(row_id, Some(SettingId::AiServer | SettingId::AiModel));
     let recent_hint = row_id
@@ -65,6 +65,12 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         " ↑↓ move    enter → open    del reset    esc back ← close"
     } else if binding {
         " ↑↓ move    enter bind    del reset    esc back ← back"
+    } else if let Some(SettingId::LspServer(row)) = row_id {
+        if app.server_view(row).is_some_and(|view| view.custom) {
+            " ↑↓ move    enter on/off    r restart    e edit    del delete    esc back ← back"
+        } else {
+            " ↑↓ move    enter on/off    r restart    del reset    esc back ← back"
+        }
     } else if let Some(hint) = recent_hint.as_deref() {
         hint
     } else if text_row {
@@ -175,10 +181,14 @@ fn render_sections(
     slots: usize,
     footer_row: u16,
 ) {
-    let start = window_start(page.section, sections().len(), slots.max(1));
+    // A section whose rows are all hidden is left out (R5).
+    let shown = Page::shown_sections(|id| app.setting_visible(id));
+    let at = shown.iter().position(|at| *at == page.section).unwrap_or(0);
+    let start = window_start(at, shown.len(), slots.max(1));
     let theme = *app.styles();
-    for (offset, section) in sections().iter().enumerate().skip(start) {
-        let row = y + (offset - start) as u16;
+    for (place, &offset) in shown.iter().enumerate().skip(start) {
+        let section = &sections()[offset];
+        let row = y + (place - start) as u16;
         if row >= footer_row {
             break;
         }
@@ -216,7 +226,11 @@ fn render_items(
     let section = page.section();
     // Rows that do not apply are left out, not greyed (R5).
     let shown = page.shown_rows(|id| app.setting_visible(id));
-    let item_height = if slots >= shown.len().saturating_mul(2) {
+    // Server rows always take two lines (where it is, how it runs) and scroll.
+    let servers = shown
+        .iter()
+        .any(|&row| matches!(section.items[row].id, SettingId::LspServer(_)));
+    let item_height = if servers || slots >= shown.len().saturating_mul(2) {
         2
     } else {
         1
@@ -238,6 +252,25 @@ fn render_items(
             .text
             .as_ref()
             .filter(|_| page.inside && offset == page.row);
+        let selected = page.inside && offset == page.row;
+        if let SettingId::LspServer(slot) = item.id
+            && let Some(view) = app.server_view(slot)
+        {
+            paint_server(
+                frame,
+                inner,
+                x,
+                row,
+                &view,
+                selected,
+                canvas,
+                width,
+                item_height,
+                footer_row,
+                &theme,
+            );
+            continue;
+        }
         let syntax = (item.id == SettingId::SyntaxTheme).then(|| app.appearance.syntax.clone());
         let label = format!(" {}", item.label);
         let (value, draft_column) = match draft {
@@ -435,6 +468,83 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         SettingId::AiReferer => text_or_none(&app.ai.openrouter_referer),
         SettingId::AiCompactKeep => format!("{} tokens", app.ai.resolved_compact_keep()),
         SettingId::AiCompactBuffer => format!("{} %", app.ai.resolved_compact_buffer()),
+        SettingId::LspServer(row) => match app.server_view(row) {
+            Some(view) if view.on => "On".to_string(),
+            Some(_) => "Off".to_string(),
+            None => String::new(),
+        },
+        id @ (SettingId::LspAddServer
+        | SettingId::LspCustomName
+        | SettingId::LspCustomCommand
+        | SettingId::LspCustomArgs
+        | SettingId::LspCustomExtensions
+        | SettingId::LspCustomLanguageId
+        | SettingId::LspCustomRootMarkers) => app.server_field_label(id),
+    }
+}
+
+/// One language server: dot, name and file extensions, On/Off; under it where
+/// the program is (or the install hint) and how the server is doing.
+// The same placement arguments as `paint_row`, which it draws through.
+#[allow(clippy::too_many_arguments)]
+fn paint_server(
+    frame: &mut Frame,
+    inner: Rect,
+    x: usize,
+    row: u16,
+    view: &crate::app::ServerView,
+    selected: bool,
+    canvas: Color,
+    width: usize,
+    item_height: usize,
+    footer_row: u16,
+    theme: &UiStyles,
+) {
+    use crate::app::Dot;
+    let mut label = format!("   {}", view.name);
+    if !view.extensions.is_empty() {
+        label.push_str("  ");
+        label.push_str(&view.extensions);
+    }
+    if view.custom {
+        label.push_str(if view.editing {
+            "  (custom · editing)"
+        } else {
+            "  (custom)"
+        });
+    }
+    let value = if view.on { "On" } else { "Off" };
+    let detail = view.detail();
+    paint_row(
+        frame,
+        inner,
+        x,
+        row,
+        &label,
+        Some(&detail),
+        value,
+        selected,
+        canvas,
+        width,
+        item_height,
+        footer_row,
+        theme,
+        None,
+    );
+    let bg = if selected {
+        theme.sidebar_selected
+    } else {
+        canvas
+    };
+    let (glyph, style) = match view.dot() {
+        Dot::Running => ("●", Style::new().fg(theme.git_added)),
+        Dot::Starting => ("●", Style::new().fg(theme.diagnostic_warning)),
+        Dot::Failed => ("●", Style::new().fg(theme.diagnostic_error)),
+        Dot::Found => ("●", theme.sidebar_dim),
+        Dot::Missing => ("○", theme.sidebar_dim),
+    };
+    if width > 2 {
+        put(frame, inner, x + 1, row, glyph, style.bg(bg), 1);
     }
 }
 
@@ -591,6 +701,14 @@ fn paint_menu(
         | SettingId::AiCompactKeep
         | SettingId::AiCompactBuffer
         | SettingId::AiDetected
+        | SettingId::LspServer(_)
+        | SettingId::LspAddServer
+        | SettingId::LspCustomName
+        | SettingId::LspCustomCommand
+        | SettingId::LspCustomArgs
+        | SettingId::LspCustomExtensions
+        | SettingId::LspCustomLanguageId
+        | SettingId::LspCustomRootMarkers
         | SettingId::Binding(_) => return,
     };
     if names.is_empty() {

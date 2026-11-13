@@ -52,7 +52,7 @@ pub struct Connection {
 
 /// Starts `spec` rooted at the given folder. `ErrorKind::NotFound` means the
 /// program is not installed, and the next candidate is tried.
-pub type Launch = Arc<dyn Fn(&'static ServerSpec, &Path) -> io::Result<Connection> + Send + Sync>;
+pub type Launch = Arc<dyn Fn(&ServerSpec, &Path) -> io::Result<Connection> + Send + Sync>;
 
 pub struct LspHandle {
     requests: mpsc::UnboundedSender<LspRequest>,
@@ -87,16 +87,15 @@ pub fn spawn_with(launch: Launch) -> (LspHandle, mpsc::UnboundedReceiver<LspEven
 }
 
 fn launch_process(
-    spec: &'static ServerSpec,
+    spec: &ServerSpec,
     root: &Path,
     log_dir: Option<&Path>,
 ) -> io::Result<Connection> {
-    let mut child = match spawn_program(spec.command, spec.args, root) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound && cfg!(windows) => {
-            spawn_program(&format!("{}.cmd", spec.command), spec.args, root)?
-        }
-        other => other?,
-    };
+    // The program is looked up on PATH (with PATHEXT on Windows) and started
+    // directly by its full path, never through a shell.
+    let program = super::detect::find_program(&spec.command)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    let mut child = spawn_program(&program, &spec.args, root)?;
     let missing = || io::Error::other("server pipe was not created");
     let input = child.stdin.take().ok_or_else(missing)?;
     let output = child.stdout.take().ok_or_else(missing)?;
@@ -106,11 +105,24 @@ fn launch_process(
         output: Box::new(output),
         stderr: stderr.map(|pipe| Box::new(pipe) as Box<dyn AsyncRead + Send + Unpin>),
         child: Some(child),
-        log: log_dir.map(|dir| dir.join(format!("lsp-{}.log", spec.name))),
+        log: log_dir.map(|dir| dir.join(format!("lsp-{}.log", log_name(&spec.name)))),
     })
 }
 
-fn spawn_program(program: &str, args: &[&str], root: &Path) -> io::Result<Child> {
+/// A server name made safe for a file name: `my server/1` becomes `my-server-1`.
+fn log_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn spawn_program(program: &Path, args: &[String], root: &Path) -> io::Result<Child> {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -286,8 +298,8 @@ fn flag(value: &Value) -> bool {
 }
 
 struct Server {
-    group: &'static str,
-    spec: &'static ServerSpec,
+    group: String,
+    spec: Arc<ServerSpec>,
     root: PathBuf,
     instance: u64,
     writer: Option<mpsc::UnboundedSender<Value>>,
@@ -356,7 +368,7 @@ struct PullSnap {
 struct Doc {
     server: usize,
     uri: String,
-    language_id: &'static str,
+    language_id: String,
     version: u64,
     /// What the server has been told the file contains.
     text: Rope,
@@ -399,7 +411,7 @@ struct Manager {
     internal: mpsc::UnboundedSender<Internal>,
     launch: Launch,
     servers: Vec<Server>,
-    by_root: HashMap<(&'static str, PathBuf), usize>,
+    by_root: HashMap<(String, PathBuf), usize>,
     docs: HashMap<PathBuf, Doc>,
     /// Queries waiting to be sent, or already sent and waiting for a reply.
     inflight: Vec<Inflight>,
@@ -408,7 +420,7 @@ struct Manager {
     /// `textDocument/semanticTokens/full` requests, keyed by JSON-RPC id.
     tokens: HashMap<i64, PullSnap>,
     /// Server groups with no installed program. Not retried this session.
-    missing: HashSet<&'static str>,
+    missing: HashSet<String>,
     next_instance: u64,
     shutting_down: bool,
     prefs: crate::settings::LspPrefs,
@@ -464,8 +476,8 @@ impl Manager {
         server.held = None;
         let server = &self.servers[index];
         self.emit(LspEvent::Status {
-            group: server.group,
-            name: server.spec.name,
+            group: server.group.clone(),
+            name: server.spec.name.clone(),
             status,
         });
     }
@@ -474,31 +486,35 @@ impl Manager {
         match request {
             LspRequest::Open {
                 path,
-                language,
+                servers,
                 text,
                 version,
                 workspace,
             } => {
-                let candidates = registry::servers_for(language);
-                let Some(first) = candidates.first() else {
+                let Some(first) = servers.first().cloned() else {
                     return;
                 };
                 self.close(&path);
-                if self.missing.contains(first.name) {
+                if self.missing.contains(&first.name) {
                     return;
                 }
-                let root = registry::find_root(&path, &workspace, first.root_markers);
-                let server = match self.by_root.get(&(first.name, root.clone())) {
+                let root = registry::find_root(&path, &workspace, &first.root_markers);
+                let server = match self.by_root.get(&(first.name.clone(), root.clone())) {
                     Some(&index) => index,
-                    None => match self.start(candidates, root) {
+                    None => match self.start(&servers, root) {
                         Some(index) => index,
                         None => return,
                     },
                 };
+                let language_id = self.servers[server]
+                    .spec
+                    .language_id(&path)
+                    .unwrap_or("plaintext")
+                    .to_string();
                 let mut doc = Doc {
                     server,
                     uri: uri::from_path(&path),
-                    language_id: registry::language_id(language, &path),
+                    language_id,
                     version,
                     text,
                     opened: false,
@@ -554,6 +570,12 @@ impl Manager {
             LspRequest::Cancel { token } => self.cancel(token),
             LspRequest::Shutdown | LspRequest::Reset => {}
             LspRequest::Configure(prefs) => self.configure(prefs),
+            LspRequest::Stop { name } => self.stop_named(&name),
+            LspRequest::Restart { name } => {
+                self.stop_named(&name);
+                // Detect again: a program installed since the last try is used now.
+                self.missing.clear();
+            }
         }
     }
 
@@ -677,7 +699,7 @@ impl Manager {
                     QueryKind::CodeAction => "code action",
                     QueryKind::CodeActionResolve { .. } => "code action",
                 };
-                Some(Err((server.spec.name, feature)))
+                Some(Err((server.spec.name.clone(), feature)))
             } else {
                 let encoding = server.caps.encoding;
                 let (line, character) = position::position_of(&doc.text, at, encoding);
@@ -1057,15 +1079,15 @@ impl Manager {
     }
 
     /// Launches the first installed candidate. `None` when none could start.
-    fn start(&mut self, candidates: &'static [ServerSpec], root: PathBuf) -> Option<usize> {
-        let group = candidates[0].name;
+    fn start(&mut self, candidates: &[Arc<ServerSpec>], root: PathBuf) -> Option<usize> {
+        let group = candidates[0].name.clone();
         for spec in candidates {
             match (self.launch)(spec, &root) {
                 Ok(connection) => {
                     let index = self.servers.len();
                     self.servers.push(Server {
-                        group,
-                        spec,
+                        group: group.clone(),
+                        spec: spec.clone(),
                         root: root.clone(),
                         instance: 0,
                         writer: None,
@@ -1116,7 +1138,10 @@ impl Manager {
             }
         }
         self.missing.insert(group);
-        let names: Vec<&str> = candidates.iter().map(|spec| spec.command).collect();
+        let names: Vec<&str> = candidates
+            .iter()
+            .map(|spec| spec.command.as_str())
+            .collect();
         self.emit(LspEvent::Notice(format!(
             "No language server found. Install {} for code diagnostics",
             names.join(" or ")
@@ -1197,9 +1222,9 @@ impl Manager {
                 {
                     return;
                 }
-                let spec = self.servers[server].spec;
+                let spec = self.servers[server].spec.clone();
                 let root = self.servers[server].root.clone();
-                match (self.launch)(spec, &root) {
+                match (self.launch)(&spec, &root) {
                     Ok(connection) => self.connect(server, connection),
                     Err(err) => self.fail(server, err.to_string()),
                 }
@@ -1259,7 +1284,7 @@ impl Manager {
         server.caps = Capabilities::parse(result);
         server.state = State::Ready;
         let caps = server.caps.clone();
-        let group = server.group;
+        let group = server.group.clone();
         server.notify("initialized", json!({}));
         let opened = {
             let server = &self.servers[index];
@@ -1297,7 +1322,7 @@ impl Manager {
         let server = &self.servers[index];
         let result = match method {
             "workspace/configuration" => {
-                let name = server.spec.name;
+                let name = server.spec.name.as_str();
                 let items = params["items"].as_array().map(Vec::as_slice).unwrap_or(&[]);
                 Value::Array(
                     items
@@ -1331,7 +1356,7 @@ impl Manager {
             "window/showMessage" => {
                 let level = params["type"].as_u64().unwrap_or(4);
                 if let (1 | 2, Some(text)) = (level, params["message"].as_str()) {
-                    let name = self.servers[index].spec.name;
+                    let name = &self.servers[index].spec.name;
                     self.emit(LspEvent::Notice(format!("{name}: {}", first_line(text))));
                 }
             }
@@ -1461,7 +1486,7 @@ impl Manager {
         server.state = State::Restarting;
         server.restarts += 1;
         let delay = Duration::from_secs(1 << (server.restarts - 1));
-        let name = server.spec.name;
+        let name = server.spec.name.clone();
         let internal = self.internal.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
@@ -1698,13 +1723,61 @@ impl Manager {
         server.state = State::Failed;
         server.writer = None;
         server.kill = None;
-        let name = server.spec.name;
+        let name = server.spec.name.clone();
         self.forget_documents(index);
         self.status(index, ServerStatus::Failed(reason.clone()));
         self.emit(LspEvent::Notice(format!(
             "{name} stopped: {}",
             first_line(&reason)
         )));
+    }
+
+    /// Stops every running copy of the server called `name` (one per project root),
+    /// as the user asked in Settings. Its documents are forgotten; `App` opens them
+    /// again, which starts the next server for them.
+    fn stop_named(&mut self, name: &str) {
+        let targets: Vec<usize> = (0..self.servers.len())
+            .filter(|&index| {
+                self.servers[index].spec.name == name && self.servers[index].state != State::Failed
+            })
+            .collect();
+        for index in targets {
+            self.stop_server(index);
+        }
+    }
+
+    fn stop_server(&mut self, index: usize) {
+        {
+            let server = &mut self.servers[index];
+            if server.writer.is_some() {
+                if server.state == State::Ready {
+                    server.request("shutdown", Value::Null);
+                }
+                server.notify("exit", Value::Null);
+            }
+            // Queued messages are still written; the process is killed if it lingers.
+            server.writer = None;
+            if let Some(kill) = server.kill.take() {
+                tokio::spawn(async move {
+                    tokio::time::sleep(EXIT_WAIT).await;
+                    drop(kill);
+                });
+            }
+            server.state = State::Failed;
+            server.progress.clear();
+        }
+        // Events from the old process no longer match this server.
+        self.next_instance += 1;
+        self.servers[index].instance = self.next_instance;
+        self.forget_documents(index);
+        self.docs.retain(|_, doc| doc.server != index);
+        self.inflight.retain(|item| item.server != index);
+        self.by_root.retain(|_, server| *server != index);
+        let server = &self.servers[index];
+        self.emit(LspEvent::Stopped {
+            group: server.group.clone(),
+            name: server.spec.name.clone(),
+        });
     }
 
     /// Drop every server after [`Self::shutdown`] so a new folder can start its own.
@@ -2080,6 +2153,16 @@ mod tests {
     use crate::syntax::Language;
     use std::sync::Mutex;
 
+    /// The built-in servers for `language`'s files, in fallback order.
+    fn specs(language: Language) -> Vec<Arc<ServerSpec>> {
+        let file = if language == Language::Rust {
+            "x.rs"
+        } else {
+            "x.py"
+        };
+        registry::Registry::default().candidates(Path::new(file))
+    }
+
     /// One sender per launched fake server; a test sends raw messages "from the server" through it.
     type Injectors = Arc<Mutex<Vec<mpsc::UnboundedSender<Value>>>>;
 
@@ -2205,7 +2288,7 @@ mod tests {
         let (handle, mut events) = spawn(None);
         handle.send(LspRequest::Open {
             path,
-            language: Language::Python,
+            servers: specs(Language::Python),
             text: Rope::from_str("prrrrrint('Hello, world!')\n"),
             version: 1,
             workspace: dir,
@@ -2311,7 +2394,7 @@ mod tests {
         let (handle, mut events) = spawn(None);
         handle.send(LspRequest::Open {
             path: path.clone(),
-            language,
+            servers: specs(language),
             text: Rope::from_str(text),
             version: 1,
             workspace: dir,
@@ -2525,7 +2608,7 @@ mod tests {
     fn open(path: &Path, text: &str) -> LspRequest {
         LspRequest::Open {
             path: path.to_path_buf(),
-            language: Language::Rust,
+            servers: specs(Language::Rust),
             text: Rope::from_str(text),
             version: 1,
             workspace: PathBuf::from("/w"),
@@ -2791,7 +2874,7 @@ mod tests {
         let (handle, _events) = spawn_with(launch);
         handle.send(LspRequest::Open {
             path: PathBuf::from("/w/hello.py"),
-            language: Language::Python,
+            servers: specs(Language::Python),
             text: Rope::from_str("prrint('x')\n"),
             version: 1,
             workspace: PathBuf::from("/w"),
@@ -2843,8 +2926,8 @@ mod tests {
         assert_eq!(
             busy,
             LspEvent::Status {
-                group: "rust-analyzer",
-                name: "rust-analyzer",
+                group: "rust-analyzer".into(),
+                name: "rust-analyzer".into(),
                 status: ServerStatus::Busy("Indexing 40%".into())
             }
         );
@@ -2878,6 +2961,65 @@ mod tests {
         assert!(
             events.recv().await.is_none(),
             "the second file does not repeat the notice"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_shuts_a_server_down_and_the_next_open_starts_a_new_one() {
+        let (launch, mut seen, injectors) = fake_launcher(json!({"textDocumentSync": 2}));
+        let (handle, mut events) = spawn_with(launch);
+        handle.send(open(Path::new("/w/a.rs"), ""));
+        next(&mut seen, method("textDocument/didOpen")).await;
+        handle.send(LspRequest::Stop {
+            name: "rust-analyzer".into(),
+        });
+        next(&mut seen, method("shutdown")).await;
+        let stopped = next_event(&mut events, |event| {
+            matches!(event, LspEvent::Stopped { .. })
+        })
+        .await;
+        assert_eq!(
+            stopped,
+            LspEvent::Stopped {
+                group: "rust-analyzer".into(),
+                name: "rust-analyzer".into(),
+            }
+        );
+        // The App closes and reopens its files; a fresh server starts for them.
+        handle.send(LspRequest::Close {
+            path: PathBuf::from("/w/a.rs"),
+        });
+        handle.send(open(Path::new("/w/a.rs"), "fn main() {}\n"));
+        next(&mut seen, method("initialize")).await;
+        let opened = next(&mut seen, method("textDocument/didOpen")).await;
+        assert_eq!(opened["params"]["textDocument"]["text"], "fn main() {}\n");
+        assert_eq!(injectors.lock().unwrap().len(), 2, "a second process");
+        handle.shutdown(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn restart_looks_for_a_missing_program_again() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen_calls = calls.clone();
+        let missing: Launch = Arc::new(move |spec, _| {
+            seen_calls.lock().unwrap().push(spec.name.clone());
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        });
+        let (handle, mut events) = spawn_with(missing);
+        handle.send(open(Path::new("/w/a.rs"), ""));
+        next_event(&mut events, |event| matches!(event, LspEvent::Notice(_))).await;
+        handle.send(open(Path::new("/w/b.rs"), ""));
+        // Remembered as missing: the second file does not try again.
+        handle.send(LspRequest::Restart {
+            name: "rust-analyzer".into(),
+        });
+        handle.send(open(Path::new("/w/c.rs"), ""));
+        handle.shutdown(Duration::from_secs(5)).await;
+        while events.recv().await.is_some() {}
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["rust-analyzer", "rust-analyzer"],
+            "tried for a.rs, skipped for b.rs, tried again after Restart"
         );
     }
 }

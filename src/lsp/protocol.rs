@@ -5,16 +5,20 @@ use std::path::PathBuf;
 
 use ropey::Rope;
 
-use crate::syntax::Language;
+use std::sync::Arc;
+
+use super::registry::ServerSpec;
 
 /// `App` -> worker.
 #[derive(Debug, Clone)]
 pub enum LspRequest {
     /// A file tab became eligible for a language server. `workspace` is the
     /// directory duckx-code treats as the project; servers for files inside it use it as their root.
+    /// `servers` are the enabled servers for this file, most preferred first; the
+    /// first one that is installed is started.
     Open {
         path: PathBuf,
-        language: Language,
+        servers: Vec<Arc<ServerSpec>>,
         text: Rope,
         version: u64,
         workspace: PathBuf,
@@ -38,6 +42,15 @@ pub enum LspRequest {
     Reset,
     /// Settings the next `workspace/configuration` answer should use.
     Configure(crate::settings::LspPrefs),
+    /// Stop every running copy of the server called `name`. Its files are
+    /// forgotten until `App` opens them again.
+    Stop {
+        name: String,
+    },
+    /// [`LspRequest::Stop`], then look for missing programs again on the next open.
+    Restart {
+        name: String,
+    },
     /// Ask the server about one cursor position. `token` is echoed on the reply.
     Query {
         token: u64,
@@ -124,15 +137,17 @@ pub enum LspEvent {
     /// `group` names the server family (the first candidate in the registry);
     /// `name` is the program actually running.
     Status {
-        group: &'static str,
-        name: &'static str,
+        group: String,
+        name: String,
         status: ServerStatus,
     },
+    /// A server was stopped on request; its status is gone.
+    Stopped { group: String, name: String },
     /// Something the user should read in the status bar.
     Notice(String),
     /// What the server offered in `initialize`. Sent once, when it becomes ready.
     Features {
-        group: &'static str,
+        group: String,
         hover: bool,
         definition: bool,
         completion: bool,

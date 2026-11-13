@@ -308,6 +308,10 @@ pub enum SettingsAction {
     DeleteWordBack,
     /// Cursor moves inside a text row.
     Cursor(crate::command::LineMove),
+    /// `r` on a language server row: look for the program again and restart it.
+    Restart,
+    /// `e` on a custom language server row: show its fields.
+    Edit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

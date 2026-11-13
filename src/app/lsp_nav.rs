@@ -10,7 +10,6 @@ use super::App;
 use crate::lsp::position;
 use crate::lsp::protocol::{CompletionTrigger, JumpTarget, QueryKind};
 use crate::lsp::{self, LspRequest};
-use crate::syntax::Language;
 
 const JUMPS: usize = 64;
 const VISIBLE: usize = 8;
@@ -32,7 +31,7 @@ pub(super) struct Nav {
     resolve_token: Option<u64>,
     resolve_index: usize,
     pub(super) snippet: Option<SnippetSession>,
-    features: HashMap<&'static str, Features>,
+    features: HashMap<String, Features>,
     pub(super) actions: Option<ActionList>,
     pub(super) edit_token: Option<u64>,
     /// Set when a format reply should be written to disk.
@@ -530,7 +529,7 @@ impl App {
 
     pub(super) fn handle_features(
         &mut self,
-        group: &'static str,
+        group: String,
         hover: bool,
         definition: bool,
         completion: bool,
@@ -660,16 +659,13 @@ impl App {
         at: usize,
         kind: QueryKind,
     ) -> Result<u64, String> {
-        let Some(language) = Language::detect(path) else {
-            return Err("This file has no language server. Use search instead.".to_string());
-        };
-        let Some(server) = lsp::registry::servers_for(language).first() else {
+        let Some(group) = self.lsp_registry.group(path) else {
             return Err("This file has no language server. Use search instead.".to_string());
         };
         if !self.appearance.lsp.enabled {
             return Err("Language servers are off in Settings. Use search instead.".to_string());
         }
-        if let Some(features) = self.nav.features.get(server.name) {
+        if let Some(features) = self.nav.features.get(&group) {
             let (supported, name) = match kind {
                 QueryKind::Hover => (features.hover, "hover"),
                 QueryKind::Definition => (features.definition, "go to definition"),
@@ -936,7 +932,7 @@ impl App {
             self.message = Some("Save the file before using the language server".to_string());
             return token;
         };
-        if Language::detect(&path).is_none() {
+        if !self.lsp_registry.supports(&path) {
             self.message = Some("This file has no language server".to_string());
             return token;
         }
@@ -995,9 +991,8 @@ impl App {
 
     fn features_of(&self) -> Option<Features> {
         let path = self.path()?;
-        let language = Language::detect(path)?;
-        let group = lsp::registry::servers_for(language).first()?.name;
-        self.nav.features.get(group).cloned()
+        let group = self.lsp_registry.group(path)?;
+        self.nav.features.get(&group).cloned()
     }
 
     fn trigger_suffix(&self) -> Option<String> {
@@ -1364,7 +1359,7 @@ mod tests {
 
     fn ready(app: &mut App) {
         app.handle_lsp(LspEvent::Features {
-            group: "rust-analyzer",
+            group: "rust-analyzer".into(),
             hover: true,
             definition: true,
             completion: true,
@@ -1378,8 +1373,8 @@ mod tests {
             action_resolve: false,
         });
         app.handle_lsp(LspEvent::Status {
-            group: "rust-analyzer",
-            name: "rust-analyzer",
+            group: "rust-analyzer".into(),
+            name: "rust-analyzer".into(),
             status: ServerStatus::Ready,
         });
     }
@@ -1665,7 +1660,7 @@ mod tests {
     fn an_unsupported_feature_is_refused_before_a_request() {
         let mut app = app();
         app.handle_lsp(LspEvent::Features {
-            group: "rust-analyzer",
+            group: "rust-analyzer".into(),
             hover: false,
             definition: false,
             completion: false,

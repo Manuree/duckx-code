@@ -2,6 +2,7 @@
 //! [`LspEvent`]s; [`client`] runs the servers on a tokio task off the UI thread.
 
 pub mod client;
+pub mod detect;
 pub mod diagnostics;
 pub mod plain;
 pub mod position;

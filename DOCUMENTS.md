@@ -214,15 +214,27 @@ Each file with unsaved edits asks `Yes` / `No` / `Cancel` before the switch. `Ye
 
 Opening a file in a supported language starts its language server in the background. Nothing waits for it: typing, scrolling, and saving work the same while the server starts, indexes, or is missing. Every open file of that language in the same project shares one server.
 
-| Language | Server program (first one installed wins) | Project root marker |
+| Language | Server program (first one switched On and installed wins) | Project root marker |
 | :--- | :--- | :--- |
 | Rust | `rust-analyzer` | `Cargo.toml` |
-| Python | `pyright-langserver`, `basedpyright-langserver`, `pylsp` | `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `pyrightconfig.json` |
-| JavaScript / TypeScript / JSX / TSX | `typescript-language-server` | `tsconfig.json`, `jsconfig.json`, `package.json` |
+| Python | `pyright-langserver --stdio`, `basedpyright-langserver --stdio`, `pylsp`, `ruff server` | `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `pyrightconfig.json` (Ruff: `pyproject.toml`, `ruff.toml`, `.ruff.toml`) |
+| JavaScript / TypeScript / JSX / TSX | `typescript-language-server --stdio` | `tsconfig.json`, `jsconfig.json`, `package.json` |
 | Go | `gopls` | `go.work`, `go.mod` |
 | C / C++ | `clangd` | `compile_commands.json`, `compile_flags.txt`, `.clangd`, `CMakeLists.txt` |
+| Zig (`.zig`, `.zon`) | `zls` | `build.zig` |
+| Lua | `lua-language-server` | `.luarc.json`, `.luarc.jsonc` |
+| Ruby (`.rb`, `.rake`, `.gemspec`, `Gemfile`, `Rakefile`) | `ruby-lsp` | `Gemfile` |
+| PHP | `intelephense --stdio` | `composer.json` |
+| YAML | `yaml-language-server --stdio` | `.git` |
+| Shell (`.sh`, `.bash`, `.zsh`) | `bash-language-server start` | `.git` |
+| JSON / JSONC | `vscode-json-language-server --stdio` | `.git` |
+| CSS / SCSS / Less | `vscode-css-language-server --stdio` | `package.json`, `.git` |
+| HTML | `vscode-html-language-server --stdio` | `package.json`, `.git` |
+| Svelte | `svelteserver --stdio` | `svelte.config.js`, `package.json` |
+| Vue | `vue-language-server --stdio` | `vite.config.ts`, `vite.config.js`, `package.json` |
+| Swift | `sourcekit-lsp` | `Package.swift` |
 
-The program must be on `PATH`. On Windows, npm's `.cmd` launchers (such as `typescript-language-server.cmd`) are found too. `rustup component add rust-analyzer` installs the Rust server.
+Files are matched to a server by their extension (or, for `Gemfile` / `Rakefile`, their name), so a server needs no syntax colors to work. The program must be on `PATH`. On Windows, `PATHEXT` is used, so npm's `.cmd` launchers (such as `typescript-language-server.cmd`) and `.bat` files are found too. The program is started directly from the folder it was found in, never through a shell (a `.cmd` or `.bat` launcher is run by Windows' own `cmd.exe`, the only way Windows runs one). `rustup component add rust-analyzer` installs the Rust server; Settings → [Language servers](#language-servers) shows the install command of every server that is missing.
 
 * **Project root:** for a file inside the folder duckx-code was started from, the highest folder with a marker, up to that folder, or the folder itself when none has one. A Cargo or npm workspace therefore gets one server, not one per member. For a file outside it, the highest marked folder above the file, or the file's own folder.
 * **Python checking:** pyright and basedpyright are given `typeCheckingMode: basic` for open files. That reports an undefined name, such as a misspelled call. Left unset, those servers report syntax errors only. A `pyrightconfig.json` or `pyproject.toml` in the project still configures them. `pylsp` uses its own defaults.
@@ -230,6 +242,7 @@ The program must be on `PATH`. On Windows, npm's `.cmd` launchers (such as `type
 * **Cursor line:** the most severe diagnostic under the cursor (or else on the cursor line) is a full-width bar just above the status bar. The bar uses that level's color, the message is on the left, and the number of diagnostics in the file is on the right. The status bar itself keeps only the per-level counts.
 * **Completion:** the menu shows the symbol kind, the detail, and one line of documentation when the server sends it. Accepting a snippet selects the first placeholder. `Tab` and `Shift + Tab` move through the placeholders, and `Esc` leaves the snippet. `(` and `,` ask for the function signature and show it above the cursor.
 * **Semantic tokens:** when the server offers them, those colors paint over the tree-sitter colors, so a built-in type, a macro, or a lifetime can differ from a name the grammar could not tell apart. A syntax theme may set `documentation`, `macro`, `builtin`, `escape`, and `lifetime`. Missing keys fall back to comment, function, type, constant, and attribute.
+* **Restart:** `lsp-restart` stops the server of the focused file, looks for its program on `PATH` again, and starts it, reopening every file that used it. It also retries a server that was missing or gave up after crashing. `r` on a row of Settings → [Language servers](#language-servers) does the same for that server.
 * **Missing server:** a notice says `No language server found. Install … for code diagnostics` once per session, and the file stays plain.
 * **Crash:** a server that stops after it was ready is restarted up to 3 times, waiting 1, 2, then 4 seconds. A server that stops before it is ready, or after the third restart, stays stopped until duckx-code restarts. The status bar shows the last line it printed.
 * **Large files:** files over 8 MB are not sent to a server.
@@ -247,6 +260,7 @@ The program must be on `PATH`. On Windows, npm's `.cmd` launchers (such as `type
 | `Shift + Delete` or `delete-line` | Delete the current line, or every line the selection touches. |
 | `Ctrl + Alt + Up` / `Ctrl + Alt + Down` or `duplicate-line-up` / `duplicate-line-down` | Duplicate the current line, or the selected lines, above or below. |
 | `F7` or `format` | Ask the language server to format the file. |
+| `lsp-restart` | Restart the focused file's language server, looking for its program again. |
 | `Ctrl + .` or `code-action` | Show fixes and refactors at the cursor. `Up` / `Down` move, `Enter` applies, `Esc` closes. |
 | `F12` or `goto-definition` | Jump to where that symbol is defined. When the server returns several places, the first one is opened and a notice says how many there were. |
 | `Shift + F12` or `goto-references` | List every place that symbol is used, including its declaration when the server sends it. One place jumps there. Several places open a list: `Up` / `Down` move, `Enter` or `Tab` jumps, `Esc` closes. |
@@ -325,6 +339,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 | `duplicate-line-down` | — | Duplicate the current line or the selected lines below | `Ctrl + Alt + Down` |
 | `rename-symbol` | `<name>` | Rename the symbol under the cursor | `Shift + F2` |
 | `format` | — | Format the current file | `F7` |
+| `lsp-restart` | — | Restart this file's language server and look for it on `PATH` again. See [Language servers & diagnostics](#language-servers--diagnostics). | — |
 | `code-action` | — | Show fixes and refactors at the cursor | `Ctrl + .` |
 | `jump-back` | — | Return to the place from before the last definition or references jump | `Ctrl + O` |
 | `jump-forward` | — | Go forward again after jump-back | `Ctrl + Shift + O` |
@@ -642,7 +657,7 @@ The choice is written to `settings.json`:
   "syntax_theme": "tokyo-night",
   "editor": { "tab_width": 4, "indent_with_spaces": true, "line_ending": "auto", "match_brackets": true, "colorize_brackets": true },
   "files": { "trim_trailing_space": false, "final_newline": false },
-  "lsp": { "enabled": true, "check_on_save": true, "format_on_save": false, "python": "basic" },
+  "lsp": { "enabled": true, "check_on_save": true, "format_on_save": false, "python": "basic", "servers": { "pylsp": false }, "custom": [ { "name": "taplo", "command": "taplo", "args": ["lsp", "stdio"], "extensions": ["toml"], "language_id": "toml", "root_markers": [".taplo.toml"] } ] },
   "ai": { "enabled": true, "provider": "ollama", "server": "", "model": "", "auto_approve": false, "streaming": true, "context_size": "16384", "think": true, "max_tokens": "", "request_timeout": 1800, "retries": 3, "openrouter_app_name": "duckx-code", "openrouter_referer": "https://github.com/Manuree/duckx-code" }
 }
 ```
@@ -672,6 +687,42 @@ A color theme may add a `diagnostics` section with `error`, `warning`, `info`, a
 | Python checking | Off, Basic, Standard | How strictly pyright checks an open Python file. Basic reports an undefined name. |
 
 With Language server Off, the other three rows are hidden; they keep their values and return when it is turned On.
+
+### Language servers
+
+**Language servers** comes right after Language and lists every server, built-in first, then the ones you added. With Language server Off the whole section is hidden. Opening Settings looks for each program on `PATH` in the background, once per session, so the page opens at once and each row fills in when the search answers (`looking on PATH…` until then).
+
+Each server takes two lines. The first has a dot, the server name, the file extensions it is used for, and `On` / `Off`. The second says where the program was found, or `<program> not found on PATH · <install command>`, then how it is doing: `starting`, `running`, what it is busy with, `stopped: <reason>`, or `off`.
+
+| Dot | Meaning |
+| :--- | :--- |
+| green `●` | Running (ready or busy) |
+| yellow `●` | Starting |
+| dim `●` | Installed, not running now |
+| hollow `○` | Not found on `PATH` yet, or a custom server without a command |
+| red `●` | Stopped (crashed too often, or failed to start) |
+
+| Keys | Action |
+| :--- | :--- |
+| `Enter` / `Right` | Switch the server On or Off and save. Off stops it at once; its files go to the next server for them that is On and installed (pyright → basedpyright → pylsp → Ruff for Python), or stay plain. |
+| `r` | Look for the program again and restart the server. A server that was missing or gave up is tried again. |
+| `e` | On a custom server, show its fields below. A built-in cannot be edited. |
+| `Delete` | On a built-in, turn it back On. On a custom server, press twice to delete it; any other key in between cancels. |
+
+When two servers handle the same extension, a custom server comes before the built-ins, and among the rest the list order decides: the first one that is On and installed is used.
+
+**Add server** asks for a name (at most 40 characters, not a built-in's name and not used by another custom server). The new server's fields then show below it, the same way a named provider's do under AI. They are shown only while a custom server is being edited:
+
+| Field | Typed as | Notes |
+| :--- | :--- | :--- |
+| Name | text | Renaming keeps its On/Off choice. |
+| Command | program name or full path | Required. Found on `PATH` (with `PATHEXT` on Windows). |
+| Arguments | split at spaces | `"…"` or `'…'` keeps a space inside one argument; a backslash stays as it is, so Windows paths need no escaping. An unclosed quote is refused. |
+| File extensions | comma-separated | Required, at least one. Dots and case are dropped: `.TOML, tml` → `toml, tml`. |
+| LSP language id | text | `languageId` sent with each file. Empty uses the first extension. |
+| Root markers | comma-separated | Files or folders that mark the project root, such as `.taplo.toml`. Empty uses the folder duckx-code was started from, or the file's own folder for a file outside it. |
+
+A custom server is used once it has a command and an extension. Changing its command or arguments restarts it. At most 16 custom servers are kept. They are saved under `lsp.custom`, and a server switched Off is saved under `lsp.servers` as `"name": false` (On is the default and is not written). Both keys are optional, so an older `settings.json` loads unchanged; a hand-edited custom server with a blank, repeated, or built-in name is skipped with a notice.
 
 **AI** holds the assistant. `Enter` on a list row (Assistant, Provider, Streaming, Auto-approve tools, Thinking) opens its list. `Enter` on a text row types that value with the same line keys as the command bar: `Left` / `Right` move by letter, `Ctrl + Left` / `Ctrl + Right` by word, `Home` / `End` (or `Ctrl + A` / `Ctrl + E`) jump to the ends, `Backspace` / `Delete` remove a letter, `Ctrl + Backspace` or `Alt + Backspace` removes a word, `Enter` keeps the value, and `Esc` drops the draft. A long value scrolls sideways to keep the cursor on screen. A number that is out of range keeps the draft open and says the allowed range. `Del` restores the highlighted row. Rows that do not apply are hidden, not greyed, and appear as soon as the choice they wait for is made: Thinking shows for Ollama, the two OpenRouter rows for OpenRouter, the model rows (Model context, Model max output, Model tools, Detected limits) once a Model is set, Keep tokens and Compact buffer while Auto compact is On, and the named-provider rows (Provider name, Provider kind, API key variable, Saved models, Delete provider) while a named provider is selected. With Assistant Off, only the Assistant row is shown. Hidden rows keep their values, and the arrows skip them. Every choice is written to `settings.json` under `ai`.
 

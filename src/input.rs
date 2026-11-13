@@ -394,6 +394,8 @@ fn route_settings(event: &Event, capturing: bool, drafting: bool) -> Option<Sema
         KeyCode::Enter | KeyCode::Right => SettingsAction::Enter,
         KeyCode::Home | KeyCode::PageUp => SettingsAction::First,
         KeyCode::End | KeyCode::PageDown => SettingsAction::Last,
+        KeyCode::Char('r' | 'R') if !ctrl && !alt => SettingsAction::Restart,
+        KeyCode::Char('e' | 'E') if !ctrl && !alt => SettingsAction::Edit,
         _ => return None,
     };
     Some(SemanticAction::Settings(action))
