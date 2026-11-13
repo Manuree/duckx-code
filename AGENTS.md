@@ -8,7 +8,7 @@ Before making structural, UX, or architectural changes, always consult:
 * [`ARCHITECTURE.md`](./ARCHITECTURE.md) — System data flow, component boundaries, concurrency model, and Rust crate stack.
 * [`DESIGN.md`](./DESIGN.md) — Product philosophy, 75% keyboard layout ergonomics, Shift-driven selection rules, and Semantic Command Bar UX.
 * [`DOCUMENTS.md`](./DOCUMENTS.md) — User reference of every implemented keybinding and Command Bar command, grouped by category. **Update it in the same change** whenever you add, remove, or alter a keybinding (`src/input.rs`) or a command (`src/command.rs`), and move items out of its "Planned" section once they ship.
-* [`docs/TERMINAL-KEYS.md`](./docs/TERMINAL-KEYS.md) — Shortcuts that may not reach the editor in some terminals or OSes, with fallbacks. Check a new default chord against it.
+* [`docs/TERMINAL-KEYS.md`](./docs/TERMINAL-KEYS.md) — Which shortcuts work in which terminal (matrix), the terminal settings that help, and fallbacks. Check a new default chord against it.
 
 ---
 
@@ -39,6 +39,7 @@ Before making structural, UX, or architectural changes, always consult:
    * **R5 Settings rows:** a row that does not apply is hidden, not greyed. Add its condition to `AiPrefs::visible` / `LspPrefs::visible` (read through `App::setting_visible`) with a test; keep `Page::row` an index into `section().items` and move it with the `Page` methods that skip hidden rows.
    * **R7 Brackets:** bracket highlights reach the editor only through `viewport::Decorations` and keep its documented draw order. Colors come from theme keys (`brackets`, `bracket_error`, `editor.bracket_match`) with fallbacks, never hard-coded. Every bracket scan is bounded (`brackets::MATCH_SCAN_CHARS`, `COLOR_LOOKBACK_LINES`, `COLOR_SCAN_CHARS`) and cached on the tab; never scan the whole file per frame. `<>` is not a bracket.
    * **R8 Language servers:** route files to servers only through `lsp::registry::Registry` (by extension, custom first, first enabled and installed wins); never pick a server by grammar. Look programs up only with `lsp::detect::find_program`, in a background job, and spawn the resolved path without a shell (keep `CREATE_NO_WINDOW`). A new built-in needs args, language ids, root markers, and an install hint, and stays On by default. New settings keys stay optional so older `settings.json` files load.
+   * **R9 Terminal keys:** never change a binding to work around a terminal. Full key reporting is turned on in `main.rs::setup_terminal` (kitty protocol, else `modifyOtherKeys`) and undone only if it was turned on; sequences crossterm cannot parse are decoded in `term_keys::decode_csi` through the hook in `vendor/crossterm` (see `vendor/README.md`). Decoded keys must equal what crossterm gives for the same key elsewhere. Update the matrix in `docs/TERMINAL-KEYS.md` when a shortcut is added or a terminal is checked.
    * **Workspace walks:** walk the workspace only through `services::tree::walker(root, show_hidden)` so `.gitignore`, the Show hidden files setting (`FilePrefs::show_hidden`), and the always-hidden `.git` apply everywhere. Pass the setting into the job; do not build a `WalkBuilder` by hand.
 
 ---
@@ -55,6 +56,7 @@ Before making structural, UX, or architectural changes, always consult:
   * Ensure a panic hook restores terminal state (`disable_raw_mode`, `LeaveAlternateScreen`) before printing panic backtraces so the user's terminal is never left corrupted.
 * **Terminal Compatibility:**
   * In `crossterm`, enable `EnableBracketedPaste` and attempt `PushKeyboardEnhancementFlags` where supported, but always provide fallback key matches (`F1` and `Ctrl + ;` alongside `Shift + Space`) so Windows Terminal, Alacritty, WezTerm, and standard terminals all work out of the box.
+  * Without the kitty protocol, `main.rs` turns on xterm `modifyOtherKeys` and `term_keys` decodes its `CSI 27 ; mod ; code ~` keys. crossterm is vendored for that hook (`vendor/crossterm`, `[patch.crates-io]`); keep the patch to the marked `duckx-code patch` lines. See DESIGN.md R9.
   * Windows gets no `Event::Paste` from crossterm; a paste arrives as key presses. Route terminal events through `key_burst::KeyBurst` (as `main.rs` does) so a key flood becomes one `Event::Paste`, and handle `Event::Paste` in every new text input instead of relying on per-key handling. See DESIGN.md R6.
 * **Testing:**
   * Write unit tests for `buffer.rs` (cursor movement, `Shift` selection spans, grapheme boundaries, Undo/Redo transactions) and `command.rs` (prefix matching and `Top-1 Recent` ordering) independent of the terminal UI.

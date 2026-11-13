@@ -70,6 +70,23 @@ impl Layout {
     }
 }
 
+/// The US key under a non-ASCII character another layout types: `ส` (Thai `l` key)
+/// gives `l`, and a shifted character gives the shifted US one. Used for shortcuts
+/// pressed with a non-US layout active, which some terminals report as the typed
+/// character. `None` for ASCII and for characters no layout types.
+pub fn us_key(c: char) -> Option<char> {
+    if c.is_ascii() {
+        return None;
+    }
+    LAYOUTS
+        .iter()
+        .filter(|layout| !std::ptr::eq(**layout, &US))
+        .find_map(|layout| {
+            let (index, shifted) = layout.key_of(c)?;
+            US.char_at(index, shifted)
+        })
+}
+
 /// The layout `id` names.
 pub fn by_id(id: &str) -> Option<&'static Layout> {
     LAYOUTS.iter().copied().find(|layout| layout.id == id)

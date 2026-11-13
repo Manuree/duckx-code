@@ -133,6 +133,7 @@ src/
 ├── agent/             # Assistant protocol, HTTP worker, path check, edits
 ├── action.rs          # SemanticAction and Focus enums
 ├── input.rs           # Focus-aware Input Router (KeyEvent -> SemanticAction)
+├── term_keys.rs       # modifyOtherKeys request + decoder for keys crossterm drops (R9)
 ├── buffer.rs          # Rope wrapper, Selection (anchor/head), and Undo/Redo history
 ├── command.rs         # Command registry, prefix matcher, and Top-1 Recent tracker
 ├── settings.rs        # Settings page sections and row movement

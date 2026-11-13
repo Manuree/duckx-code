@@ -3,6 +3,7 @@ use std::io::{self, Stdout};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::{
@@ -31,7 +32,7 @@ use duckx_code::{
         git,
         watch::{self, RootWatch},
     },
-    session, ui,
+    session, term_keys, ui,
 };
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
@@ -57,15 +58,26 @@ fn setup_terminal() -> io::Result<Tui> {
         SetCursorStyle::SteadyBlock
     )?;
 
-    if supports_keyboard_enhancement().unwrap_or(false) {
-        let _ = execute!(
+    // Ask for every modifier: the kitty keyboard protocol when the terminal answers its
+    // query (always "no" on Windows, where console input records already carry them),
+    // otherwise xterm's modifyOtherKeys, which other terminals ignore. See term_keys.rs.
+    term_keys::install();
+    let kitty = supports_keyboard_enhancement().unwrap_or(false)
+        && execute!(
             stdout,
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                     | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
             )
-        );
+        )
+        .is_ok();
+    KITTY_KEYS.store(kitty, Ordering::SeqCst);
+    let term = env::var("TERM").ok();
+    if term_keys::wants_modify_other_keys(kitty, term.as_deref()) {
+        let sent = io::Write::write_all(&mut stdout, term_keys::MODIFY_OTHER_KEYS_ON.as_bytes())
+            .and_then(|()| io::Write::flush(&mut stdout));
+        MODIFY_OTHER_KEYS.store(sent.is_ok(), Ordering::SeqCst);
     }
 
     let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
@@ -76,7 +88,15 @@ fn setup_terminal() -> io::Result<Tui> {
 
 fn restore_terminal() -> io::Result<()> {
     let mut stdout = io::stdout();
-    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+    // Undo only what setup turned on: a terminal without the kitty protocol may read
+    // the pop sequence (`CSI < 1 u`) as "restore cursor".
+    if KITTY_KEYS.swap(false, Ordering::SeqCst) {
+        let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+    }
+    if MODIFY_OTHER_KEYS.swap(false, Ordering::SeqCst) {
+        let _ = io::Write::write_all(&mut stdout, term_keys::MODIFY_OTHER_KEYS_OFF.as_bytes());
+        let _ = io::Write::flush(&mut stdout);
+    }
     let _ = execute!(
         stdout,
         SetCursorStyle::DefaultUserShape,
@@ -87,6 +107,12 @@ fn restore_terminal() -> io::Result<()> {
     let _ = disable_raw_mode();
     Ok(())
 }
+
+/// Set by `setup_terminal` when it pushed kitty keyboard flags, so quit and the panic
+/// hook pop them only then.
+static KITTY_KEYS: AtomicBool = AtomicBool::new(false);
+/// Set by `setup_terminal` when it turned on xterm's modifyOtherKeys.
+static MODIFY_OTHER_KEYS: AtomicBool = AtomicBool::new(false);
 
 /// Name the terminal shows on this tab while the editor is open.
 const APP_TITLE: &str = env!("CARGO_PKG_NAME");

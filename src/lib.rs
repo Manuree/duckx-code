@@ -20,6 +20,7 @@ pub mod session;
 pub mod settings;
 pub mod snippet;
 pub mod syntax;
+pub mod term_keys;
 pub mod theme;
 pub mod ui;
 pub mod utf8;

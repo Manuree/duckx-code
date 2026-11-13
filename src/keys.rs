@@ -643,10 +643,72 @@ impl KeyMap {
 /// The action for a reserved chord or a bound command chord.
 pub fn dispatch(key: &KeyEvent, map: &KeyMap) -> Option<SemanticAction> {
     let chord = Chord::from_key(key)?;
-    if let Some(action) = reserved_action(chord) {
-        return Some(action);
+    let find = |chord: Chord| {
+        reserved_action(chord)
+            .or_else(|| map.lookup(chord))
+            .or_else(|| unshifted(chord).and_then(|chord| map.lookup(chord)))
+    };
+    find(chord).or_else(|| on_us_keys(chord).and_then(find))
+}
+
+/// `Ctrl + ห` (Thai layout) as `Ctrl + D`: the same physical key on the US layout.
+/// The kitty protocol, `modifyOtherKeys`, and Windows report the character of the
+/// active layout. Only with `Ctrl` or `Alt`, so typing is never a shortcut.
+fn on_us_keys(chord: Chord) -> Option<Chord> {
+    let Kind::Char(c) = chord.kind else {
+        return None;
+    };
+    if !chord.ctrl && !chord.alt {
+        return None;
     }
-    map.lookup(chord)
+    let us = crate::keyboard_layout::us_key(c)?;
+    Some(Chord {
+        kind: Kind::Char(us.to_ascii_lowercase()),
+        shift: chord.shift || us.is_ascii_uppercase(),
+        ..chord
+    })
+}
+
+/// `Ctrl + }` as `Ctrl + Shift + ]`, and so on for the US keyboard's shifted symbols.
+/// The kitty protocol (with alternate keys) and xterm's `modifyOtherKeys` report the
+/// shifted character, while bindings name the key under it. Tried only after an
+/// exact match, so a binding such as `Alt + _` still wins.
+fn unshifted(chord: Chord) -> Option<Chord> {
+    const PAIRS: &[(char, char)] = &[
+        ('~', '`'),
+        ('!', '1'),
+        ('@', '2'),
+        ('#', '3'),
+        ('$', '4'),
+        ('%', '5'),
+        ('^', '6'),
+        ('&', '7'),
+        ('*', '8'),
+        ('(', '9'),
+        (')', '0'),
+        ('_', '-'),
+        ('+', '='),
+        ('{', '['),
+        ('}', ']'),
+        ('|', '\\'),
+        (':', ';'),
+        ('"', '\''),
+        ('<', ','),
+        ('>', '.'),
+        ('?', '/'),
+    ];
+    let Kind::Char(c) = chord.kind else {
+        return None;
+    };
+    if !chord.ctrl && !chord.alt {
+        return None;
+    }
+    let base = PAIRS.iter().find(|(shifted, _)| *shifted == c)?.1;
+    Some(Chord {
+        kind: Kind::Char(base),
+        shift: true,
+        ..chord
+    })
 }
 
 fn reserved_action(chord: Chord) -> Option<SemanticAction> {
@@ -713,6 +775,57 @@ pub fn sidebar_accepts(action: &SemanticAction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shifted_symbols_reach_the_shift_binding() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let map = KeyMap::defaults();
+        let ctrl = KeyModifiers::CONTROL;
+        // The kitty protocol reports Ctrl + Shift + ] as Ctrl + } (Shift folded in);
+        // xterm's modifyOtherKeys keeps Shift.
+        for modifiers in [ctrl, ctrl | KeyModifiers::SHIFT] {
+            assert_eq!(
+                dispatch(&KeyEvent::new(KeyCode::Char('}'), modifiers), &map),
+                Some(SemanticAction::MatchBracket { extend: true })
+            );
+        }
+        assert_eq!(
+            dispatch(&KeyEvent::new(KeyCode::Char('Z'), ctrl), &map),
+            Some(SemanticAction::Redo)
+        );
+        // An exact binding still wins over the shifted form.
+        assert_eq!(
+            dispatch(&KeyEvent::new(KeyCode::Char('_'), KeyModifiers::ALT), &map),
+            Some(SemanticAction::ConvertKeyboard)
+        );
+        // Plain typing is never a shortcut.
+        assert_eq!(
+            dispatch(
+                &KeyEvent::new(KeyCode::Char('}'), KeyModifiers::SHIFT),
+                &map
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn shortcuts_work_with_the_thai_layout_active() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let map = KeyMap::defaults();
+        let ctrl = KeyModifiers::CONTROL;
+        let on = |c: char, modifiers| dispatch(&KeyEvent::new(KeyCode::Char(c), modifiers), &map);
+        // Kedmanee: ห is the `s` key, ผ `z`, แ `c`, ั `y`, ย `p`.
+        assert_eq!(on('ห', ctrl), Some(SemanticAction::Save));
+        assert_eq!(on('ผ', ctrl), Some(SemanticAction::Undo));
+        assert_eq!(on('แ', ctrl), Some(SemanticAction::Copy));
+        assert_eq!(on('ั', ctrl), Some(SemanticAction::Redo));
+        assert_eq!(on('ย', ctrl), Some(SemanticAction::OpenFilePicker));
+        assert_eq!(on('ว', ctrl), Some(SemanticAction::OpenCommandBar));
+        assert_eq!(on('ๆ', ctrl), Some(SemanticAction::Quit));
+        // Typing Thai is never a shortcut.
+        assert_eq!(on('ห', KeyModifiers::NONE), None);
+        assert_eq!(on('ฆ', KeyModifiers::SHIFT), None);
+    }
 
     #[test]
     fn default_chords_do_not_overlap_and_round_trip() {
