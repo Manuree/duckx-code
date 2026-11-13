@@ -8,6 +8,7 @@ Before making structural, UX, or architectural changes, always consult:
 * [`ARCHITECTURE.md`](./ARCHITECTURE.md) — System data flow, component boundaries, concurrency model, and Rust crate stack.
 * [`DESIGN.md`](./DESIGN.md) — Product philosophy, 75% keyboard layout ergonomics, Shift-driven selection rules, and Semantic Command Bar UX.
 * [`DOCUMENTS.md`](./DOCUMENTS.md) — User reference of every implemented keybinding and Command Bar command, grouped by category. **Update it in the same change** whenever you add, remove, or alter a keybinding (`src/input.rs`) or a command (`src/command.rs`), and move items out of its "Planned" section once they ship.
+* [`docs/TERMINAL-KEYS.md`](./docs/TERMINAL-KEYS.md) — Shortcuts that may not reach the editor in some terminals or OSes, with fallbacks. Check a new default chord against it.
 
 ---
 

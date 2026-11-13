@@ -3,6 +3,8 @@
 This is the user reference for every keybinding and Command Bar command that **duckx-code currently supports**. [Planned](#12-planned) lists designed behavior that is not built yet.
 
 > For the design rationale behind these bindings, see [`DESIGN.md`](./DESIGN.md).
+>
+> Some shortcuts cannot reach duckx-code in every terminal (for example `Shift + Space`, `Shift + Enter`, `Ctrl + Shift + Z`, or `Ctrl + Alt + arrows`). [`docs/TERMINAL-KEYS.md`](./docs/TERMINAL-KEYS.md) lists them with the fallback to use.
 
 ## Getting Started
 
