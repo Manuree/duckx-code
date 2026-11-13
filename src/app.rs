@@ -5071,6 +5071,10 @@ impl App {
             CommandId::GotoDefinition => self.goto_definition(),
             CommandId::GotoReferences => self.goto_references(),
             CommandId::MatchBracket => self.match_bracket(false),
+            CommandId::SelectBracket => self.match_bracket(true),
+            CommandId::FindNext => self.find_adjacent(true)?,
+            CommandId::FindPrevious => self.find_adjacent(false)?,
+            CommandId::Pane => self.start_pane_select(),
             CommandId::Complete => self.complete_now(),
             CommandId::Comment => self.toggle_comment(),
             CommandId::ConvertKeyboard => self.handle(SemanticAction::ConvertKeyboard),
@@ -5119,6 +5123,12 @@ impl App {
             }
             CommandId::Agent => self.toggle_agent(),
             CommandId::AgentNew => self.clear_agent_chat(),
+            CommandId::AgentTaller | CommandId::AgentShorter => {
+                if self.focus() != Focus::Agent {
+                    self.focus_agent();
+                }
+                self.resize_agent(id == CommandId::AgentTaller);
+            }
             CommandId::FilePicker => self.open_file_picker(),
             CommandId::Workspace => self.request_workspace(arg.unwrap_or(""))?,
             CommandId::Diff => self.toggle_diff(),
@@ -8370,6 +8380,55 @@ mod tests {
     }
 
     #[test]
+    fn agent_taller_and_shorter_commands_open_the_panel_and_resize_it() {
+        let mut app = App::new(Buffer::from_text(""), None);
+        app.set_screen_size(80, 40);
+        run(&mut app, "agent-taller");
+        assert_eq!(app.focus(), Focus::Agent);
+        let grown = app.agent_rows();
+        app.agent.focused = false;
+        run(&mut app, "agent-shorter");
+        assert_eq!(app.focus(), Focus::Agent);
+        assert_eq!(app.agent_rows(), grown - 1);
+        assert_eq!(app.recent_command, Some(CommandId::AgentShorter));
+    }
+
+    #[test]
+    fn find_next_and_previous_commands_step_through_matches() {
+        let mut app = App::new(Buffer::from_text("one two one"), None);
+        run(&mut app, "find one");
+        assert_eq!(app.message.as_deref(), Some("1 of 2"));
+        run(&mut app, "find-next");
+        assert_eq!(app.message.as_deref(), Some("2 of 2"));
+        assert_eq!(app.recent_command, Some(CommandId::FindNext));
+        run(&mut app, "find-previous");
+        assert_eq!(app.message.as_deref(), Some("1 of 2"));
+
+        let mut fresh = App::new(Buffer::from_text("one"), None);
+        run(&mut fresh, "find-next");
+        assert_eq!(fresh.message.as_deref(), Some("Nothing to find"));
+    }
+
+    #[test]
+    fn select_bracket_command_extends_like_ctrl_shift_bracket() {
+        let mut app = App::new(Buffer::from_text("f(a)"), None);
+        app.buffer_mut().move_to(1, false);
+        run(&mut app, "select-bracket");
+        assert_eq!(
+            app.buffer().selection(),
+            crate::buffer::Selection { anchor: 1, head: 3 }
+        );
+    }
+
+    #[test]
+    fn pane_command_enters_pane_mode_like_ctrl_w() {
+        let mut app = App::new(Buffer::from_text(""), None);
+        run(&mut app, "pane");
+        assert!(app.pane_select.is_some());
+        assert_eq!(app.recent_command, Some(CommandId::Pane));
+    }
+
+    #[test]
     fn explorer_command_toggles_like_ctrl_b() {
         let mut app = App::new(Buffer::new(), None);
         run(&mut app, "explorer");
@@ -9505,12 +9564,17 @@ mod tests {
                 "copy-name",
                 "copy-path",
                 "copy-relative-path",
+                "find-next",
+                "find-previous",
                 "reveal",
                 "explorer",
                 "wider",
                 "narrower",
                 "hidden",
+                "pane",
                 "setting",
+                "agent-taller",
+                "agent-shorter",
                 "about",
                 "quit"
             ]

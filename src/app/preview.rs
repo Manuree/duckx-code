@@ -102,6 +102,9 @@ fn allowed_in_preview(id: CommandId) -> bool {
             | CommandId::About
             | CommandId::Agent
             | CommandId::AgentNew
+            | CommandId::AgentTaller
+            | CommandId::AgentShorter
+            | CommandId::Pane
             | CommandId::FilePicker
             | CommandId::Workspace
             | CommandId::NewFile
