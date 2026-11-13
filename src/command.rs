@@ -128,6 +128,18 @@ pub enum CommandId {
     Reload,
     /// Show or set the encoding the next save writes.
     Encoding,
+    /// Jump to the next match of the last search.
+    FindNext,
+    /// Jump to the previous match of the last search.
+    FindPrevious,
+    /// Extend the selection to the bracket paired with the one under the cursor.
+    SelectBracket,
+    /// Enter PANE mode: arrows pick a window, `Enter` focuses it.
+    Pane,
+    /// Open the assistant panel and make it one row taller.
+    AgentTaller,
+    /// Open the assistant panel and make it one row shorter.
+    AgentShorter,
 }
 
 #[derive(Debug)]
@@ -159,6 +171,24 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "find",
         description: "Find text in the file or explorer",
         shortcut: "Ctrl+F",
+        arg: None,
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
+        id: CommandId::FindNext,
+        name: "find-next",
+        description: "Jump to the next match of the last search",
+        shortcut: "F3",
+        arg: None,
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
+        id: CommandId::FindPrevious,
+        name: "find-previous",
+        description: "Jump to the previous match of the last search",
+        shortcut: "Shift+F3",
         arg: None,
         editor: true,
         explorer: true,
@@ -353,6 +383,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: false,
     },
     CommandSpec {
+        id: CommandId::Pane,
+        name: "pane",
+        description: "Pick a window with the arrows (PANE mode), Enter focuses it",
+        shortcut: "Ctrl+W",
+        arg: None,
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
         id: CommandId::DiagnosticNext,
         name: "diagnostic-next",
         description: "Jump to the next error or warning in this file",
@@ -402,6 +441,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "match-bracket",
         description: "Jump to the matching bracket",
         shortcut: "Ctrl+]",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::SelectBracket,
+        name: "select-bracket",
+        description: "Select through the matching bracket",
+        shortcut: "Ctrl+Shift+]",
         arg: None,
         editor: true,
         explorer: false,
@@ -668,6 +716,24 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: false,
     },
     CommandSpec {
+        id: CommandId::AgentTaller,
+        name: "agent-taller",
+        description: "Open the assistant panel one row taller",
+        shortcut: "Alt+Up",
+        arg: None,
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
+        id: CommandId::AgentShorter,
+        name: "agent-shorter",
+        description: "Open the assistant panel one row shorter",
+        shortcut: "Alt+Down",
+        arg: None,
+        editor: true,
+        explorer: true,
+    },
+    CommandSpec {
         id: CommandId::About,
         name: "about",
         description: "Show the version and logo",
@@ -768,6 +834,8 @@ fn importance(id: CommandId) -> u16 {
         CommandId::FilePicker => 10,
         CommandId::Workspace => 15,
         CommandId::Find => 20,
+        CommandId::FindNext => 212,
+        CommandId::FindPrevious => 214,
         CommandId::Replace => 30,
         CommandId::GotoLine => 40,
         CommandId::Save => 50,
@@ -784,6 +852,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::GotoDefinition => 110,
         CommandId::GotoReferences => 112,
         CommandId::MatchBracket => 115,
+        CommandId::SelectBracket => 274,
         CommandId::Complete => 120,
         CommandId::Hover => 130,
         CommandId::Format => 140,
@@ -823,6 +892,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::DuplicateLineDown => 317,
         CommandId::TabPrev => 320,
         CommandId::TabNext => 330,
+        CommandId::Pane => 335,
         CommandId::SplitRight => 340,
         CommandId::SplitDown => 350,
         CommandId::Close => 360,
@@ -831,13 +901,15 @@ fn importance(id: CommandId) -> u16 {
         CommandId::Settings => 390,
         CommandId::Agent => 392,
         CommandId::AgentNew => 393,
-        CommandId::About => 395,
+        CommandId::AgentTaller => 394,
+        CommandId::AgentShorter => 395,
+        CommandId::About => 397,
         CommandId::Quit => 400,
     }
 }
 
-/// Sort key on one surface. In the explorer the copy commands follow the file
-/// commands (`select` … `new-folder`), so `move`, `delete`, and `rename` stay on the
+/// Sort key on one surface. In the explorer the copy commands and `find-next` /
+/// `find-previous` follow the file commands (`select` … `new-folder`), so `move`, `delete`, and `rename` stay on the
 /// first page of hints in FILE mode. Everywhere else this is [`importance`].
 fn surface_rank(id: CommandId, context: CommandContext) -> u32 {
     let base = u32::from(importance(id)) * 10;
@@ -845,6 +917,8 @@ fn surface_rank(id: CommandId, context: CommandContext) -> u32 {
         (CommandContext::Explorer, CommandId::CopyName) => 2525,
         (CommandContext::Explorer, CommandId::CopyPath) => 2526,
         (CommandContext::Explorer, CommandId::CopyRelativePath) => 2527,
+        (CommandContext::Explorer, CommandId::FindNext) => 2528,
+        (CommandContext::Explorer, CommandId::FindPrevious) => 2529,
         _ => base,
     }
 }
@@ -1257,6 +1331,8 @@ mod tests {
                 "rename-symbol",
                 "jump-back",
                 "jump-forward",
+                "find-next",
+                "find-previous",
                 "rename",
                 "new-file",
                 "diff",
@@ -1270,6 +1346,7 @@ mod tests {
                 "lsp-restart",
                 "select-all",
                 "deselect",
+                "select-bracket",
                 "indent",
                 "outdent",
                 "move-line-up",
@@ -1279,6 +1356,7 @@ mod tests {
                 "duplicate-line-down",
                 "tab-prev",
                 "tab-next",
+                "pane",
                 "split-right",
                 "split-down",
                 "close",
@@ -1287,6 +1365,8 @@ mod tests {
                 "setting",
                 "agent",
                 "clear",
+                "agent-taller",
+                "agent-shorter",
                 "about",
                 "quit",
             ]
@@ -1305,12 +1385,17 @@ mod tests {
                 "copy-name",
                 "copy-path",
                 "copy-relative-path",
+                "find-next",
+                "find-previous",
                 "reveal",
                 "explorer",
                 "wider",
                 "narrower",
                 "hidden",
+                "pane",
                 "setting",
+                "agent-taller",
+                "agent-shorter",
                 "about",
                 "quit"
             ]
@@ -1334,12 +1419,17 @@ mod tests {
                 "copy-name",
                 "copy-path",
                 "copy-relative-path",
+                "find-next",
+                "find-previous",
                 "reveal",
                 "explorer",
                 "wider",
                 "narrower",
                 "hidden",
+                "pane",
                 "setting",
+                "agent-taller",
+                "agent-shorter",
                 "about",
                 "quit"
             ]
@@ -1394,7 +1484,7 @@ mod tests {
         assert_eq!(names("close", None), ["close", "close-view", "close-all"]);
         assert_eq!(names("clean", None), ["close-view"]);
         assert_eq!(names("clean-view", None), ["close-view"]);
-        assert_eq!(names("find", None), ["find"]);
+        assert_eq!(names("find", None), ["find", "find-next", "find-previous"]);
         assert_eq!(names("diff", None), ["diff"]);
         assert_eq!(names("rep", None), ["replace"]);
         assert_eq!(
@@ -1506,6 +1596,37 @@ mod tests {
         assert!(!is_line_number(""));
         assert!(!is_line_number("4a"));
         assert!(!is_line_number("-1"));
+    }
+
+    /// Every keyboard shortcut in the keybinding table also runs from the Command Bar,
+    /// and the bar shows the same default chord.
+    #[test]
+    fn every_keybinding_has_a_command_with_its_chord() {
+        let keys = crate::keys::KeyMap::defaults();
+        for binding in crate::keys::bindings() {
+            let name = match binding.id {
+                // The bar itself: opening it is not a command in it.
+                "command-bar" => continue,
+                "sidebar" => "explorer",
+                "rename" => "rename-symbol",
+                "diagnostic-previous" => "diagnostic-prev",
+                "tab-previous" => "tab-prev",
+                "focus-prefix" => "pane",
+                other => other,
+            };
+            let command = COMMANDS
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("no command for the {} shortcut", binding.id));
+            let chord = keys.display_of(binding.id);
+            assert!(
+                command.shortcut.split(", ").any(|s| s == chord) || command.shortcut == chord,
+                "{}: bar shows {:?}, key is {:?}",
+                command.name,
+                command.shortcut,
+                chord
+            );
+        }
     }
 
     #[test]
