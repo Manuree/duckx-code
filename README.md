@@ -1,5 +1,7 @@
 # Duckx Code
 
+[![Built With Ratatui](https://img.shields.io/badge/Built_With_Ratatui-000?logo=ratatui&logoColor=fff)](https://ratatui.rs/) [![License: MIT](https://img.shields.io/github/license/Manuree/duckx-code)](LICENSE) [![Release](https://github.com/Manuree/duckx-code/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/Manuree/duckx-code/actions/workflows/release.yml) [![Rust edition 2024](https://img.shields.io/badge/rust-edition%202024-orange?logo=rust)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+
 **CLI Code Editor For 75% keyboards. No vim motions. Write code with Ollama, LM Studio, any OpenAI-compatible server, or OpenRouter.**
 
 duckx-code is a modeless terminal editor for a 75% keyboard. The cursor moves with the dedicated arrow keys, Home, End, Page Up, and Page Down. There are no vim motions: no `hjkl`, no `w`/`b`, and no operator-pending commands. Printable keys insert text immediately. Hold Shift with any navigation key to select. `F6` opens an assistant that writes and edits code through a local model on Ollama or LM Studio, or a cloud model through an OpenAI-compatible server or OpenRouter.
