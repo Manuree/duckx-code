@@ -35,7 +35,7 @@ async fn run(
     // minutes. A short total timeout makes reqwest drop the socket; LM Studio
     // then logs "Client disconnected" / "Failed to generate a tool call" and
     // returns empty tool_calls with only reasoning_content.
-    let client = match reqwest::Client::builder()
+    let client = match provider::http_client()
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(60 * 30))
         .build()

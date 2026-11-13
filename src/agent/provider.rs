@@ -156,6 +156,19 @@ impl Default for CompleteOptions<'static> {
     }
 }
 
+/// Start a reqwest client with rustls on the ring crypto provider.
+///
+/// reqwest 0.13 defaults to aws-lc-rs, which needs NASM to build on Windows,
+/// so the ring provider used before the upgrade is installed once instead.
+pub(super) fn http_client() -> reqwest::ClientBuilder {
+    static PROVIDER: std::sync::Once = std::sync::Once::new();
+    PROVIDER.call_once(|| {
+        // Another caller may already have installed a provider; keep it.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    reqwest::Client::builder()
+}
+
 fn http_err(url: &str, err: reqwest::Error) -> String {
     if err.is_timeout() {
         return format!(
@@ -635,7 +648,7 @@ pub fn list_models(
         .build()
         .map_err(|err| format!("Cannot start HTTP: {err}"))?;
     runtime.block_on(async {
-        let client = reqwest::Client::builder()
+        let client = http_client()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .build()
@@ -2797,7 +2810,7 @@ mod tests {
                 body
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let messages = [serde_json::json!({"role":"user","content":"hi"})];
         let reply = complete(
             &client,
@@ -2829,7 +2842,7 @@ mod tests {
                 body
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let messages = [serde_json::json!({"role":"user","content":"hi"})];
         let reply = complete(
             &client,
@@ -2868,7 +2881,7 @@ mod tests {
                 events
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let messages = [serde_json::json!({"role":"user","content":"hi"})];
         let mut pieces = Vec::new();
         let reply = complete_with_delta(
@@ -2920,7 +2933,7 @@ mod tests {
                 events
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let messages = [serde_json::json!({"role":"user","content":"สวัสดี"})];
         let mut pieces = Vec::new();
         let reply = complete_with_delta(
@@ -2964,7 +2977,7 @@ mod tests {
                 body
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let messages = [serde_json::json!({"role":"user","content":"สวัสดี"})];
         let reply = complete(
             &client,
@@ -3013,7 +3026,7 @@ mod tests {
                 }
             }
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let server_url = format!("http://{addr}/v1");
         let messages = [serde_json::json!({"role":"user","content":"hi"})];
         let reply = complete(
@@ -3233,7 +3246,7 @@ mod tests {
                 }
             }
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let server_url = format!("http://{addr}/v1");
         let messages = [
             json!({"role":"system","content":"Be helpful."}),
@@ -3445,7 +3458,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_ollama_rejects_empty_args_but_sanitize_recovers() {
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let ok = client
             .get("http://127.0.0.1:11434/api/tags")
             .send()
@@ -3492,7 +3505,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_ollama_qwen3_thinking_stream() {
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let ok = client
             .get("http://127.0.0.1:11434/api/tags")
             .send()
@@ -3551,7 +3564,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_ollama_stream_content_json_if_available() {
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let ok = client
             .get("http://127.0.0.1:11434/api/tags")
             .send()
@@ -3722,7 +3735,7 @@ mod tests {
     #[tokio::test]
     async fn default_tuning_sends_no_extra_headers() {
         let (url, server) = spawn_rounds(1, |_, _| ok_json("ok"));
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let messages = [json!({"role":"user","content":"hi"})];
         let reply = complete(&client, &url, "qwen", &messages, CompleteOptions::default())
             .await
@@ -3738,7 +3751,7 @@ mod tests {
     #[tokio::test]
     async fn openrouter_tuning_sends_its_headers_and_leaves_out_max_tokens() {
         let (url, server) = spawn_rounds(1, |_, _| ok_json("routed"));
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let tuning = Tuning {
             max_tokens: None,
             headers: vec![
@@ -3794,7 +3807,7 @@ mod tests {
             1 => http("503 Service Unavailable", "text/plain", "", "busy"),
             _ => ok_json("third time"),
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let tuning = quick(2);
         let options = CompleteOptions {
             tuning: &tuning,
@@ -3824,7 +3837,7 @@ mod tests {
                 r#"{"error":{"message":"upstream exploded"}}"#,
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let tuning = quick(1);
         let options = CompleteOptions {
             tuning: &tuning,
@@ -3871,7 +3884,7 @@ mod tests {
             ),
             _ => ok_json("ok"),
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let messages = [json!({"role":"user","content":"hi"})];
         let model = "cloud-401-model";
         let err = complete(&client, &url, model, &messages, CompleteOptions::default())
@@ -3904,7 +3917,7 @@ mod tests {
                 r#"{"error":{"message":"Insufficient credits"}}"#,
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let options = CompleteOptions {
             stream: true,
             ..CompleteOptions::default()
@@ -3932,7 +3945,7 @@ mod tests {
             );
             http("200 OK", "text/event-stream", "", events)
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let options = CompleteOptions {
             stream: true,
             ..CompleteOptions::default()
@@ -3965,7 +3978,7 @@ mod tests {
                 "{\"error\":\"model runner has unexpectedly stopped\"}\n",
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let options = CompleteOptions {
             stream: true,
             ollama_native: true,
@@ -3992,7 +4005,7 @@ mod tests {
                 r#"{"error":{"message":"Model is overloaded","code":503}}"#,
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let messages = [json!({"role":"user","content":"hi"})];
         let err = complete(
             &client,
@@ -4018,7 +4031,7 @@ mod tests {
             ),
             _ => ok_json("plain"),
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let messages = [
             json!({"role":"system","content":"sys"}),
             json!({"role":"user","content":"hi"}),
@@ -4130,7 +4143,7 @@ mod tests {
     #[tokio::test]
     async fn tools_off_never_sends_native_tools() {
         let (url, server) = spawn_rounds(1, |_, _| ok_json("ok"));
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let tuning = Tuning {
             tools: ToolsMode::Off,
             ..quick(0)
@@ -4155,7 +4168,7 @@ mod tests {
     #[tokio::test]
     async fn tools_on_reports_a_rejection_instead_of_dropping_tools() {
         let (url, server) = spawn_rounds(1, |_, _| no_tools_answer());
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let tuning = Tuning {
             tools: ToolsMode::On,
             ..quick(0)
@@ -4178,7 +4191,7 @@ mod tests {
         let (url, server) = spawn_rounds(1, |_, _| ok_json("ok"));
         let key = capability_key_for(&url, "forced-model", false);
         seed_detected([&key], []);
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let tuning = Tuning {
             tools: ToolsMode::On,
             ..quick(0)
@@ -4201,7 +4214,7 @@ mod tests {
             0 => no_tools_answer(),
             _ => ok_json("ok"),
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let tuning = quick(0);
         let options = CompleteOptions {
             tuning: &tuning,
@@ -4258,7 +4271,7 @@ mod tests {
                 r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":120,"completion_tokens":5}}"#,
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let messages = [json!({"role":"user","content":"hi"})];
         let reply = complete(&client, &url, "m", &messages, CompleteOptions::default())
             .await
@@ -4272,7 +4285,7 @@ mod tests {
         let (url, server) = spawn_rounds(1, |_, _| {
             ok_json("<think>hm</think>User is fixing the parser.")
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let summary = summarize(
             &client,
             &url,
@@ -4301,7 +4314,7 @@ mod tests {
                 r#"{"error":{"message":"context too long"}}"#,
             )
         });
-        let client = reqwest::Client::new();
+        let client = http_client().build().unwrap();
         let tuning = quick(0);
         let options = CompleteOptions {
             tuning: &tuning,
