@@ -59,8 +59,3 @@ pulldown-cmark = { version = "0.13", default-features = false }
 [[example]]
 name = "keylog"
 path = "tools/keylog.rs"
-
-# crossterm 0.28.1 with a hook for escape sequences it cannot parse, so duckx-code can
-# decode xterm's modifyOtherKeys keys. ratatui uses the same copy. See vendor/README.md.
-[patch.crates-io]
-crossterm = { path = "vendor/crossterm" }

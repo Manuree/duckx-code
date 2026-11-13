@@ -1,12 +1,10 @@
 //! Records raw crossterm events to `keylog.txt` to diagnose keyboard input issues.
 //! Run with `cargo run --example keylog`, type the problem keys, then press Esc.
-//! It asks the terminal for keys the same way the editor does (kitty protocol, else
-//! modifyOtherKeys; see `duckx_code::term_keys`), so what it logs is what the editor gets.
+//! It asks the terminal for keys the same way the editor does (the kitty keyboard
+//! protocol when supported, same flags), so what it logs is what the editor gets.
 
 use std::fs::File;
 use std::io::{self, Write};
-
-use duckx_code::term_keys;
 
 use crossterm::{
     event::{
@@ -19,12 +17,8 @@ use crossterm::{
 
 fn main() -> io::Result<()> {
     let mut log = File::create("keylog.txt")?;
-    term_keys::install();
     let enhanced = supports_keyboard_enhancement().unwrap_or(false);
-    let term = std::env::var("TERM").ok();
-    let modify_other_keys = term_keys::wants_modify_other_keys(enhanced, term.as_deref());
     writeln!(log, "keyboard_enhancement_supported: {enhanced}")?;
-    writeln!(log, "modify_other_keys_requested: {modify_other_keys}")?;
     for var in [
         "TERM",
         "TERM_PROGRAM",
@@ -48,8 +42,6 @@ fn main() -> io::Result<()> {
                     | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
             )
         )?;
-    } else if modify_other_keys {
-        stdout.write_all(term_keys::MODIFY_OTHER_KEYS_ON.as_bytes())?;
     }
     print!("Type the keys that fail, then press Esc to finish.\r\n");
     stdout.flush()?;
@@ -71,8 +63,6 @@ fn main() -> io::Result<()> {
 
     if enhanced {
         let _ = execute!(stdout, PopKeyboardEnhancementFlags);
-    } else if modify_other_keys {
-        let _ = stdout.write_all(term_keys::MODIFY_OTHER_KEYS_OFF.as_bytes());
     }
     let _ = execute!(stdout, DisableBracketedPaste);
     disable_raw_mode()?;

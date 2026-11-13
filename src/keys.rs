@@ -652,8 +652,7 @@ pub fn dispatch(key: &KeyEvent, map: &KeyMap) -> Option<SemanticAction> {
 }
 
 /// `Ctrl + ห` (Thai layout) as `Ctrl + D`: the same physical key on the US layout.
-/// The kitty protocol, `modifyOtherKeys`, and Windows report the character of the
-/// active layout. Only with `Ctrl` or `Alt`, so typing is never a shortcut.
+/// The kitty protocol and Windows report the character of the active layout. Only with `Ctrl` or `Alt`, so typing is never a shortcut.
 fn on_us_keys(chord: Chord) -> Option<Chord> {
     let Kind::Char(c) = chord.kind else {
         return None;
@@ -670,8 +669,8 @@ fn on_us_keys(chord: Chord) -> Option<Chord> {
 }
 
 /// `Ctrl + }` as `Ctrl + Shift + ]`, and so on for the US keyboard's shifted symbols.
-/// The kitty protocol (with alternate keys) and xterm's `modifyOtherKeys` report the
-/// shifted character, while bindings name the key under it. Tried only after an
+/// The kitty protocol (with alternate keys) and CSI u terminals report the shifted
+/// character, while bindings name the key under it. Tried only after an
 /// exact match, so a binding such as `Alt + _` still wins.
 fn unshifted(chord: Chord) -> Option<Chord> {
     const PAIRS: &[(char, char)] = &[
@@ -782,7 +781,7 @@ mod tests {
         let map = KeyMap::defaults();
         let ctrl = KeyModifiers::CONTROL;
         // The kitty protocol reports Ctrl + Shift + ] as Ctrl + } (Shift folded in);
-        // xterm's modifyOtherKeys keeps Shift.
+        // other CSI u encoders keep Shift.
         for modifiers in [ctrl, ctrl | KeyModifiers::SHIFT] {
             assert_eq!(
                 dispatch(&KeyEvent::new(KeyCode::Char('}'), modifiers), &map),

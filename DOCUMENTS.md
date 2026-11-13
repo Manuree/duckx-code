@@ -4,7 +4,7 @@ This is the user reference for every keybinding and Command Bar command that **d
 
 > For the design rationale behind these bindings, see [`DESIGN.md`](./DESIGN.md).
 >
-> Some shortcuts cannot reach duckx-code in every terminal (for example `Shift + Space`, `Shift + Enter`, `Ctrl + Shift + Z`, or `Ctrl + Alt + arrows`). At startup duckx-code asks the terminal to report every modifier: the kitty keyboard protocol where the terminal supports it, otherwise xterm's `modifyOtherKeys`. [`docs/TERMINAL-KEYS.md`](./docs/TERMINAL-KEYS.md) has a per-terminal table of what still does not work, the setting to change in each terminal, and the fallback to use.
+> Some shortcuts cannot reach duckx-code in every terminal (for example `Shift + Space`, `Shift + Enter`, `Ctrl + Shift + Z`, or `Ctrl + Alt + arrows`). At startup duckx-code turns on the kitty keyboard protocol where the terminal supports it, so every modifier is reported. [`docs/TERMINAL-KEYS.md`](./docs/TERMINAL-KEYS.md) has a per-terminal table of what still does not work, the setting to change in each terminal, and the fallback to use.
 
 ## Getting Started
 
@@ -93,7 +93,7 @@ Typed a line with the wrong layout on? Select it and press ``Alt + ` `` (or run 
 * **Windows:** the installed input languages are read from Windows. When there are exactly two and they are US English (QWERTY) and Thai (Kedmanee), the text converts at once and Windows is asked to switch the terminal to the target layout, so you keep typing in the right language. The notice says `keyboard switched to …`, or `could not switch the keyboard` when Windows refused. Other keyboards for the same language (US Dvorak, Thai Pattachote) are not treated as these two.
 * **Elsewhere, or more layouts:** on Linux and macOS, or on Windows with more than two layouts or one duckx-code has no table for, a `Convert to` list opens under the selection. Each row shows a layout and what the text becomes on it. `Up` / `Down` move, `Enter` (or ``Alt + ` `` again) converts, `Esc` closes. Other keys are ignored while it is open. On Windows the keyboard still switches when the chosen layout is installed.
 * **Assistant prompt:** the same key works on the selection, or the word before the cursor, in the assistant prompt.
-* **Shortcuts on the Thai layout:** `Ctrl` or `Alt` with a Thai character runs the shortcut of the same key on the US layout, so `Ctrl + ห` saves like `Ctrl + S` in terminals that report the Thai character (the kitty protocol, `modifyOtherKeys`, Windows). A key with a binding of its own keeps it, and Thai typing is never a shortcut.
+* **Shortcuts on the Thai layout:** `Ctrl` or `Alt` with a Thai character runs the shortcut of the same key on the US layout, so `Ctrl + ห` saves like `Ctrl + S` in terminals that report the Thai character (the kitty protocol, Windows). A key with a binding of its own keeps it, and Thai typing is never a shortcut.
 * **Keys:** on the Thai layout the backtick key types `_`, so `Alt + _` does the same. Some setups use the backtick key (Grave accent) as the Windows language-switch hotkey; if ``Alt + ` `` never reaches duckx-code, change it under Settings → Keybindings → Convert keyboard.
 
 ---

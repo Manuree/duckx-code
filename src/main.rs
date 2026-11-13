@@ -32,7 +32,7 @@ use duckx_code::{
         git,
         watch::{self, RootWatch},
     },
-    session, term_keys, ui,
+    session, ui,
 };
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
@@ -58,10 +58,8 @@ fn setup_terminal() -> io::Result<Tui> {
         SetCursorStyle::SteadyBlock
     )?;
 
-    // Ask for every modifier: the kitty keyboard protocol when the terminal answers its
-    // query (always "no" on Windows, where console input records already carry them),
-    // otherwise xterm's modifyOtherKeys, which other terminals ignore. See term_keys.rs.
-    term_keys::install();
+    // Ask for every modifier with the kitty keyboard protocol when the terminal answers
+    // its query (always "no" on Windows, where console input records already carry them).
     let kitty = supports_keyboard_enhancement().unwrap_or(false)
         && execute!(
             stdout,
@@ -73,12 +71,6 @@ fn setup_terminal() -> io::Result<Tui> {
         )
         .is_ok();
     KITTY_KEYS.store(kitty, Ordering::SeqCst);
-    let term = env::var("TERM").ok();
-    if term_keys::wants_modify_other_keys(kitty, term.as_deref()) {
-        let sent = io::Write::write_all(&mut stdout, term_keys::MODIFY_OTHER_KEYS_ON.as_bytes())
-            .and_then(|()| io::Write::flush(&mut stdout));
-        MODIFY_OTHER_KEYS.store(sent.is_ok(), Ordering::SeqCst);
-    }
 
     let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     // After the alternate screen, so a host that clears the title on entry still shows it.
@@ -92,10 +84,6 @@ fn restore_terminal() -> io::Result<()> {
     // the pop sequence (`CSI < 1 u`) as "restore cursor".
     if KITTY_KEYS.swap(false, Ordering::SeqCst) {
         let _ = execute!(stdout, PopKeyboardEnhancementFlags);
-    }
-    if MODIFY_OTHER_KEYS.swap(false, Ordering::SeqCst) {
-        let _ = io::Write::write_all(&mut stdout, term_keys::MODIFY_OTHER_KEYS_OFF.as_bytes());
-        let _ = io::Write::flush(&mut stdout);
     }
     let _ = execute!(
         stdout,
@@ -111,8 +99,6 @@ fn restore_terminal() -> io::Result<()> {
 /// Set by `setup_terminal` when it pushed kitty keyboard flags, so quit and the panic
 /// hook pop them only then.
 static KITTY_KEYS: AtomicBool = AtomicBool::new(false);
-/// Set by `setup_terminal` when it turned on xterm's modifyOtherKeys.
-static MODIFY_OTHER_KEYS: AtomicBool = AtomicBool::new(false);
 
 /// Name the terminal shows on this tab while the editor is open.
 const APP_TITLE: &str = env!("CARGO_PKG_NAME");
