@@ -20,6 +20,7 @@ use std::path::Path;
 use ratatui::{
     Frame, Terminal,
     backend::Backend,
+    buffer::CellDiffOption,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
@@ -452,9 +453,16 @@ fn gutter_width(line_count: usize, diff_column: bool) -> usize {
 /// Paint one frame. The block cursor is a reversed cell, so the terminal
 /// cursor stays hidden and a changed cell cannot catch it.
 pub fn draw<B: Backend>(terminal: &mut Terminal<B>, app: &App) -> io::Result<()> {
-    terminal.hide_cursor()?;
-    terminal.draw(|frame| render(frame, app))?;
+    terminal.hide_cursor().map_err(backend_error)?;
+    terminal
+        .draw(|frame| render(frame, app))
+        .map_err(backend_error)?;
     Ok(())
+}
+
+/// ratatui 0.30 gives each backend its own error type.
+fn backend_error(err: impl std::fmt::Display) -> io::Error {
+    io::Error::other(err.to_string())
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -601,7 +609,7 @@ fn paint_block_cursor(frame: &mut Frame) {
     if x < area.x || y < area.y || x >= area.right() || y >= area.bottom() {
         return;
     }
-    let x = if buf[(x, y)].skip && x > area.x {
+    let x = if buf[(x, y)].diff_option == CellDiffOption::Skip && x > area.x {
         x - 1
     } else {
         x
