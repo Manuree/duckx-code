@@ -22,16 +22,14 @@ pub enum Found {
 /// The dot in front of a server row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dot {
-    /// Ready or busy.
-    Running,
-    /// Starting.
+    /// On, and found on `PATH` or already running: ready to use.
+    Ready,
+    /// On and starting.
     Starting,
-    /// Installed, not running.
-    Found,
-    /// Not on `PATH`, still being looked for, or no command yet.
-    Missing,
-    /// Stopped for good this session.
+    /// On and stopped for good this session.
     Failed,
+    /// Off, not on `PATH`, still being looked for, or no command yet.
+    Idle,
 }
 
 /// What one Language servers row shows.
@@ -51,14 +49,18 @@ pub struct ServerView {
 }
 
 impl ServerView {
+    /// Off always reads as idle, whatever was found or last ran.
     pub fn dot(&self) -> Dot {
+        if !self.on {
+            return Dot::Idle;
+        }
         match &self.status {
-            Some(ServerStatus::Ready | ServerStatus::Busy(_)) => Dot::Running,
+            Some(ServerStatus::Ready | ServerStatus::Busy(_)) => Dot::Ready,
             Some(ServerStatus::Starting) => Dot::Starting,
             Some(ServerStatus::Failed(_)) => Dot::Failed,
             None => match self.found {
-                Found::At(_) => Dot::Found,
-                Found::Checking | Found::Missing => Dot::Missing,
+                Found::At(_) => Dot::Ready,
+                Found::Checking | Found::Missing => Dot::Idle,
             },
         }
     }
@@ -846,7 +848,7 @@ mod tests {
             ),
         ]));
         let view = app.server_view(zls).unwrap();
-        assert_eq!(view.dot(), Dot::Missing);
+        assert_eq!(view.dot(), Dot::Idle);
         assert!(
             view.detail().starts_with("zls not found on PATH · "),
             "{}",
@@ -854,11 +856,11 @@ mod tests {
         );
         assert!(view.detail().contains(&view.install));
         let rust = app.server_view(0).unwrap();
-        assert_eq!(rust.dot(), Dot::Found);
+        assert_eq!(rust.dot(), Dot::Ready);
         assert_eq!(rust.detail(), "/usr/bin/rust-analyzer");
         running(&mut app, "rust-analyzer", "rust-analyzer");
         let rust = app.server_view(0).unwrap();
-        assert_eq!(rust.dot(), Dot::Running);
+        assert_eq!(rust.dot(), Dot::Ready);
         assert_eq!(rust.detail(), "/usr/bin/rust-analyzer · running");
     }
 
