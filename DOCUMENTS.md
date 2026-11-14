@@ -706,11 +706,10 @@ Each server takes two lines. The first has a dot, the server name, the file exte
 
 | Dot | Meaning |
 | :--- | :--- |
-| green `●` | Running (ready or busy) |
-| yellow `●` | Starting |
-| dim `●` | Installed, not running now |
-| hollow `○` | Not found on `PATH` yet, or a custom server without a command |
-| red `●` | Stopped (crashed too often, or failed to start) |
+| green `●` | On and ready to use: found on `PATH`, or running (ready or busy) |
+| yellow `●` | On and starting |
+| red `●` | On and stopped (crashed too often, or failed to start) |
+| hollow `○` | Off, or not found on `PATH` (also while still looking, and a custom server without a command) |
 
 | Keys | Action |
 | :--- | :--- |

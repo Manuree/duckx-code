@@ -537,11 +537,10 @@ fn paint_server(
         canvas
     };
     let (glyph, style) = match view.dot() {
-        Dot::Running => ("●", Style::new().fg(theme.git_added)),
+        Dot::Ready => ("●", Style::new().fg(theme.git_added)),
         Dot::Starting => ("●", Style::new().fg(theme.diagnostic_warning)),
         Dot::Failed => ("●", Style::new().fg(theme.diagnostic_error)),
-        Dot::Found => ("●", theme.sidebar_dim),
-        Dot::Missing => ("○", theme.sidebar_dim),
+        Dot::Idle => ("○", theme.sidebar_dim),
     };
     if width > 2 {
         put(frame, inner, x + 1, row, glyph, style.bg(bg), 1);

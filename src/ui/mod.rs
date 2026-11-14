@@ -3558,6 +3558,44 @@ mod tests {
     }
 
     #[test]
+    fn a_server_dot_is_green_only_when_on_and_ready() {
+        use crate::settings::SettingId;
+        let mut app = App::new(Buffer::from_text("fn main() {}\n"), None);
+        servers_page(&mut app, SettingId::LspServer(0));
+        let dot = |app: &App, name: &str| {
+            let buffer = cells(app, 100, 34);
+            let y = (0..34u16)
+                .find(|y| row_text(&buffer, *y).contains(name))
+                .unwrap_or_else(|| panic!("{name} missing"));
+            let x = (0..100u16)
+                .find(|x| matches!(buffer[(*x, y)].symbol(), "●" | "○"))
+                .unwrap();
+            let cell = &buffer[(x, y)];
+            (cell.symbol().to_string(), cell.fg)
+        };
+        let green = app.styles().git_added;
+        let dim = app.styles().sidebar_dim.fg.expect("dim colour");
+
+        // On and found on PATH, not started yet: ready to use.
+        assert_eq!(dot(&app, "pyright  py, pyi"), ("●".into(), green));
+        // On and running.
+        assert_eq!(dot(&app, "rust-analyzer  rs"), ("●".into(), green));
+        // On but not found.
+        assert_eq!(dot(&app, "basedpyright  py"), ("○".into(), dim));
+
+        // Off and found: hollow, the same as missing.
+        app.appearance.lsp.set_server_enabled("pyright", false);
+        assert_eq!(dot(&app, "pyright  py, pyi"), ("○".into(), dim));
+        // Off wins over a running or failed status too.
+        app.appearance
+            .lsp
+            .set_server_enabled("rust-analyzer", false);
+        assert_eq!(dot(&app, "rust-analyzer  rs"), ("○".into(), dim));
+        app.appearance.lsp.set_server_enabled("gopls", false);
+        assert_eq!(dot(&app, "gopls  go"), ("○".into(), dim));
+    }
+
+    #[test]
     fn the_custom_server_fields_open_under_add_server() {
         use crate::action::SettingsAction;
         use crate::settings::SettingId;
