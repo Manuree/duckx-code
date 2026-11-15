@@ -2620,6 +2620,7 @@ impl App {
                 self.clear_snippet();
                 self.page(true, extend);
             }
+            SemanticAction::InsertChar(c) if self.closer_dedent(c) => self.note_typed(Some(c)),
             SemanticAction::InsertChar(c) => {
                 self.buffer_mut().resolve_sticky();
                 let selection = self.buffer().selection();
@@ -2640,7 +2641,13 @@ impl App {
             SemanticAction::InsertNewline => {
                 self.dismiss_lsp_popups();
                 self.clear_snippet();
-                self.edit(|buffer| buffer.insert_newline());
+                if self.editor_prefs.auto_indent {
+                    self.buffer_mut().resolve_sticky();
+                    let edit = self.enter_edit();
+                    self.edit(|buffer| buffer.apply_indent_edit(edit));
+                } else {
+                    self.edit(|buffer| buffer.insert_newline());
+                }
             }
             SemanticAction::InsertText(text) => {
                 self.dismiss_lsp_popups();
@@ -2784,6 +2791,7 @@ impl App {
             SemanticAction::GotoDefinition => self.goto_definition(),
             SemanticAction::GotoReferences => self.goto_references(),
             SemanticAction::MatchBracket { extend } => self.match_bracket(extend),
+            SemanticAction::SelectInsideQuotes => self.select_inside_quotes(),
             SemanticAction::Complete => self.complete_now(),
             SemanticAction::MoveLine { down } => {
                 self.clear_snippet();
@@ -3592,6 +3600,7 @@ impl App {
             SettingId::TabWidth
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
+            | SettingId::AutoIndent
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.set_choice(id, index);
@@ -3663,6 +3672,7 @@ impl App {
             SettingId::TabWidth
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
+            | SettingId::AutoIndent
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.restore_choice(id, origin);
@@ -3727,6 +3737,7 @@ impl App {
             SettingId::TabWidth
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
+            | SettingId::AutoIndent
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => self.editor_prefs.choice_token(id),
             SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
@@ -3792,6 +3803,7 @@ impl App {
             SettingId::TabWidth
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
+            | SettingId::AutoIndent
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => (
                 self.editor_prefs.choice_index(id),
@@ -3917,6 +3929,7 @@ impl App {
             SettingId::TabWidth
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
+            | SettingId::AutoIndent
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.reset(id);
@@ -5073,6 +5086,9 @@ impl App {
             CommandId::MatchBracket => self.match_bracket(false),
             CommandId::SelectBracket => self.match_bracket(true),
             CommandId::SelectInsideQuotes => self.select_inside_quotes(),
+            CommandId::SelectInsideParens => self.select_inside_pair('(', ')'),
+            CommandId::SelectInsideBraces => self.select_inside_pair('{', '}'),
+            CommandId::SelectInsideBrackets => self.select_inside_pair('[', ']'),
             CommandId::FindNext => self.find_adjacent(true)?,
             CommandId::FindPrevious => self.find_adjacent(false)?,
             CommandId::Pane => self.start_pane_select(),
@@ -5808,6 +5824,107 @@ impl App {
         };
         self.buffer_mut().select_span(range.0, range.1);
         self.scroll_to_cursor();
+    }
+
+    /// Selects the text inside the nearest `open`/`close` pair around the cursor or the
+    /// selection, across lines. With a syntax tree, a bracket in a string or comment pairs
+    /// only within that same string or comment. Again on that text takes in the brackets;
+    /// once more goes back inside.
+    fn select_inside_pair(&mut self, open: char, close: char) {
+        self.dismiss_lsp_popups();
+        self.clear_snippet();
+        let range = {
+            let tab = self.active_editor().tab();
+            let rope = tab.buffer.rope();
+            let selection = tab.buffer.selection();
+            let (start, end) = (
+                selection.anchor.min(selection.head),
+                selection.anchor.max(selection.head),
+            );
+            let literals = tab
+                .syntax
+                .as_ref()
+                .filter(|state| state.has_tree())
+                .map(|state| state.literal_ranges(rope, 0, rope.len_chars()))
+                .unwrap_or_default();
+            let literal_of = |at: usize| {
+                let after = literals.partition_point(|(from, _)| *from <= at);
+                (after > 0 && at < literals[after - 1].1).then(|| literals[after - 1])
+            };
+            // Inside a string or comment, its own brackets pair first, then the code around it.
+            let pair_from = |home: Option<(usize, usize)>| {
+                let counts = |at: usize| literal_of(at) == home;
+                crate::brackets::enclosing_pair(rope, start, end, open, close, &counts)
+            };
+            let home = literal_of(start);
+            let found = pair_from(home).or_else(|| home.and_then(|_| pair_from(None)));
+            let Some((o, c)) = found else {
+                return;
+            };
+            let (inner, outer) = ((o + 1, c), (o, c + 1));
+            if start < end && (start, end) == inner {
+                outer
+            } else {
+                inner
+            }
+        };
+        self.buffer_mut().select_span(range.0, range.1);
+        self.scroll_to_cursor();
+    }
+
+    /// The auto-indent edit for `Enter` at the current selection.
+    fn enter_edit(&self) -> crate::indent::Edit {
+        let tab = self.active_editor().tab();
+        let rope = tab.buffer.rope();
+        let selection = tab.buffer.selection();
+        let (from, to) = (selection.from(), selection.to());
+        let line_start = rope.line_to_char(rope.char_to_line(from));
+        let literal = tab.literal_test(line_start, from + 1);
+        let unit = tab.buffer.indent_style().unit();
+        let cx = crate::indent::Context {
+            language: self.path().and_then(crate::syntax::Language::detect),
+            unit: &unit,
+            ending: tab.buffer.line_ending().as_str(),
+            literal: &literal,
+        };
+        crate::indent::on_enter(rope, from, to, &cx)
+    }
+
+    /// Types closing bracket `c` at the indent of its opener when the line is blank before
+    /// the cursor. False when auto indent is off, a snippet is active, text is selected, or
+    /// nothing would move, so the plain typing path runs instead.
+    fn closer_dedent(&mut self, c: char) -> bool {
+        if !matches!(c, ')' | ']' | '}')
+            || !self.editor_prefs.auto_indent
+            || self.nav.snippet.is_some()
+        {
+            return false;
+        }
+        self.buffer_mut().resolve_sticky();
+        let edit = {
+            let tab = self.active_editor().tab();
+            let selection = tab.buffer.selection();
+            if !selection.is_empty() {
+                return false;
+            }
+            let at = selection.head;
+            let rope = tab.buffer.rope();
+            let literal =
+                tab.literal_test(at.saturating_sub(crate::brackets::MATCH_SCAN_CHARS), at + 1);
+            let unit = tab.buffer.indent_style().unit();
+            let cx = crate::indent::Context {
+                language: self.path().and_then(crate::syntax::Language::detect),
+                unit: &unit,
+                ending: tab.buffer.line_ending().as_str(),
+                literal: &literal,
+            };
+            crate::indent::on_closer(rope, at, c, &cx)
+        };
+        let Some(edit) = edit else {
+            return false;
+        };
+        self.edit(|buffer| buffer.apply_indent_edit(edit));
+        true
     }
 
     fn toggle_comment(&mut self) {
@@ -7337,6 +7454,156 @@ mod tests {
         let mut app = quotes_app("no quotes| here", None, false);
         assert_eq!(select_quotes(&mut app), "");
         assert_eq!(app.buffer().selection().head, 9);
+    }
+
+    fn select_pair(app: &mut App, id: crate::command::CommandId) -> String {
+        app.run_command(id, None).unwrap();
+        let selection = app.buffer().selection();
+        let (start, end) = (
+            selection.anchor.min(selection.head),
+            selection.anchor.max(selection.head),
+        );
+        app.buffer().rope().slice(start..end).to_string()
+    }
+
+    #[test]
+    fn select_inside_pair_takes_nested_and_multi_line_pairs_then_their_brackets() {
+        use crate::command::CommandId::{
+            SelectInsideBraces, SelectInsideBrackets, SelectInsideParens,
+        };
+        let text = "fn main() {\n    let t = add(first(1|, 2), [3, 4]);\n}\n";
+        for parse in [false, true] {
+            let mut app = quotes_app(text, Some("src/main.rs"), parse);
+            assert_eq!(select_pair(&mut app, SelectInsideParens), "1, 2");
+            assert_eq!(select_pair(&mut app, SelectInsideParens), "(1, 2)");
+            assert_eq!(select_pair(&mut app, SelectInsideParens), "1, 2");
+
+            let mut app = quotes_app(text, Some("src/main.rs"), parse);
+            assert_eq!(
+                select_pair(&mut app, SelectInsideBraces),
+                "\n    let t = add(first(1, 2), [3, 4]);\n"
+            );
+            assert_eq!(
+                select_pair(&mut app, SelectInsideBraces),
+                "{\n    let t = add(first(1, 2), [3, 4]);\n}"
+            );
+
+            let mut app = quotes_app(text, Some("src/main.rs"), parse);
+            select_pair(&mut app, SelectInsideBrackets);
+            assert!(
+                app.buffer().selection().is_empty(),
+                "no [] around the cursor"
+            );
+        }
+        let mut app = quotes_app("x = [1, |[2, 3]]", None, false);
+        assert_eq!(select_pair(&mut app, SelectInsideBrackets), "2, 3");
+        let mut app = quotes_app("x = [1, [2, 3|]]", None, false);
+        assert_eq!(select_pair(&mut app, SelectInsideBrackets), "2, 3");
+        let mut app = quotes_app("x = [1, [2, 3]|]", None, false);
+        assert_eq!(select_pair(&mut app, SelectInsideBrackets), "1, [2, 3]");
+    }
+
+    #[test]
+    fn select_inside_pair_skips_brackets_in_strings_and_comments_with_a_tree() {
+        use crate::command::CommandId::SelectInsideParens;
+        let text = "fn f() { g(\")\", x|); // )\n}\n";
+        let mut app = quotes_app(text, Some("src/lib.rs"), true);
+        assert_eq!(select_pair(&mut app, SelectInsideParens), "\")\", x");
+
+        // Inside a string its own brackets pair first, then the code around it.
+        let mut app = quotes_app("fn f() { g(\"(a|b)\"); }", Some("src/lib.rs"), true);
+        assert_eq!(select_pair(&mut app, SelectInsideParens), "ab");
+        let mut app = quotes_app("fn f() { g(\"a|b\"); }", Some("src/lib.rs"), true);
+        assert_eq!(select_pair(&mut app, SelectInsideParens), "\"ab\"");
+    }
+
+    #[test]
+    fn select_inside_pair_without_a_pair_keeps_the_cursor() {
+        use crate::command::CommandId::SelectInsideBraces;
+        let mut app = quotes_app("let x| = (1, 2);", None, false);
+        assert_eq!(select_pair(&mut app, SelectInsideBraces), "");
+        assert_eq!(app.buffer().selection().head, 5);
+    }
+
+    #[test]
+    fn command_bar_aliases_run_the_inside_commands() {
+        let mut app = quotes_app(
+            "fn main() {\n    println!(\"Hello,| world!\");\n}\n",
+            Some("src/main.rs"),
+            false,
+        );
+        run(&mut app, "\"\"");
+        assert_eq!(app.buffer().selected_text(), "Hello, world!");
+        run(&mut app, "''");
+        assert_eq!(app.buffer().selected_text(), "\"Hello, world!\"");
+        // The parentheses hold exactly that selection, so `()` takes them in too.
+        run(&mut app, "()");
+        assert_eq!(app.buffer().selected_text(), "(\"Hello, world!\")");
+        run(&mut app, "{}");
+        assert_eq!(
+            app.buffer().selected_text(),
+            "\n    println!(\"Hello, world!\");\n"
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_quote_selects_inside_quotes_in_the_editor() {
+        let mut app = quotes_app("say(\"hi| there\")", None, false);
+        app.handle(SemanticAction::SelectInsideQuotes);
+        assert_eq!(app.buffer().selected_text(), "hi there");
+    }
+
+    fn shown(app: &App) -> String {
+        let mut text = app.buffer().rope().to_string();
+        let head = app.buffer().selection().head;
+        let byte = app.buffer().rope().char_to_byte(head);
+        text.insert(byte, '|');
+        text
+    }
+
+    #[test]
+    fn enter_between_braces_splits_and_undoes_in_one_step() {
+        let mut app = quotes_app("fn main() {|}", Some("src/main.rs"), true);
+        app.handle(SemanticAction::InsertNewline);
+        assert_eq!(shown(&app), "fn main() {\n    |\n}");
+        app.handle(SemanticAction::InsertChar('x'));
+        assert_eq!(shown(&app), "fn main() {\n    x|\n}");
+        app.handle(SemanticAction::Undo);
+        app.handle(SemanticAction::Undo);
+        assert_eq!(shown(&app), "fn main() {|}");
+    }
+
+    #[test]
+    fn enter_ignores_an_opener_inside_a_string_with_a_tree() {
+        let mut app = quotes_app("fn f() {\n    let s = \"{|\";\n}", Some("src/lib.rs"), true);
+        app.handle(SemanticAction::InsertNewline);
+        assert_eq!(shown(&app), "fn f() {\n    let s = \"{\n    |\";\n}");
+    }
+
+    #[test]
+    fn enter_after_a_python_block_opener_and_typed_closer_dedents() {
+        let mut app = quotes_app("def f():|", Some("a.py"), false);
+        app.handle(SemanticAction::InsertNewline);
+        assert_eq!(shown(&app), "def f():\n    |");
+
+        let mut app = quotes_app("const a = {\n  b: 1,|", Some("a.js"), false);
+        app.buffer_mut().apply_editor_style(true, 2, None);
+        app.handle(SemanticAction::InsertNewline);
+        assert_eq!(shown(&app), "const a = {\n  b: 1,\n  |");
+        app.handle(SemanticAction::InsertChar('}'));
+        assert_eq!(shown(&app), "const a = {\n  b: 1,\n}|");
+        app.handle(SemanticAction::Undo);
+        assert_eq!(shown(&app), "const a = {\n  b: 1,\n  |");
+    }
+
+    #[test]
+    fn auto_indent_off_keeps_the_plain_line_indent() {
+        let mut app = quotes_app("    fn main() {|}", Some("src/main.rs"), false);
+        app.editor_prefs.auto_indent = false;
+        app.handle(SemanticAction::InsertNewline);
+        assert_eq!(shown(&app), "    fn main() {\n    |}");
+        app.handle(SemanticAction::InsertChar('}'));
+        assert_eq!(shown(&app), "    fn main() {\n    }|}");
     }
 
     #[test]

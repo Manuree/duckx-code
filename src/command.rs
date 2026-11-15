@@ -136,6 +136,12 @@ pub enum CommandId {
     SelectBracket,
     /// Select the text inside the quotes around the cursor; again to take in the quotes too.
     SelectInsideQuotes,
+    /// Select the text inside the `()` around the cursor; again to take in the parentheses.
+    SelectInsideParens,
+    /// Select the text inside the `{}` around the cursor; again to take in the braces.
+    SelectInsideBraces,
+    /// Select the text inside the `[]` around the cursor; again to take in the brackets.
+    SelectInsideBrackets,
     /// Enter PANE mode: arrows pick a window, `Enter` focuses it.
     Pane,
     /// Open the assistant panel and make it one row taller.
@@ -459,7 +465,34 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::SelectInsideQuotes,
         name: "select-inside-quotes",
-        description: "Select the text inside the quotes (again: with the quotes)",
+        description: "\"\" or '': select inside quotes; again adds them",
+        shortcut: "Ctrl+Shift+'",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::SelectInsideParens,
+        name: "select-inside-parens",
+        description: "(): select inside parentheses; again adds them",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::SelectInsideBraces,
+        name: "select-inside-braces",
+        description: "{}: select inside braces; again adds them",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::SelectInsideBrackets,
+        name: "select-inside-brackets",
+        description: "[]: select inside square brackets; again adds them",
         shortcut: "",
         arg: None,
         editor: true,
@@ -865,6 +898,9 @@ fn importance(id: CommandId) -> u16 {
         CommandId::MatchBracket => 115,
         CommandId::SelectBracket => 274,
         CommandId::SelectInsideQuotes => 276,
+        CommandId::SelectInsideParens => 277,
+        CommandId::SelectInsideBraces => 278,
+        CommandId::SelectInsideBrackets => 279,
         CommandId::Complete => 120,
         CommandId::Hover => 130,
         CommandId::Format => 140,
@@ -941,6 +977,10 @@ pub fn aliases(id: CommandId) -> &'static [&'static str] {
         CommandId::Settings => &["config"],
         CommandId::CloseView => &["clean-view"],
         CommandId::AgentNew => &["agent-new"],
+        CommandId::SelectInsideQuotes => &["\"\"", "''"],
+        CommandId::SelectInsideParens => &["()"],
+        CommandId::SelectInsideBraces => &["{}"],
+        CommandId::SelectInsideBrackets => &["[]"],
         _ => &[],
     }
 }
@@ -1265,6 +1305,15 @@ pub fn suggestions(
         let pinned = matches.remove(i);
         matches.insert(0, pinned);
     }
+    // A symbol alias typed in full, such as `""` or `()`, names one command outright.
+    if let Some(i) = matches.iter().position(|c| {
+        aliases(c.id)
+            .iter()
+            .any(|alias| *alias == query && !alias.contains(char::is_alphanumeric))
+    }) {
+        let exact = matches.remove(i);
+        matches.insert(0, exact);
+    }
     matches
 }
 
@@ -1286,6 +1335,37 @@ pub fn unavailable_reason(name: &str, context: CommandContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbol_aliases_put_their_command_on_top() {
+        for (alias, name) in [
+            ("\"\"", "select-inside-quotes"),
+            ("''", "select-inside-quotes"),
+            ("()", "select-inside-parens"),
+            ("{}", "select-inside-braces"),
+            ("[]", "select-inside-brackets"),
+        ] {
+            assert_eq!(names(alias, None).first(), Some(&name), "{alias}");
+            assert_eq!(
+                names(alias, Some(CommandId::Save)).first(),
+                Some(&name),
+                "{alias} beats the recent command"
+            );
+            assert_eq!(
+                find_command(alias, CommandContext::Editor, false).map(|c| c.name),
+                Some(name)
+            );
+            assert!(
+                spec(
+                    find_command(alias, CommandContext::Editor, false)
+                        .unwrap()
+                        .id
+                )
+                .description
+                .contains(alias)
+            );
+        }
+    }
 
     fn names(input: &str, recent: Option<CommandId>) -> Vec<&'static str> {
         names_in(input, recent, CommandContext::Editor)
@@ -1360,6 +1440,9 @@ mod tests {
                 "deselect",
                 "select-bracket",
                 "select-inside-quotes",
+                "select-inside-parens",
+                "select-inside-braces",
+                "select-inside-brackets",
                 "indent",
                 "outdent",
                 "move-line-up",

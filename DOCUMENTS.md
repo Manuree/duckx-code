@@ -53,6 +53,7 @@ Hold `Shift` with **any** navigation key to select. The selection starts where t
 | `Shift + PgUp` / `Shift + PgDn` | One screen up / down |
 | `Ctrl + Shift + Home / End` | To document start / end |
 | `Ctrl + Shift + ]` | Through the matching bracket |
+| `Ctrl + Shift + '` | Inside the quotes around the cursor; again to include the quotes |
 | `Ctrl + A` | Entire document |
 
 Behavior while a selection is active:
@@ -68,7 +69,7 @@ Behavior while a selection is active:
 | Keys | Action | Notes |
 | :--- | :--- | :--- |
 | Any printable key | Insert character | Includes characters typed with `AltGr` on international layouts. |
-| `Enter` | New line | Carries over the indentation of the current line. |
+| `Enter` | New line | Carries over the indentation of the current line, and with **Auto indent** adds a level after an opener. See [Auto indent](#auto-indent). |
 | `Backspace` | Delete backward | Inside leading spaces, removes one indent level back to the previous tab stop. |
 | `Delete` | Delete forward | |
 | `Shift + Delete` or `delete-line` | Delete line | Deletes the current line, or every line the selection touches. A selection that ends at the start of a line does not include that line. The caret moves to the start of the next line, or to the end of the previous line when those lines were the end of the file. One undo step. The text is not copied to the clipboard. |
@@ -107,6 +108,31 @@ Typed a line with the wrong layout on? Select it and press ``Alt + ` `` (or run 
 * **Indent style is detected per file:** if more lines start with a tab than with spaces, `Tab` inserts a tab character; otherwise it uses 4 spaces.
 * **Partial-line rule:** a selection that ends at the very start of a line does not include that line.
 * **Undo:** a multi-line indent or outdent is undone in one step.
+
+### Auto indent
+
+With **Auto indent** On (Settings → Editor, the default), `Enter` and closing brackets follow the code. This is the same idea as VS Code's `onEnterRules` and Neovim's `smartindent`:
+
+* **Keep the indent.** A new line starts at the current line's indentation, using the file's tabs or spaces.
+* **Indent after an opener.** One level is added after a line that ends in `{`, `(` or `[`. It is also added after a block opener:
+  * Python: a line ending in `:`
+  * YAML: a `key:`, a `|` or `>` block scalar, or a bare `-`
+  * Lua: `then`, `do`, `else`, `repeat`, or a `function(…)` header
+  * Ruby: `def`, `class`, `if` and the like, and `do` or `do |x|`
+  * Shell: `then`, `do`, `else`
+  * Elixir: `do`, `->`
+  * Haskell: `where`, `do`, `of`, `let`, `=`
+  * HTML, XML, PHP and TSX: an opening tag that is not closed on the same line (void tags such as `<br>` excepted)
+
+  Whitespace on either side of the break is dropped.
+* **Split a pair.** `Enter` between `{` and `}`, between `(` and `)`, between `[` and `]`, or between `<div>` and `</div>` puts the closer on its own line at the outer indent, with the cursor on an indented line in between.
+* **Python dedent.** After a `return`, `pass`, `break`, `continue` or `raise` line, the next line steps out one level.
+* **Closers find their opener.** Typing `)`, `]` or `}` on a line that is blank before the cursor moves that line to the indent of the line holding the matching opener.
+* **Doc comments continue.** In C-like languages, `///`, `//!` and `/** … */` (the ` * ` lines) continue on the next line when `Enter` is pressed at the end of the line. Plain `//` comments do not continue.
+* **Strings and comments are ignored.** In a parsed file, an opener inside a string or comment does not indent, and a closer typed inside a multi-line string stays where it is.
+* **Undo.** `Enter` with its indent, and a closer with its dedent, are each undone in one step.
+* **Paste and snippets.** Paste is inserted as it is and is never re-indented. While a snippet is active, closers are typed without moving.
+* **Off.** Turning the setting Off brings back the plain behaviour: the indent is kept and nothing else changes.
 
 ---
 
@@ -267,7 +293,8 @@ Files are matched to a server by their extension (or, for `Gemfile` / `Rakefile`
 | `F12` or `goto-definition` | Jump to where that symbol is defined. When the server returns several places, the first one is opened and a notice says how many there were. |
 | `Shift + F12` or `goto-references` | List every place that symbol is used, including its declaration when the server sends it. One place jumps there. Several places open a list: `Up` / `Down` move, `Enter` or `Tab` jumps, `Esc` closes. |
 | `Ctrl + ]` or `match-bracket` | Jump to the bracket paired with the one under the cursor, or the one just before it. `Ctrl + Shift + ]` or `select-bracket` selects through that bracket. |
-| `select-inside-quotes` | Select the text inside the nearest quotes around the cursor (`"`, `'` or `` ` ``), leaving the marks out; with the cursor on a mark, its own pair is used. Running it again while that text is selected takes in the marks too. In a parsed file the string node decides, so escaped quotes, multi-line strings, Rust char literals and lifetimes such as `'a` are read correctly; Markdown prose and unparsed files pair unescaped marks on the current line. Nothing happens when the cursor is not inside quotes. No shortcut. |
+| `Ctrl + Shift + '` or `select-inside-quotes` (also `""` or `''` in the Command Bar) | Select the text inside the nearest quotes around the cursor (`"`, `'` or `` ` ``), leaving the marks out; with the cursor on a mark, its own pair is used. Running it again while that text is selected takes in the marks too, and a third run goes back inside. In a parsed file the string node decides, so escaped quotes, multi-line strings, Rust char literals and lifetimes such as `'a` are read correctly; Markdown prose and unparsed files pair unescaped marks on the current line. Nothing happens when the cursor is not inside quotes. Terminals that report the key as `Ctrl + "` or `Ctrl + Shift + "` work too. |
+| `select-inside-parens`, `select-inside-braces`, `select-inside-brackets` (also `()`, `{}`, `[]` in the Command Bar) | Select the text inside the nearest enclosing `()`, `{}` or `[]` around the cursor, across lines; only that bracket kind nests. With the cursor on a bracket of that kind, its own pair is used. Again takes in the brackets, and a third run goes back inside. In a parsed file, brackets in strings and comments are skipped; from inside a string, brackets in that same string pair first, then the code around it. Nothing happens when there is no enclosing pair. No shortcut. `select-bracket` is different: it extends from a bracket next to the cursor to its partner. |
 | `Ctrl + O` or `jump-back` | Return to the place from before the last definition or references jump |
 | `Ctrl + Shift + O` or `jump-forward` | Go forward again after jump-back |
 | `Ctrl + Space` or `complete` | Open completions at the cursor. Typing a word or a character the server listed (such as `.`) opens the same list on its own. A snippet selects its first placeholder. `Tab` moves to the next placeholder and `Shift + Tab` to the previous one. `Esc` leaves the snippet. |
@@ -309,8 +336,9 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 1. **The list is the focused surface.** Editor commands and explorer file commands are never mixed. A bare number goes to that line only while an editor is focused: typing `42` shows `goto 42` as the only hint, and `Enter` jumps there. `Tab` leaves the bar and opens the assistant. In the explorer, a number matches nothing.
 2. **Name prefix matches come next:** `un` → `undo` in the editor, `del` → `delete-line` in the editor and `delete` in the explorer while FILE mode is on.
 3. **Then word matches:** commands where a word in the name or description starts with the input, so `line` in the editor → `goto`, `copy`, `cut`, `comment`, `indent`, `outdent`, `move-line-up`, `move-line-down`, `delete-line`, `duplicate-line-up`, `duplicate-line-down`.
-4. **Each of those groups follows importance.** An empty list in the editor starts `file-picker`, `workspace`, `find`, `replace`, `goto`, `save`, `undo`, `redo`, then clipboard, language tools, `find-next`, `find-previous`, view toggles with `reveal` and `explorer`, selection (`select-all`, `deselect`, `select-bracket`, `select-inside-quotes`) and line moves, tabs, `pane`, layout, `setting`, `agent`, `clear`, `agent-taller`, `agent-shorter`, `about`, and `quit`. The explorer uses the same rank: `file-picker`, `workspace`, `find`, `replace`, `select`, then `move`, `delete`, and `rename` in FILE mode, then the copy commands, `find-next`, `find-previous`, `reveal`, `explorer`, `wider`, `narrower`, `hidden`, `pane`, `setting`, `agent-taller`, `agent-shorter`, `about`, and `quit`.
+4. **Each of those groups follows importance.** An empty list in the editor starts `file-picker`, `workspace`, `find`, `replace`, `goto`, `save`, `undo`, `redo`, then clipboard, language tools, `find-next`, `find-previous`, view toggles with `reveal` and `explorer`, selection (`select-all`, `deselect`, `select-bracket`, `select-inside-quotes`, `select-inside-parens`, `select-inside-braces`, `select-inside-brackets`) and line moves, tabs, `pane`, layout, `setting`, `agent`, `clear`, `agent-taller`, `agent-shorter`, `about`, and `quit`. The explorer uses the same rank: `file-picker`, `workspace`, `find`, `replace`, `select`, then `move`, `delete`, and `rename` in FILE mode, then the copy commands, `find-next`, `find-previous`, `reveal`, `explorer`, `wider`, `narrower`, `hidden`, `pane`, `setting`, `agent-taller`, `agent-shorter`, `about`, and `quit`.
 5. **The most recent command on this surface is always first** when it is one of the matches, and marked with ★. That holds for an empty input and for a typed filter, including when the recent command only matches a later word. Opening the bar and pressing `Enter` immediately repeats it. A command last run in the editor is not pinned while the explorer is focused, and the reverse.
+6. **A symbol name typed in full comes first, ahead of the recent one.** `""` and `''` put `select-inside-quotes` on top, and `()`, `{}` and `[]` do the same for `select-inside-parens`, `select-inside-braces` and `select-inside-brackets`; `Enter` runs it.
 
 ### 6.3 Running Commands
 
@@ -388,7 +416,10 @@ If no OS clipboard is available (e.g. a headless session), `copy`, `cut`, and `p
 | Command | Argument | Description | Shortcut |
 | :--- | :--- | :--- | :--- |
 | `select-all` | — | Select the entire document | `Ctrl + A` |
-| `select-inside-quotes` | — | Select the text inside the `"`, `'` or `` ` `` quotes around the cursor, like `vi"` in Neovim. Run it again to take in the quote marks too. | — |
+| `select-inside-quotes` | — | Select the text inside the `"`, `'` or `` ` `` quotes around the cursor, like `vi"` in Neovim. Run it again to take in the quote marks too. `""` and `''` are other names for it. | `Ctrl + Shift + '` |
+| `select-inside-parens` | — | Select the text inside the `()` around the cursor, like `vi(`. Again takes in the parentheses. `()` is another name for it. | — |
+| `select-inside-braces` | — | Select the text inside the `{}` around the cursor, like `vi{`. Again takes in the braces. `{}` is another name for it. | — |
+| `select-inside-brackets` | — | Select the text inside the `[]` around the cursor, like `vi[`. Again takes in the brackets. `[]` is another name for it. | — |
 
 #### View
 | Command | Argument | Description | Shortcut |
@@ -615,6 +646,7 @@ Editor, Files, and Keybindings are saved in the same `settings.json` as the them
 | Tab width | 2, 4, 8 | Spaces inserted for one Tab, and the on-screen width of a tab character. The default is 4. |
 | Indent with spaces | On, Off | On inserts spaces. Off inserts a tab character. Text already in the file is left as it is. |
 | Line endings | Auto, LF, CRLF | Auto keeps the ending detected in the file. LF or CRLF is the ending written the next time the file is saved. |
+| Auto indent | On, Off | On indents after `{ ( [` and block openers on `Enter`, splits a pair such as `{}` around the cursor, and moves a typed closer back to its opener's indent. Off only keeps the current line's indent. The default is On. See [Auto indent](#auto-indent). |
 | Match brackets | On, Off | On draws the bracket at the cursor (or just before it) and its pair bold on a soft background, in the focused window, when both are on screen. A bracket with no pair is drawn in the error color. Brackets in strings and comments are skipped. The default is On. The `bracket-match` command flips it. |
 | Colorize bracket pairs | On, Off | On colors `()` `[]` `{}` by how deep they are nested, cycling through the syntax theme's bracket colors. Unmatched ones use the error color. The default is On. The `bracket-colors` command flips it. |
 | Trim trailing space | On, Off | On removes spaces and tabs at the end of a line when the file is saved. The default is Off. |
