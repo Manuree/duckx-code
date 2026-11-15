@@ -396,7 +396,8 @@ print(\"เสร็จแล้ว\")\n";
     #[test]
     fn typing_in_the_editor_still_auto_indents() {
         let mut app = editor();
-        let typed = "if x:\r    y\r";
+        // Python: `Enter` after `if x:` indents one level on its own.
+        let typed = "if x:\ry\r";
         let batches: Vec<Vec<Event>> = windows_keys(typed)
             .chunks(2)
             .map(<[Event]>::to_vec)

@@ -69,7 +69,7 @@ Behavior while a selection is active:
 | Keys | Action | Notes |
 | :--- | :--- | :--- |
 | Any printable key | Insert character | Includes characters typed with `AltGr` on international layouts. |
-| `Enter` | New line | Carries over the indentation of the current line. |
+| `Enter` | New line | Carries over the indentation of the current line, and with **Auto indent** adds a level after an opener. See [Auto indent](#auto-indent). |
 | `Backspace` | Delete backward | Inside leading spaces, removes one indent level back to the previous tab stop. |
 | `Delete` | Delete forward | |
 | `Shift + Delete` or `delete-line` | Delete line | Deletes the current line, or every line the selection touches. A selection that ends at the start of a line does not include that line. The caret moves to the start of the next line, or to the end of the previous line when those lines were the end of the file. One undo step. The text is not copied to the clipboard. |
@@ -108,6 +108,31 @@ Typed a line with the wrong layout on? Select it and press ``Alt + ` `` (or run 
 * **Indent style is detected per file:** if more lines start with a tab than with spaces, `Tab` inserts a tab character; otherwise it uses 4 spaces.
 * **Partial-line rule:** a selection that ends at the very start of a line does not include that line.
 * **Undo:** a multi-line indent or outdent is undone in one step.
+
+### Auto indent
+
+With **Auto indent** On (Settings → Editor, the default), `Enter` and closing brackets follow the code. This is the same idea as VS Code's `onEnterRules` and Neovim's `smartindent`:
+
+* **Keep the indent.** A new line starts at the current line's indentation, using the file's tabs or spaces.
+* **Indent after an opener.** One level is added after a line that ends in `{`, `(` or `[`. It is also added after a block opener:
+  * Python: a line ending in `:`
+  * YAML: a `key:`, a `|` or `>` block scalar, or a bare `-`
+  * Lua: `then`, `do`, `else`, `repeat`, or a `function(…)` header
+  * Ruby: `def`, `class`, `if` and the like, and `do` or `do |x|`
+  * Shell: `then`, `do`, `else`
+  * Elixir: `do`, `->`
+  * Haskell: `where`, `do`, `of`, `let`, `=`
+  * HTML, XML, PHP and TSX: an opening tag that is not closed on the same line (void tags such as `<br>` excepted)
+
+  Whitespace on either side of the break is dropped.
+* **Split a pair.** `Enter` between `{` and `}`, between `(` and `)`, between `[` and `]`, or between `<div>` and `</div>` puts the closer on its own line at the outer indent, with the cursor on an indented line in between.
+* **Python dedent.** After a `return`, `pass`, `break`, `continue` or `raise` line, the next line steps out one level.
+* **Closers find their opener.** Typing `)`, `]` or `}` on a line that is blank before the cursor moves that line to the indent of the line holding the matching opener.
+* **Doc comments continue.** In C-like languages, `///`, `//!` and `/** … */` (the ` * ` lines) continue on the next line when `Enter` is pressed at the end of the line. Plain `//` comments do not continue.
+* **Strings and comments are ignored.** In a parsed file, an opener inside a string or comment does not indent, and a closer typed inside a multi-line string stays where it is.
+* **Undo.** `Enter` with its indent, and a closer with its dedent, are each undone in one step.
+* **Paste and snippets.** Paste is inserted as it is and is never re-indented. While a snippet is active, closers are typed without moving.
+* **Off.** Turning the setting Off brings back the plain behaviour: the indent is kept and nothing else changes.
 
 ---
 
@@ -621,6 +646,7 @@ Editor, Files, and Keybindings are saved in the same `settings.json` as the them
 | Tab width | 2, 4, 8 | Spaces inserted for one Tab, and the on-screen width of a tab character. The default is 4. |
 | Indent with spaces | On, Off | On inserts spaces. Off inserts a tab character. Text already in the file is left as it is. |
 | Line endings | Auto, LF, CRLF | Auto keeps the ending detected in the file. LF or CRLF is the ending written the next time the file is saved. |
+| Auto indent | On, Off | On indents after `{ ( [` and block openers on `Enter`, splits a pair such as `{}` around the cursor, and moves a typed closer back to its opener's indent. Off only keeps the current line's indent. The default is On. See [Auto indent](#auto-indent). |
 | Match brackets | On, Off | On draws the bracket at the cursor (or just before it) and its pair bold on a soft background, in the focused window, when both are on screen. A bracket with no pair is drawn in the error color. Brackets in strings and comments are skipped. The default is On. The `bracket-match` command flips it. |
 | Colorize bracket pairs | On, Off | On colors `()` `[]` `{}` by how deep they are nested, cycling through the syntax theme's bracket colors. Unmatched ones use the error color. The default is On. The `bracket-colors` command flips it. |
 | Trim trailing space | On, Off | On removes spaces and tabs at the end of a line when the file is saved. The default is Off. |

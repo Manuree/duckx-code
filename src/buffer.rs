@@ -132,7 +132,7 @@ pub enum IndentStyle {
 }
 
 impl IndentStyle {
-    fn unit(self) -> String {
+    pub fn unit(self) -> String {
         match self {
             IndentStyle::Tabs => "\t".to_string(),
             IndentStyle::Spaces(width) => " ".repeat(width),
@@ -863,6 +863,12 @@ impl Buffer {
         self.apply_edit(sel.from(), sel.to(), &text, EditKind::Other);
     }
 
+    /// Applies an auto-indent edit as one undo step, leaving the caret where it says.
+    pub fn apply_indent_edit(&mut self, edit: crate::indent::Edit) {
+        self.resolve_sticky();
+        self.apply_edit_caret(edit.from, edit.to, &edit.text, EditKind::Other, edit.caret);
+    }
+
     /// Inserts arbitrary text (e.g. a paste), normalizing line endings to the buffer's.
     pub fn insert_text(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -1220,6 +1226,18 @@ impl Buffer {
     }
 
     fn apply_edit(&mut self, from: usize, to: usize, inserted: &str, kind: EditKind) {
+        self.apply_edit_caret(from, to, inserted, kind, inserted.chars().count());
+    }
+
+    /// [`apply_edit`](Self::apply_edit) with the caret `caret` chars into `inserted`.
+    fn apply_edit_caret(
+        &mut self,
+        from: usize,
+        to: usize,
+        inserted: &str,
+        kind: EditKind,
+        caret: usize,
+    ) {
         if from == to && inserted.is_empty() {
             return;
         }
@@ -1231,7 +1249,7 @@ impl Buffer {
         self.finish_edit(from, inserted, captured);
         self.shift_sticky(from, to - from, inserted.chars().count());
 
-        let after = Selection::point(from + inserted.chars().count());
+        let after = Selection::point(from + caret.min(inserted.chars().count()));
         self.selection = after;
         self.target_col = None;
         self.history.record(

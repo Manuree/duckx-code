@@ -5,6 +5,7 @@ pub mod brackets;
 pub mod buffer;
 pub mod command;
 pub mod explorer;
+pub mod indent;
 pub mod input;
 pub mod jobs;
 pub mod key_burst;

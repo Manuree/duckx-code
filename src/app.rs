@@ -2620,6 +2620,7 @@ impl App {
                 self.clear_snippet();
                 self.page(true, extend);
             }
+            SemanticAction::InsertChar(c) if self.closer_dedent(c) => self.note_typed(Some(c)),
             SemanticAction::InsertChar(c) => {
                 self.buffer_mut().resolve_sticky();
                 let selection = self.buffer().selection();
@@ -2640,7 +2641,13 @@ impl App {
             SemanticAction::InsertNewline => {
                 self.dismiss_lsp_popups();
                 self.clear_snippet();
-                self.edit(|buffer| buffer.insert_newline());
+                if self.editor_prefs.auto_indent {
+                    self.buffer_mut().resolve_sticky();
+                    let edit = self.enter_edit();
+                    self.edit(|buffer| buffer.apply_indent_edit(edit));
+                } else {
+                    self.edit(|buffer| buffer.insert_newline());
+                }
             }
             SemanticAction::InsertText(text) => {
                 self.dismiss_lsp_popups();
@@ -3593,6 +3600,7 @@ impl App {
             SettingId::TabWidth
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
+            | SettingId::AutoIndent
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.set_choice(id, index);
@@ -3664,6 +3672,7 @@ impl App {
             SettingId::TabWidth
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
+            | SettingId::AutoIndent
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.restore_choice(id, origin);
@@ -3728,6 +3737,7 @@ impl App {
             SettingId::TabWidth
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
+            | SettingId::AutoIndent
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => self.editor_prefs.choice_token(id),
             SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
@@ -3793,6 +3803,7 @@ impl App {
             SettingId::TabWidth
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
+            | SettingId::AutoIndent
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => (
                 self.editor_prefs.choice_index(id),
@@ -3918,6 +3929,7 @@ impl App {
             SettingId::TabWidth
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
+            | SettingId::AutoIndent
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.reset(id);
@@ -5860,6 +5872,61 @@ impl App {
         self.scroll_to_cursor();
     }
 
+    /// The auto-indent edit for `Enter` at the current selection.
+    fn enter_edit(&self) -> crate::indent::Edit {
+        let tab = self.active_editor().tab();
+        let rope = tab.buffer.rope();
+        let selection = tab.buffer.selection();
+        let (from, to) = (selection.from(), selection.to());
+        let line_start = rope.line_to_char(rope.char_to_line(from));
+        let literal = tab.literal_test(line_start, from + 1);
+        let unit = tab.buffer.indent_style().unit();
+        let cx = crate::indent::Context {
+            language: self.path().and_then(crate::syntax::Language::detect),
+            unit: &unit,
+            ending: tab.buffer.line_ending().as_str(),
+            literal: &literal,
+        };
+        crate::indent::on_enter(rope, from, to, &cx)
+    }
+
+    /// Types closing bracket `c` at the indent of its opener when the line is blank before
+    /// the cursor. False when auto indent is off, a snippet is active, text is selected, or
+    /// nothing would move, so the plain typing path runs instead.
+    fn closer_dedent(&mut self, c: char) -> bool {
+        if !matches!(c, ')' | ']' | '}')
+            || !self.editor_prefs.auto_indent
+            || self.nav.snippet.is_some()
+        {
+            return false;
+        }
+        self.buffer_mut().resolve_sticky();
+        let edit = {
+            let tab = self.active_editor().tab();
+            let selection = tab.buffer.selection();
+            if !selection.is_empty() {
+                return false;
+            }
+            let at = selection.head;
+            let rope = tab.buffer.rope();
+            let literal =
+                tab.literal_test(at.saturating_sub(crate::brackets::MATCH_SCAN_CHARS), at + 1);
+            let unit = tab.buffer.indent_style().unit();
+            let cx = crate::indent::Context {
+                language: self.path().and_then(crate::syntax::Language::detect),
+                unit: &unit,
+                ending: tab.buffer.line_ending().as_str(),
+                literal: &literal,
+            };
+            crate::indent::on_closer(rope, at, c, &cx)
+        };
+        let Some(edit) = edit else {
+            return false;
+        };
+        self.edit(|buffer| buffer.apply_indent_edit(edit));
+        true
+    }
+
     fn toggle_comment(&mut self) {
         self.clear_snippet();
         let Some(marker) = self.comment_marker() else {
@@ -7484,6 +7551,59 @@ mod tests {
         let mut app = quotes_app("say(\"hi| there\")", None, false);
         app.handle(SemanticAction::SelectInsideQuotes);
         assert_eq!(app.buffer().selected_text(), "hi there");
+    }
+
+    fn shown(app: &App) -> String {
+        let mut text = app.buffer().rope().to_string();
+        let head = app.buffer().selection().head;
+        let byte = app.buffer().rope().char_to_byte(head);
+        text.insert(byte, '|');
+        text
+    }
+
+    #[test]
+    fn enter_between_braces_splits_and_undoes_in_one_step() {
+        let mut app = quotes_app("fn main() {|}", Some("src/main.rs"), true);
+        app.handle(SemanticAction::InsertNewline);
+        assert_eq!(shown(&app), "fn main() {\n    |\n}");
+        app.handle(SemanticAction::InsertChar('x'));
+        assert_eq!(shown(&app), "fn main() {\n    x|\n}");
+        app.handle(SemanticAction::Undo);
+        app.handle(SemanticAction::Undo);
+        assert_eq!(shown(&app), "fn main() {|}");
+    }
+
+    #[test]
+    fn enter_ignores_an_opener_inside_a_string_with_a_tree() {
+        let mut app = quotes_app("fn f() {\n    let s = \"{|\";\n}", Some("src/lib.rs"), true);
+        app.handle(SemanticAction::InsertNewline);
+        assert_eq!(shown(&app), "fn f() {\n    let s = \"{\n    |\";\n}");
+    }
+
+    #[test]
+    fn enter_after_a_python_block_opener_and_typed_closer_dedents() {
+        let mut app = quotes_app("def f():|", Some("a.py"), false);
+        app.handle(SemanticAction::InsertNewline);
+        assert_eq!(shown(&app), "def f():\n    |");
+
+        let mut app = quotes_app("const a = {\n  b: 1,|", Some("a.js"), false);
+        app.buffer_mut().apply_editor_style(true, 2, None);
+        app.handle(SemanticAction::InsertNewline);
+        assert_eq!(shown(&app), "const a = {\n  b: 1,\n  |");
+        app.handle(SemanticAction::InsertChar('}'));
+        assert_eq!(shown(&app), "const a = {\n  b: 1,\n}|");
+        app.handle(SemanticAction::Undo);
+        assert_eq!(shown(&app), "const a = {\n  b: 1,\n  |");
+    }
+
+    #[test]
+    fn auto_indent_off_keeps_the_plain_line_indent() {
+        let mut app = quotes_app("    fn main() {|}", Some("src/main.rs"), false);
+        app.editor_prefs.auto_indent = false;
+        app.handle(SemanticAction::InsertNewline);
+        assert_eq!(shown(&app), "    fn main() {\n    |}");
+        app.handle(SemanticAction::InsertChar('}'));
+        assert_eq!(shown(&app), "    fn main() {\n    }|}");
     }
 
     #[test]
