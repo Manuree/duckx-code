@@ -270,6 +270,18 @@ pub fn bindings() -> &'static [Binding] {
             action: || SemanticAction::MatchBracket { extend: true },
         },
         Binding {
+            id: "select-inside-quotes",
+            label: "Select inside quotes",
+            detail: "Select the text inside the quotes around the cursor; again adds the quotes.",
+            // Terminals report Shift+' as `'` with Shift, or as `"` with or without Shift.
+            defaults: &[
+                ch('\'', true, false, true),
+                ch('"', true, false, false),
+                ch('"', true, false, true),
+            ],
+            action: || SemanticAction::SelectInsideQuotes,
+        },
+        Binding {
             id: "jump-back",
             label: "Jump back",
             detail: "Return to the place from before the last jump.",
@@ -734,6 +746,30 @@ mod tests {
                 assert_eq!(map.owner(*chord), Some(binding.id));
             }
         }
+    }
+
+    #[test]
+    fn ctrl_shift_quote_selects_inside_quotes_however_the_terminal_reports_it() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let map = KeyMap::defaults();
+        let ctrl = KeyModifiers::CONTROL;
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        for key in [
+            KeyEvent::new(KeyCode::Char('\''), ctrl_shift),
+            KeyEvent::new(KeyCode::Char('"'), ctrl),
+            KeyEvent::new(KeyCode::Char('"'), ctrl_shift),
+        ] {
+            assert_eq!(
+                dispatch(&key, &map),
+                Some(SemanticAction::SelectInsideQuotes),
+                "{key:?}"
+            );
+        }
+        assert_eq!(map.display_of("select-inside-quotes"), "Ctrl+Shift+'");
+        assert_eq!(
+            dispatch(&KeyEvent::new(KeyCode::Char('\''), ctrl), &map),
+            None
+        );
     }
 
     #[test]

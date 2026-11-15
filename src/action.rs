@@ -152,6 +152,8 @@ pub enum SemanticAction {
     MatchBracket {
         extend: bool,
     },
+    /// Select the text inside the quotes around the cursor; again to take in the marks.
+    SelectInsideQuotes,
     /// Ask the language server for completions at the cursor.
     Complete,
     /// Move the current line or the selected lines up or down.

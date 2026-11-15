@@ -164,6 +164,91 @@ pub fn scan_partner(rope: &Rope, at: usize, skip: &dyn Fn(usize) -> bool, limit:
     }
 }
 
+/// The nearest `open`/`close` pair around chars `start..end`, as the opener's and the
+/// closer's char indices, for `select-inside-parens` and its siblings. Only that bracket
+/// kind nests. With an empty range, a cursor on `open` or `close` takes that bracket's own
+/// pair; a range that is exactly one pair (marks included) returns that pair.
+/// `counts(i)` says whether the bracket at char `i` takes part (a string or comment
+/// bracket is left out by the caller); the pair must close at or after `end`.
+pub fn enclosing_pair(
+    rope: &Rope,
+    start: usize,
+    end: usize,
+    open: char,
+    close: char,
+    counts: &dyn Fn(usize) -> bool,
+) -> Option<(usize, usize)> {
+    let len = rope.len_chars();
+    let (start, end) = (start.min(len), end.min(len));
+    let is = |at: usize, ch: char| at < len && rope.char(at) == ch && counts(at);
+    let closer = |from: usize| closer_from(rope, from, open, close, counts);
+    if start == end {
+        if is(start, open)
+            && let Some(mate) = closer(start)
+        {
+            return Some((start, mate));
+        }
+        if is(start, close) {
+            return opener_before(rope, start, open, close, counts, &|_| true);
+        }
+    } else if is(start, open) && end > 0 && closer(start) == Some(end - 1) {
+        return Some((start, end - 1));
+    }
+    opener_before(rope, start, open, close, counts, &|mate| mate >= end)
+}
+
+/// Walks back from `before` to the first unmatched `open` whose closer passes `fits`.
+fn opener_before(
+    rope: &Rope,
+    before: usize,
+    open: char,
+    close: char,
+    counts: &dyn Fn(usize) -> bool,
+    fits: &dyn Fn(usize) -> bool,
+) -> Option<(usize, usize)> {
+    let mut depth = 0usize;
+    let mut chars = rope.chars_at(before);
+    let mut at = before;
+    while let Some(ch) = chars.prev() {
+        at -= 1;
+        if ch == close && counts(at) {
+            depth += 1;
+        } else if ch == open && counts(at) {
+            if depth > 0 {
+                depth -= 1;
+                continue;
+            }
+            let mate = closer_from(rope, at, open, close, counts)?;
+            if fits(mate) {
+                return Some((at, mate));
+            }
+        }
+    }
+    None
+}
+
+fn closer_from(
+    rope: &Rope,
+    from: usize,
+    open: char,
+    close: char,
+    counts: &dyn Fn(usize) -> bool,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, ch) in rope.chars_at(from + 1).enumerate() {
+        let at = from + 1 + offset;
+        if ch == open && counts(at) {
+            depth += 1;
+        } else if ch == close && counts(at) {
+            if depth == 0 {
+                return Some(at);
+            }
+            depth -= 1;
+        }
+    }
+    None
+}
+
 /// Color of one bracket in the color pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BracketColor {
@@ -480,5 +565,84 @@ mod tests {
             colorize(&Rope::from_str(")"), 0, 1, &code),
             vec![(0, Unmatched)]
         );
+    }
+
+    /// `text` with `|` at the cursor; the text inside the pair found there.
+    fn inside(text: &str, open: char, close: char) -> Option<String> {
+        inside_with(text, open, close, &|_| true)
+    }
+
+    fn inside_with(
+        text: &str,
+        open: char,
+        close: char,
+        counts: &dyn Fn(usize) -> bool,
+    ) -> Option<String> {
+        let at = text.chars().position(|ch| ch == '|').unwrap();
+        let rope = Rope::from_str(&text.replacen('|', "", 1));
+        let (o, c) = enclosing_pair(&rope, at, at, open, close, counts)?;
+        Some(rope.slice(o + 1..c).to_string())
+    }
+
+    #[test]
+    fn enclosing_pair_takes_the_nearest_pair_of_its_kind() {
+        assert_eq!(
+            inside("add(first(1|, 2), 3)", '(', ')').as_deref(),
+            Some("1, 2")
+        );
+        assert_eq!(
+            inside("add(first(1, 2), |3)", '(', ')').as_deref(),
+            Some("first(1, 2), 3")
+        );
+        assert_eq!(
+            inside("f(a, [b|, c])", '(', ')').as_deref(),
+            Some("a, [b, c]")
+        );
+        assert_eq!(inside("f(a, [b|, c])", '[', ']').as_deref(), Some("b, c"));
+        assert_eq!(
+            inside(
+                "fn f() {\n    if x {\n        y();\n    }\n  | z\n}",
+                '{',
+                '}'
+            )
+            .as_deref(),
+            Some("\n    if x {\n        y();\n    }\n   z\n")
+        );
+    }
+
+    #[test]
+    fn enclosing_pair_on_a_bracket_uses_that_pair() {
+        assert_eq!(inside("f(|(a), b)", '(', ')').as_deref(), Some("a"));
+        assert_eq!(inside("f((a|), b)", '(', ')').as_deref(), Some("a"));
+        assert_eq!(inside("f(|)", '(', ')').as_deref(), Some(""));
+    }
+
+    #[test]
+    fn enclosing_pair_without_a_pair_is_none() {
+        assert_eq!(inside("let x| = 1;", '(', ')'), None);
+        assert_eq!(inside("f(a) |g(b)", '(', ')'), None);
+        assert_eq!(inside("f(a, b|", '(', ')'), None);
+        assert_eq!(inside("[a|]", '(', ')'), None);
+    }
+
+    #[test]
+    fn enclosing_pair_skips_brackets_the_caller_leaves_out() {
+        let text = "f(\")\", x|)";
+        let quoted = |at: usize| !(2..5).contains(&at);
+        assert_eq!(
+            inside_with(text, '(', ')', &quoted).as_deref(),
+            Some("\")\", x")
+        );
+        assert_eq!(inside(text, '(', ')'), None);
+    }
+
+    #[test]
+    fn enclosing_pair_of_a_selected_pair_or_inside_grows_outward() {
+        let rope = Rope::from_str("((a) b)");
+        let any = |_: usize| true;
+        assert_eq!(enclosing_pair(&rope, 1, 2, '(', ')', &any), Some((0, 6)));
+        assert_eq!(enclosing_pair(&rope, 1, 4, '(', ')', &any), Some((1, 3)));
+        assert_eq!(enclosing_pair(&rope, 2, 3, '(', ')', &any), Some((1, 3)));
+        assert_eq!(enclosing_pair(&rope, 2, 5, '(', ')', &any), Some((0, 6)));
     }
 }

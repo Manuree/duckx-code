@@ -2784,6 +2784,7 @@ impl App {
             SemanticAction::GotoDefinition => self.goto_definition(),
             SemanticAction::GotoReferences => self.goto_references(),
             SemanticAction::MatchBracket { extend } => self.match_bracket(extend),
+            SemanticAction::SelectInsideQuotes => self.select_inside_quotes(),
             SemanticAction::Complete => self.complete_now(),
             SemanticAction::MoveLine { down } => {
                 self.clear_snippet();
@@ -5073,6 +5074,9 @@ impl App {
             CommandId::MatchBracket => self.match_bracket(false),
             CommandId::SelectBracket => self.match_bracket(true),
             CommandId::SelectInsideQuotes => self.select_inside_quotes(),
+            CommandId::SelectInsideParens => self.select_inside_pair('(', ')'),
+            CommandId::SelectInsideBraces => self.select_inside_pair('{', '}'),
+            CommandId::SelectInsideBrackets => self.select_inside_pair('[', ']'),
             CommandId::FindNext => self.find_adjacent(true)?,
             CommandId::FindPrevious => self.find_adjacent(false)?,
             CommandId::Pane => self.start_pane_select(),
@@ -5804,6 +5808,52 @@ impl App {
                 span.outer
             } else {
                 span.inner
+            }
+        };
+        self.buffer_mut().select_span(range.0, range.1);
+        self.scroll_to_cursor();
+    }
+
+    /// Selects the text inside the nearest `open`/`close` pair around the cursor or the
+    /// selection, across lines. With a syntax tree, a bracket in a string or comment pairs
+    /// only within that same string or comment. Again on that text takes in the brackets;
+    /// once more goes back inside.
+    fn select_inside_pair(&mut self, open: char, close: char) {
+        self.dismiss_lsp_popups();
+        self.clear_snippet();
+        let range = {
+            let tab = self.active_editor().tab();
+            let rope = tab.buffer.rope();
+            let selection = tab.buffer.selection();
+            let (start, end) = (
+                selection.anchor.min(selection.head),
+                selection.anchor.max(selection.head),
+            );
+            let literals = tab
+                .syntax
+                .as_ref()
+                .filter(|state| state.has_tree())
+                .map(|state| state.literal_ranges(rope, 0, rope.len_chars()))
+                .unwrap_or_default();
+            let literal_of = |at: usize| {
+                let after = literals.partition_point(|(from, _)| *from <= at);
+                (after > 0 && at < literals[after - 1].1).then(|| literals[after - 1])
+            };
+            // Inside a string or comment, its own brackets pair first, then the code around it.
+            let pair_from = |home: Option<(usize, usize)>| {
+                let counts = |at: usize| literal_of(at) == home;
+                crate::brackets::enclosing_pair(rope, start, end, open, close, &counts)
+            };
+            let home = literal_of(start);
+            let found = pair_from(home).or_else(|| home.and_then(|_| pair_from(None)));
+            let Some((o, c)) = found else {
+                return;
+            };
+            let (inner, outer) = ((o + 1, c), (o, c + 1));
+            if start < end && (start, end) == inner {
+                outer
+            } else {
+                inner
             }
         };
         self.buffer_mut().select_span(range.0, range.1);
@@ -7337,6 +7387,103 @@ mod tests {
         let mut app = quotes_app("no quotes| here", None, false);
         assert_eq!(select_quotes(&mut app), "");
         assert_eq!(app.buffer().selection().head, 9);
+    }
+
+    fn select_pair(app: &mut App, id: crate::command::CommandId) -> String {
+        app.run_command(id, None).unwrap();
+        let selection = app.buffer().selection();
+        let (start, end) = (
+            selection.anchor.min(selection.head),
+            selection.anchor.max(selection.head),
+        );
+        app.buffer().rope().slice(start..end).to_string()
+    }
+
+    #[test]
+    fn select_inside_pair_takes_nested_and_multi_line_pairs_then_their_brackets() {
+        use crate::command::CommandId::{
+            SelectInsideBraces, SelectInsideBrackets, SelectInsideParens,
+        };
+        let text = "fn main() {\n    let t = add(first(1|, 2), [3, 4]);\n}\n";
+        for parse in [false, true] {
+            let mut app = quotes_app(text, Some("src/main.rs"), parse);
+            assert_eq!(select_pair(&mut app, SelectInsideParens), "1, 2");
+            assert_eq!(select_pair(&mut app, SelectInsideParens), "(1, 2)");
+            assert_eq!(select_pair(&mut app, SelectInsideParens), "1, 2");
+
+            let mut app = quotes_app(text, Some("src/main.rs"), parse);
+            assert_eq!(
+                select_pair(&mut app, SelectInsideBraces),
+                "\n    let t = add(first(1, 2), [3, 4]);\n"
+            );
+            assert_eq!(
+                select_pair(&mut app, SelectInsideBraces),
+                "{\n    let t = add(first(1, 2), [3, 4]);\n}"
+            );
+
+            let mut app = quotes_app(text, Some("src/main.rs"), parse);
+            select_pair(&mut app, SelectInsideBrackets);
+            assert!(
+                app.buffer().selection().is_empty(),
+                "no [] around the cursor"
+            );
+        }
+        let mut app = quotes_app("x = [1, |[2, 3]]", None, false);
+        assert_eq!(select_pair(&mut app, SelectInsideBrackets), "2, 3");
+        let mut app = quotes_app("x = [1, [2, 3|]]", None, false);
+        assert_eq!(select_pair(&mut app, SelectInsideBrackets), "2, 3");
+        let mut app = quotes_app("x = [1, [2, 3]|]", None, false);
+        assert_eq!(select_pair(&mut app, SelectInsideBrackets), "1, [2, 3]");
+    }
+
+    #[test]
+    fn select_inside_pair_skips_brackets_in_strings_and_comments_with_a_tree() {
+        use crate::command::CommandId::SelectInsideParens;
+        let text = "fn f() { g(\")\", x|); // )\n}\n";
+        let mut app = quotes_app(text, Some("src/lib.rs"), true);
+        assert_eq!(select_pair(&mut app, SelectInsideParens), "\")\", x");
+
+        // Inside a string its own brackets pair first, then the code around it.
+        let mut app = quotes_app("fn f() { g(\"(a|b)\"); }", Some("src/lib.rs"), true);
+        assert_eq!(select_pair(&mut app, SelectInsideParens), "ab");
+        let mut app = quotes_app("fn f() { g(\"a|b\"); }", Some("src/lib.rs"), true);
+        assert_eq!(select_pair(&mut app, SelectInsideParens), "\"ab\"");
+    }
+
+    #[test]
+    fn select_inside_pair_without_a_pair_keeps_the_cursor() {
+        use crate::command::CommandId::SelectInsideBraces;
+        let mut app = quotes_app("let x| = (1, 2);", None, false);
+        assert_eq!(select_pair(&mut app, SelectInsideBraces), "");
+        assert_eq!(app.buffer().selection().head, 5);
+    }
+
+    #[test]
+    fn command_bar_aliases_run_the_inside_commands() {
+        let mut app = quotes_app(
+            "fn main() {\n    println!(\"Hello,| world!\");\n}\n",
+            Some("src/main.rs"),
+            false,
+        );
+        run(&mut app, "\"\"");
+        assert_eq!(app.buffer().selected_text(), "Hello, world!");
+        run(&mut app, "''");
+        assert_eq!(app.buffer().selected_text(), "\"Hello, world!\"");
+        // The parentheses hold exactly that selection, so `()` takes them in too.
+        run(&mut app, "()");
+        assert_eq!(app.buffer().selected_text(), "(\"Hello, world!\")");
+        run(&mut app, "{}");
+        assert_eq!(
+            app.buffer().selected_text(),
+            "\n    println!(\"Hello, world!\");\n"
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_quote_selects_inside_quotes_in_the_editor() {
+        let mut app = quotes_app("say(\"hi| there\")", None, false);
+        app.handle(SemanticAction::SelectInsideQuotes);
+        assert_eq!(app.buffer().selected_text(), "hi there");
     }
 
     #[test]
