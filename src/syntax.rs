@@ -422,6 +422,28 @@ impl SyntaxState {
         }
     }
 
+    /// What the parse tree says about a quoted string around char `at`: `Some(Some(span))` for the
+    /// innermost string or char literal holding it, `Some(None)` when a code tree finds none (so
+    /// lifetimes and stray marks never pair), and `None` when there is no tree to ask, or only
+    /// Markdown prose, where a line scan should decide.
+    pub fn string_span(&self, rope: &Rope, at: usize) -> Option<Option<crate::quotes::QuoteSpan>> {
+        let tree = self.tree.as_ref()?;
+        let at = at.min(rope.len_chars());
+        let byte = rope.char_to_byte(at);
+        let end = rope.try_char_to_byte(at + 1).unwrap_or(byte);
+        if let Some(injection) = self
+            .injections
+            .iter()
+            .find(|injection| byte >= injection.start_byte && byte < injection.end_byte)
+        {
+            return Some(string_in(injection.tree.root_node(), rope, byte, end));
+        }
+        match tree {
+            HighlightTree::Code(tree) => Some(string_in(tree.root_node(), rope, byte, end)),
+            HighlightTree::Markdown(_) => None,
+        }
+    }
+
     fn in_literal(&self, byte: usize, bracket: char) -> bool {
         let Some(tree) = self.tree.as_ref() else {
             return false;
@@ -508,6 +530,30 @@ fn mate_byte(node: Node, rope: &Rope, byte: usize, bracket: char) -> Option<usiz
         if open == want_open && node.start_byte() < byte {
             return Some(node.start_byte());
         }
+    }
+    None
+}
+
+/// The innermost string-like node over `byte..end` whose text is wrapped in quote marks; nodes
+/// for the contents alone (`string_content`, `string_fragment`) have no marks and are skipped.
+fn string_in(root: Node, rope: &Rope, byte: usize, end: usize) -> Option<crate::quotes::QuoteSpan> {
+    if byte < root.start_byte() || end > root.end_byte() {
+        return None;
+    }
+    let mut current = root.descendant_for_byte_range(byte, end);
+    while let Some(node) = current {
+        let kind = node.kind();
+        if (kind.contains("string") || kind.contains("char")) && !kind.contains("comment") {
+            let start = rope.byte_to_char(node.start_byte());
+            let stop = rope.byte_to_char(node.end_byte());
+            let last = rope.chars_at(stop).prev();
+            if last.is_some_and(|ch| crate::quotes::QUOTES.contains(&ch))
+                && let Some(span) = crate::quotes::from_literal(rope, start, stop)
+            {
+                return Some(span);
+            }
+        }
+        current = node.parent();
     }
     None
 }
