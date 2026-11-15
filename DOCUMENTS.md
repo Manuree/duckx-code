@@ -62,6 +62,31 @@ Behavior while a selection is active:
 * Other movement keys without `Shift` drop the selection and move from the cursor.
 * The status bar shows how many characters are selected.
 
+### Mouse
+
+With **Mouse** On (Settings → Editor, the default), duckx-code takes the mouse:
+
+| Mouse | Action |
+| :--- | :--- |
+| Click in the text | Moves the cursor to that character. A click past the end of a line lands at its end. Wide (CJK) characters, emoji, and tabs count by the cells they cover, and a scrolled view counts from the first line and column shown. |
+| Click on a line number | Moves the cursor to the start of that line. |
+| Drag | Selects the text between the press and the pointer. Only buffer text is selected, never line numbers or the gutter. Dragging above or below the window scrolls it one line per move. |
+| `Shift` + click | Extends the selection from the cursor to the click. A terminal that keeps `Shift` + mouse for its own selection (Windows Terminal does) never sends this click; there, `Shift` + click starts the terminal's selection instead. |
+| Double-click / triple-click | Selects the word (or the run of punctuation or spaces) / the whole line. |
+| Wheel | Scrolls the window under the pointer 3 lines per notch, without moving the focus. The cursor moves only as far as needed to stay on screen, and a selection keeps its anchor. |
+| Click on a tab | Switches to that tab and focuses its window. |
+| Click in another window, the sidebar, or the assistant panel | Focuses it. |
+| Click a sidebar row / double-click it | Selects the row (`Shift` + click selects a range) / opens it, the same as `Enter`. The wheel scrolls the tree. |
+| Wheel over the assistant panel | Scrolls the conversation back; scrolling down to the latest message returns to the prompt. |
+| Command Bar | A click highlights a command, a double-click runs it (a command that takes an argument fills in its name). The wheel moves through the list. A click outside the bar closes it. |
+| Completion, code action, and layout lists | A click outside closes the list, then lands where it was aimed. The wheel moves through the list. |
+
+`Ctrl + C` copies a mouse selection the same as a keyboard one: only the buffer text.
+
+Full-screen pages (Settings, the file picker, prompts, About) and items inside the completion and code action lists keep using the keyboard; a click there does nothing.
+
+**The terminal's own selection.** While Mouse is On, hold `Shift` while dragging to use the terminal's native selection instead (Windows Terminal, kitty, WezTerm, and most others support this). That selection is drawn by the terminal, so it includes line numbers and anything else on screen. Turn Mouse Off to give every click and drag back to the terminal.
+
 ---
 
 ## 3. Editing
@@ -647,6 +672,7 @@ Editor, Files, and Keybindings are saved in the same `settings.json` as the them
 | Indent with spaces | On, Off | On inserts spaces. Off inserts a tab character. Text already in the file is left as it is. |
 | Line endings | Auto, LF, CRLF | Auto keeps the ending detected in the file. LF or CRLF is the ending written the next time the file is saved. |
 | Auto indent | On, Off | On indents after `{ ( [` and block openers on `Enter`, splits a pair such as `{}` around the cursor, and moves a typed closer back to its opener's indent. Off only keeps the current line's indent. The default is On. See [Auto indent](#auto-indent). |
+| Mouse | On, Off | On lets clicks, drags, and the wheel work inside duckx-code (see [Mouse](#mouse)); `Shift` + drag still uses the terminal's own selection. Off leaves the mouse to the terminal, so dragging selects screen text as usual. The default is On. |
 | Match brackets | On, Off | On draws the bracket at the cursor (or just before it) and its pair bold on a soft background, in the focused window, when both are on screen. A bracket with no pair is drawn in the error color. Brackets in strings and comments are skipped. The default is On. The `bracket-match` command flips it. |
 | Colorize bracket pairs | On, Off | On colors `()` `[]` `{}` by how deep they are nested, cycling through the syntax theme's bracket colors. Unmatched ones use the error color. The default is On. The `bracket-colors` command flips it. |
 | Trim trailing space | On, Off | On removes spaces and tabs at the end of a line when the file is saved. The default is Off. |

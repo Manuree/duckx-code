@@ -19,6 +19,8 @@ pub enum SettingId {
     LineEnding,
     /// Indent new lines from the code around them, and dedent a typed closing bracket.
     AutoIndent,
+    /// Click, drag, and wheel in the editor, the sidebar, and the panels.
+    Mouse,
     /// Highlight the bracket at the cursor and its partner.
     MatchBrackets,
     /// Color brackets by nesting depth.
@@ -1468,6 +1470,7 @@ impl AiPrefs {
                 | SettingId::IndentWithSpaces
                 | SettingId::LineEnding
                 | SettingId::AutoIndent
+                | SettingId::Mouse
                 | SettingId::MatchBrackets
                 | SettingId::ColorizeBrackets
                 | SettingId::ColorTheme
@@ -1778,6 +1781,9 @@ pub struct EditorPrefs {
     /// `Enter` indents after an opener and a typed closer dedents. On by default.
     #[serde(default = "enabled")]
     pub auto_indent: bool,
+    /// Capture the mouse for clicks, drags, and the wheel. On by default.
+    #[serde(default = "enabled")]
+    pub mouse: bool,
     /// Highlight the bracket at the cursor and its partner. On by default.
     #[serde(default = "enabled")]
     pub match_brackets: bool,
@@ -1793,6 +1799,7 @@ impl Default for EditorPrefs {
             indent_with_spaces: true,
             line_ending: LineEndingPref::Auto,
             auto_indent: true,
+            mouse: true,
             match_brackets: true,
             colorize_brackets: true,
         }
@@ -1810,6 +1817,7 @@ impl EditorPrefs {
                 .collect(),
             SettingId::IndentWithSpaces
             | SettingId::AutoIndent
+            | SettingId::Mouse
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => vec!["On".into(), "Off".into()],
             SettingId::LineEnding => vec!["Auto".into(), "LF".into(), "CRLF".into()],
@@ -1825,6 +1833,7 @@ impl EditorPrefs {
                 .unwrap_or(1),
             SettingId::IndentWithSpaces => usize::from(!self.indent_with_spaces),
             SettingId::AutoIndent => usize::from(!self.auto_indent),
+            SettingId::Mouse => usize::from(!self.mouse),
             SettingId::MatchBrackets => usize::from(!self.match_brackets),
             SettingId::ColorizeBrackets => usize::from(!self.colorize_brackets),
             SettingId::LineEnding => self.line_ending.index(),
@@ -1837,6 +1846,7 @@ impl EditorPrefs {
             SettingId::TabWidth => self.tab_width.to_string(),
             SettingId::IndentWithSpaces => on_off(self.indent_with_spaces),
             SettingId::AutoIndent => on_off(self.auto_indent),
+            SettingId::Mouse => on_off(self.mouse),
             SettingId::MatchBrackets => on_off(self.match_brackets),
             SettingId::ColorizeBrackets => on_off(self.colorize_brackets),
             SettingId::LineEnding => self.line_ending.as_str().to_string(),
@@ -1860,6 +1870,7 @@ impl EditorPrefs {
             }
             SettingId::IndentWithSpaces => self.indent_with_spaces = index == 0,
             SettingId::AutoIndent => self.auto_indent = index == 0,
+            SettingId::Mouse => self.mouse = index == 0,
             SettingId::MatchBrackets => self.match_brackets = index == 0,
             SettingId::ColorizeBrackets => self.colorize_brackets = index == 0,
             SettingId::LineEnding => self.line_ending = LineEndingPref::from_index(index),
@@ -1878,6 +1889,7 @@ impl EditorPrefs {
             }
             SettingId::IndentWithSpaces => self.indent_with_spaces = token != "off",
             SettingId::AutoIndent => self.auto_indent = token != "off",
+            SettingId::Mouse => self.mouse = token != "off",
             SettingId::MatchBrackets => self.match_brackets = token != "off",
             SettingId::ColorizeBrackets => self.colorize_brackets = token != "off",
             SettingId::LineEnding => {
@@ -1897,6 +1909,7 @@ impl EditorPrefs {
             SettingId::TabWidth => self.tab_width = defaults.tab_width,
             SettingId::IndentWithSpaces => self.indent_with_spaces = defaults.indent_with_spaces,
             SettingId::AutoIndent => self.auto_indent = defaults.auto_indent,
+            SettingId::Mouse => self.mouse = defaults.mouse,
             SettingId::MatchBrackets => self.match_brackets = defaults.match_brackets,
             SettingId::ColorizeBrackets => self.colorize_brackets = defaults.colorize_brackets,
             SettingId::LineEnding => self.line_ending = defaults.line_ending,
@@ -2311,6 +2324,11 @@ pub fn sections() -> &'static [Section] {
                             label: "Auto indent",
                             detail: "Indent after { ( [ or a block opener on Enter; a typed closer dedents.",
                             id: SettingId::AutoIndent,
+                        },
+                        Item {
+                            label: "Mouse",
+                            detail: "Click, drag, and scroll in the app. Off: the terminal selects text.",
+                            id: SettingId::Mouse,
                         },
                         Item {
                             label: "Match brackets",

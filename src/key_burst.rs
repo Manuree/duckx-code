@@ -51,6 +51,12 @@ fn is_release(event: &Event) -> bool {
     matches!(event, Event::Key(key) if key.kind == KeyEventKind::Release)
 }
 
+/// Pointer motion with no button held. Mouse capture reports every move; nothing uses
+/// them, and one arriving inside a Windows paste must not split it.
+fn is_bare_motion(event: &Event) -> bool {
+    matches!(event, Event::Mouse(mouse) if mouse.kind == crossterm::event::MouseEventKind::Moved)
+}
+
 /// Drop `ESC [ 2 0 0 ~` / `ESC [ 2 0 1 ~` that leaked through as keys.
 fn strip_marker_keys(events: Vec<Event>) -> Vec<Event> {
     let mut out = Vec::with_capacity(events.len());
@@ -129,7 +135,7 @@ impl KeyBurst {
 
     /// Feed one batch of events that were already queued together, in arrival order.
     /// Returns the events to route now, in order. Key releases are dropped (every
-    /// router ignores them; Windows reports one per press). A paste stays pending
+    /// router ignores them; Windows reports one per press), and so are bare mouse moves. A paste stays pending
     /// until [`flush_due`](Self::flush_due), a non-text event, or [`flush`](Self::flush).
     pub fn push(&mut self, batch: Vec<Event>, now: Instant) -> Vec<Event> {
         let mut out = Vec::new();
@@ -138,7 +144,7 @@ impl KeyBurst {
         }
         let batch: Vec<Event> = batch
             .into_iter()
-            .filter(|event| !is_release(event))
+            .filter(|event| !is_release(event) && !is_bare_motion(event))
             .collect();
         let batch = strip_marker_keys(batch);
         let mut run: Vec<(Event, char)> = Vec::new();
@@ -333,6 +339,23 @@ print(\"เสร็จแล้ว\")\n";
         assert_eq!(done.len(), 1);
         assert_eq!(app.buffer().rope().to_string(), SCRIPT);
         assert_eq!(undo_steps(&mut app), 1);
+    }
+
+    #[test]
+    fn mouse_moves_inside_a_paste_do_not_split_it() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let moved = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 3,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        });
+        let mut keys = windows_keys(&crlf(SCRIPT));
+        keys.insert(keys.len() / 2, moved);
+        let mut app = editor();
+        let done = feed(&mut app, vec![keys]);
+        assert_eq!(done.len(), 1, "one paste");
+        assert_eq!(app.buffer().rope().to_string(), SCRIPT);
     }
 
     #[test]

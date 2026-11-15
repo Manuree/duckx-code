@@ -297,6 +297,62 @@ fn split_gutter(area: Rect, line_count: usize, diff_column: bool) -> (Rect, Rect
 }
 
 /// Number of tree rows the sidebar shows in `area`, for scrolling and paging.
+/// The file tree rows inside the sidebar `area`, below the filter box and the root name.
+pub fn sidebar_tree_area(area: Rect) -> Rect {
+    sidebar::tree_area(area)
+}
+
+/// The tab drawn at column `x` of a window's title row `area`, as `render_title` lays it out.
+pub fn tab_at(editor: &crate::app::Editor, area: Rect, x: u16) -> Option<usize> {
+    if x < area.x || x >= area.right() {
+        return None;
+    }
+    let tabs = editor.tabs();
+    let room = area.width.saturating_sub(1) as usize;
+    let (start, end) = visible_tabs(tabs, editor.active_index(), room);
+    let offset = (x - area.x) as usize;
+    let mut left = 1;
+    for (index, tab) in tabs.iter().enumerate().take(end).skip(start) {
+        if index > start {
+            left += 2;
+        }
+        let width = tab_width(tab);
+        if (left..left + width).contains(&offset) {
+            return Some(index);
+        }
+        left += width;
+    }
+    None
+}
+
+/// How many rows the assistant panel at `area` can scroll back.
+pub fn agent_max_scroll(app: &App, area: Rect) -> usize {
+    agent::max_scroll(app, area)
+}
+
+/// Rows of the Commands list in `area` (`layout.command`) and the first command shown,
+/// as the dropdown draws them, for a click on the list.
+pub fn command_list_rows(app: &App, area: Rect) -> Option<(Rect, usize)> {
+    let bar = app.command_bar.as_ref()?;
+    if area.width < 6 || area.height < 3 {
+        return None;
+    }
+    let len = match app.workspace_choices() {
+        Some(rows) => rows.len(),
+        None => crate::command::suggestions(
+            &bar.input,
+            app.recent_for(bar.context),
+            bar.context,
+            bar.files,
+        )
+        .len(),
+    };
+    let inner = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
+    let selected = bar.selected.min(len.saturating_sub(1));
+    let start = dropdown::window_start(selected, len, inner.height as usize);
+    Some((inner, start))
+}
+
 pub fn sidebar_tree_height(area: Rect) -> usize {
     sidebar::tree_area(area).height as usize
 }

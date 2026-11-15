@@ -344,7 +344,7 @@ impl App {
     }
 
     /// Number of rendered rows for the preview in `pane` at its last width.
-    fn preview_rows(&self, pane: EditorId) -> usize {
+    pub(super) fn preview_rows(&self, pane: EditorId) -> usize {
         let Some(preview) = self.preview(pane) else {
             return 0;
         };
