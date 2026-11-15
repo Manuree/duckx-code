@@ -5072,6 +5072,7 @@ impl App {
             CommandId::GotoReferences => self.goto_references(),
             CommandId::MatchBracket => self.match_bracket(false),
             CommandId::SelectBracket => self.match_bracket(true),
+            CommandId::SelectInsideQuotes => self.select_inside_quotes(),
             CommandId::FindNext => self.find_adjacent(true)?,
             CommandId::FindPrevious => self.find_adjacent(false)?,
             CommandId::Pane => self.start_pane_select(),
@@ -5774,6 +5775,38 @@ impl App {
             return;
         };
         self.buffer_mut().move_to(target, extend);
+        self.scroll_to_cursor();
+    }
+
+    /// Selects the text inside the quotes around the cursor, like `vi"`. When that is already the
+    /// selection, the quote marks are taken in too.
+    fn select_inside_quotes(&mut self) {
+        self.dismiss_lsp_popups();
+        self.clear_snippet();
+        let range = {
+            let tab = self.active_editor().tab();
+            let rope = tab.buffer.rope();
+            let selection = tab.buffer.selection();
+            let tree = tab
+                .syntax
+                .as_ref()
+                .filter(|state| state.has_tree())
+                .and_then(|state| state.string_span(rope, selection.head));
+            let Some(span) = tree.unwrap_or_else(|| crate::quotes::scan_line(rope, selection.head))
+            else {
+                return;
+            };
+            let current = (
+                selection.anchor.min(selection.head),
+                selection.anchor.max(selection.head),
+            );
+            if current.0 < current.1 && current == span.inner {
+                span.outer
+            } else {
+                span.inner
+            }
+        };
+        self.buffer_mut().select_span(range.0, range.1);
         self.scroll_to_cursor();
     }
 
@@ -7207,6 +7240,103 @@ mod tests {
     fn numbered_lines(count: usize) -> Buffer {
         let lines: Vec<String> = (0..count).map(|i| i.to_string()).collect();
         Buffer::from_text(&lines.join("\n"))
+    }
+
+    /// `text` with `|` at the cursor, opened as `path` and parsed when `parse` is set.
+    fn quotes_app(text: &str, path: Option<&str>, parse: bool) -> App {
+        let at = text.chars().position(|ch| ch == '|').unwrap();
+        let mut app = App::new(
+            Buffer::from_text(&text.replacen('|', "", 1)),
+            path.map(Into::into),
+        );
+        if parse {
+            for job in app.take_jobs() {
+                app.handle_event(crate::jobs::run(job));
+            }
+            assert!(
+                app.active_editor()
+                    .tab()
+                    .syntax
+                    .as_ref()
+                    .unwrap()
+                    .has_tree()
+            );
+        }
+        app.buffer_mut().move_to(at, false);
+        app
+    }
+
+    fn select_quotes(app: &mut App) -> String {
+        app.run_command(crate::command::CommandId::SelectInsideQuotes, None)
+            .unwrap();
+        let selection = app.buffer().selection();
+        let (start, end) = (
+            selection.anchor.min(selection.head),
+            selection.anchor.max(selection.head),
+        );
+        app.buffer().rope().slice(start..end).to_string()
+    }
+
+    #[test]
+    fn select_inside_quotes_takes_the_string_then_its_quotes() {
+        for parse in [false, true] {
+            let mut app = quotes_app(
+                "fn main() {\n    println!(\"Hello,| world!\");\n}\n",
+                Some("src/main.rs"),
+                parse,
+            );
+            assert_eq!(select_quotes(&mut app), "Hello, world!");
+            assert_eq!(select_quotes(&mut app), "\"Hello, world!\"");
+            assert_eq!(select_quotes(&mut app), "Hello, world!");
+        }
+    }
+
+    #[test]
+    fn select_inside_quotes_ignores_rust_lifetimes_and_reads_char_literals() {
+        // A line scan would pair the two lifetime marks and select `a>(x: &`.
+        let text = "fn f<'a>(x|: &'a str) -> char { 'x' }";
+        let mut app = quotes_app(text, Some("src/lib.rs"), true);
+        assert_eq!(select_quotes(&mut app), "");
+        assert!(app.buffer().selection().is_empty());
+
+        let mut app = quotes_app(
+            "fn f<'a>(x: &'|a str) -> char { 'x' }",
+            Some("src/lib.rs"),
+            true,
+        );
+        select_quotes(&mut app);
+        assert!(app.buffer().selection().is_empty());
+
+        let mut app = quotes_app(
+            "fn f<'a>(x: &'a str) -> char { '|x' }",
+            Some("src/lib.rs"),
+            true,
+        );
+        assert_eq!(select_quotes(&mut app), "x");
+        let mut app = quotes_app(
+            "let q = '|\"'; let s = \"a\\\"b\";",
+            Some("src/lib.rs"),
+            true,
+        );
+        assert_eq!(select_quotes(&mut app), "\"");
+        let mut app = quotes_app(
+            "let q = '\"'; let s = \"a\\\"|b\";",
+            Some("src/lib.rs"),
+            true,
+        );
+        assert_eq!(select_quotes(&mut app), "a\\\"b");
+    }
+
+    #[test]
+    fn select_inside_quotes_uses_the_tree_across_lines_and_scans_plain_text() {
+        let mut app = quotes_app("x = \"\"\"first\nsec|ond\"\"\"\n", Some("a.py"), true);
+        assert_eq!(select_quotes(&mut app), "first\nsecond");
+
+        let mut app = quotes_app("say `hi| there` and 'bye'", None, false);
+        assert_eq!(select_quotes(&mut app), "hi there");
+        let mut app = quotes_app("no quotes| here", None, false);
+        assert_eq!(select_quotes(&mut app), "");
+        assert_eq!(app.buffer().selection().head, 9);
     }
 
     #[test]

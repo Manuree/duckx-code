@@ -134,6 +134,8 @@ pub enum CommandId {
     FindPrevious,
     /// Extend the selection to the bracket paired with the one under the cursor.
     SelectBracket,
+    /// Select the text inside the quotes around the cursor; again to take in the quotes too.
+    SelectInsideQuotes,
     /// Enter PANE mode: arrows pick a window, `Enter` focuses it.
     Pane,
     /// Open the assistant panel and make it one row taller.
@@ -450,6 +452,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "select-bracket",
         description: "Select through the matching bracket",
         shortcut: "Ctrl+Shift+]",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::SelectInsideQuotes,
+        name: "select-inside-quotes",
+        description: "Select the text inside the quotes (again: with the quotes)",
+        shortcut: "",
         arg: None,
         editor: true,
         explorer: false,
@@ -853,6 +864,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::GotoReferences => 112,
         CommandId::MatchBracket => 115,
         CommandId::SelectBracket => 274,
+        CommandId::SelectInsideQuotes => 276,
         CommandId::Complete => 120,
         CommandId::Hover => 130,
         CommandId::Format => 140,
@@ -1347,6 +1359,7 @@ mod tests {
                 "select-all",
                 "deselect",
                 "select-bracket",
+                "select-inside-quotes",
                 "indent",
                 "outdent",
                 "move-line-up",
