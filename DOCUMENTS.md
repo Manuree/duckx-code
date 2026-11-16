@@ -309,7 +309,7 @@ Files are matched to a server by their extension (or, for `Gemfile` / `Rakefile`
 | `F2` or `hover` | Show documentation for the symbol under the cursor. The popup is plain text. Moving the cursor or editing the file closes it. |
 | `Shift + F2` or `rename-symbol <name>` | Rename that symbol everywhere the language server knows it. The command bar asks for the new name. |
 | `F4`, `Ctrl + /`, or `comment` | Add a line comment to the current line or the selected lines, or remove one when those lines are already commented. |
-| `Alt + Up` / `Alt + Down` or `move-line-up` / `move-line-down` | Move the current line, or the selected lines, up or down. |
+| `Alt + Up` / `Alt + Down` or `move-line-up` / `move-line-down` | Move the current line, or the selected lines, up or down. Lines always move whole: when the last line of the file has no line break, it trades breaks with the line it swaps with, so the two never join. One undo step. In the assistant prompt the same keys change the panel height instead. |
 | `Shift + Delete` or `delete-line` | Delete the current line, or every line the selection touches. |
 | `Ctrl + Alt + Up` / `Ctrl + Alt + Down` or `duplicate-line-up` / `duplicate-line-down` | Duplicate the current line, or the selected lines, above or below. |
 | `F7` or `format` | Ask the language server to format the file. |
