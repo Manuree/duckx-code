@@ -8799,6 +8799,61 @@ mod tests {
         assert_eq!(app.recent_command, Some(CommandId::AgentShorter));
     }
 
+    fn alt_key(app: &mut App, code: crossterm::event::KeyCode) {
+        let event = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::ALT,
+        ));
+        let mut burst = crate::agent::PasteBurst::default();
+        let action = crate::input::route_flags(
+            &event,
+            app.focus(),
+            app.explorer.selecting,
+            app.filtering(),
+            app.keys(),
+            app.capturing(),
+            app.drafting(),
+            &mut burst,
+        )
+        .expect("Alt+arrow is bound");
+        app.handle(action);
+    }
+
+    #[test]
+    fn alt_up_moves_the_last_line_in_the_editor_and_resizes_only_in_the_assistant() {
+        use crossterm::event::KeyCode;
+        let text = "1\n2\n3 ภาษาไทย\n4\n5\n6\n7\n8 shape\n9 vector";
+        let mut app = App::new(Buffer::from_text(text), None);
+        app.set_screen_size(80, 40);
+        app.handle(SemanticAction::Move {
+            movement: Movement::DocumentEnd,
+            extend: false,
+        });
+        let rows = app.agent_rows();
+        alt_key(&mut app, KeyCode::Up);
+        assert_eq!(
+            app.buffer().rope().to_string(),
+            "1\n2\n3 ภาษาไทย\n4\n5\n6\n7\n9 vector\n8 shape"
+        );
+        assert_eq!(
+            app.agent_rows(),
+            rows,
+            "the editor key does not resize the panel"
+        );
+        alt_key(&mut app, KeyCode::Down);
+        assert_eq!(app.buffer().rope().to_string(), text);
+
+        // In the assistant prompt the same keys change the panel height, not the text.
+        app.handle(SemanticAction::ToggleAgent);
+        assert_eq!(app.focus(), Focus::Agent);
+        let rows = app.agent_rows();
+        alt_key(&mut app, KeyCode::Up);
+        assert_eq!(app.agent_rows(), rows + 1);
+        alt_key(&mut app, KeyCode::Down);
+        assert_eq!(app.agent_rows(), rows);
+        assert_eq!(app.buffer().rope().to_string(), text);
+    }
+
     #[test]
     fn find_next_and_previous_commands_step_through_matches() {
         let mut app = App::new(Buffer::from_text("one two one"), None);

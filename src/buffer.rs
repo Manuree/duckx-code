@@ -1015,12 +1015,15 @@ impl Buffer {
 
     /// Moves the selected lines up or down by one line, as one undo step.
     /// A caret keeps its column. A selection keeps covering the moved lines.
+    /// A last line without a line break swaps whole with its neighbor, which then ends the file.
     /// Returns `false` when the block is already at that edge.
     pub fn move_block(&mut self, down: bool) -> bool {
         self.resolve_sticky();
         let (first, last) = self.selected_lines();
         let edge = self.last_content_line();
-        if down && last >= edge || !down && first == 0 {
+        // The empty line after a final line break is not a line to move; moving it would
+        // only take the file's last line break away.
+        if down && last >= edge || !down && (first == 0 || first > edge) {
             return false;
         }
         let point = self.selection.is_empty();
@@ -1030,36 +1033,36 @@ impl Buffer {
         let block_start = self.line_start(first);
         let block_end = self.line_start(last + 1);
         let block = self.rope.slice(block_start..block_end).to_string();
-        let block_chars = block.chars().count();
-        let new_block = if down {
+        // Swap the block with its neighbor as whole lines. The last line of the file may have
+        // no line break; it takes the other line's break, so the two never join into one line.
+        let (edit_start, edit_end, upper, lower) = if down {
             let neighbor_end = if last + 2 >= self.rope.len_lines() {
                 self.rope.len_chars()
             } else {
                 self.line_start(last + 2)
             };
             let neighbor = self.rope.slice(block_end..neighbor_end).to_string();
-            self.edit_batch(
-                vec![(
-                    block_start,
-                    neighbor_end - block_start,
-                    format!("{neighbor}{block}"),
-                )],
-                block_start,
-            );
-            block_start + neighbor.chars().count()
+            (block_start, neighbor_end, block, neighbor)
         } else {
             let neighbor_start = self.line_start(first - 1);
             let neighbor = self.rope.slice(neighbor_start..block_start).to_string();
-            self.edit_batch(
-                vec![(
-                    neighbor_start,
-                    block_end - neighbor_start,
-                    format!("{block}{neighbor}"),
-                )],
-                neighbor_start,
-            );
-            neighbor_start
+            (neighbor_start, block_end, neighbor, block)
         };
+        let (swapped, split) = swap_line_runs(&upper, &lower);
+        // Where the moved block sits in `swapped`, in chars, without a break it lost.
+        let (block_at, block_chars) = if down {
+            (
+                swapped[..split].chars().count(),
+                swapped[split..].chars().count(),
+            )
+        } else {
+            (0, lower.chars().count())
+        };
+        self.edit_batch(
+            vec![(edit_start, edit_end - edit_start, swapped)],
+            edit_start,
+        );
+        let new_block = edit_start + block_at;
         if point {
             let dest_line = if down {
                 head_line + 1
@@ -1772,6 +1775,35 @@ fn col_at_visual(text: &str, target: usize, tab_width: usize) -> usize {
         chars += g.chars().count();
     }
     chars
+}
+
+/// `upper` and `lower` are runs of whole lines, `upper` directly above `lower`. Returns
+/// `lower` then `upper`, and the byte offset where `upper` starts. Only the last line of
+/// the file lacks a line break, and that can only be `lower`: it takes `upper`'s break, and
+/// `upper` goes last without one, so the lines never run together.
+fn swap_line_runs(upper: &str, lower: &str) -> (String, usize) {
+    let (lower_body, lower_break) = split_line_break(lower);
+    if !lower_break.is_empty() {
+        return (format!("{lower}{upper}"), lower.len());
+    }
+    let (upper_body, upper_break) = split_line_break(upper);
+    let text = format!("{lower_body}{upper_break}{upper_body}");
+    (text, lower_body.len() + upper_break.len())
+}
+
+/// `text` without its final line break, and that break (empty when there is none).
+/// Matches the breaks the rope counts as line ends.
+fn split_line_break(text: &str) -> (&str, &str) {
+    if let Some(body) = text.strip_suffix("\r\n") {
+        return (body, &text[body.len()..]);
+    }
+    match text.chars().next_back() {
+        Some(ch @ ('\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}')) => {
+            let body = &text[..text.len() - ch.len_utf8()];
+            (body, &text[body.len()..])
+        }
+        _ => (text, ""),
+    }
 }
 
 #[cfg(test)]
@@ -2717,5 +2749,185 @@ mod tests {
         assert_eq!(buf.line_range(0), (0, 4));
         assert_eq!(buf.line_range(2), (8, 13));
         assert_eq!(buf.line_range(7), (8, 13));
+    }
+
+    /// PRODUCT.md as reported: line 3 is long Thai text and line 9, the last line, has no
+    /// line break.
+    const PRODUCT_LINES: [&str; 9] = [
+        "# Duck Draw",
+        "",
+        "โปรแกรมวาดภาพเวกเตอร์ที่ใช้งานง่าย รองรับการแก้ไขรูปทรงและเส้นทางอย่างละเอียด สำหรับนักออกแบบทุกระดับ",
+        "## Tools",
+        "- **Select** : Move, Scale, Rotate",
+        "- **Pen** : Bezier, Freehand",
+        "- **Text** : Font, Size, Align",
+        "- **Shape** : Rectangle, Eclipse, Polygon, Line, Arrow",
+        "- **Vector Path** : Object/Edit Mode, boolean",
+    ];
+
+    fn product(order: &[usize], ending: &str, trailing: bool) -> String {
+        let lines: Vec<&str> = order.iter().map(|n| PRODUCT_LINES[n - 1]).collect();
+        let mut text = lines.join(ending);
+        if trailing {
+            text.push_str(ending);
+        }
+        text
+    }
+
+    fn caret_on(buf: &mut Buffer, line: usize, column: usize) {
+        let at = buf.line_start(line) + column;
+        buf.move_to(at, false);
+    }
+
+    #[test]
+    fn moving_the_last_line_up_without_a_final_break_keeps_both_lines() {
+        let original = product(&[1, 2, 3, 4, 5, 6, 7, 8, 9], "\n", false);
+        let mut buf = Buffer::from_text(&original);
+        caret_on(&mut buf, 8, 6);
+        assert!(buf.move_block(false));
+        assert_eq!(
+            text(&buf),
+            product(&[1, 2, 3, 4, 5, 6, 7, 9, 8], "\n", false)
+        );
+        assert_eq!(buf.rope().len_lines(), 9);
+        assert_eq!(
+            buf.cursor_line_col(),
+            (7, 6),
+            "the caret moves with its line"
+        );
+
+        assert!(buf.move_block(true), "and back down");
+        assert_eq!(text(&buf), original);
+        assert_eq!(buf.cursor_line_col(), (8, 6));
+
+        assert!(buf.move_block(false));
+        assert!(buf.undo());
+        assert_eq!(text(&buf), original, "one undo step");
+    }
+
+    #[test]
+    fn moving_onto_the_last_line_without_a_final_break_keeps_both_lines() {
+        let mut buf = Buffer::from_text(&product(&[1, 2, 3, 4, 5, 6, 7, 8, 9], "\n", false));
+        caret_on(&mut buf, 7, 4);
+        assert!(buf.move_block(true));
+        assert_eq!(
+            text(&buf),
+            product(&[1, 2, 3, 4, 5, 6, 7, 9, 8], "\n", false)
+        );
+        assert_eq!(buf.cursor_line_col(), (8, 4));
+        assert!(!buf.move_block(true), "now the last line");
+    }
+
+    #[test]
+    fn moving_lines_keeps_every_line_with_any_ending() {
+        for ending in ["\n", "\r\n"] {
+            for trailing in [false, true] {
+                let mut buf =
+                    Buffer::from_text(&product(&[1, 2, 3, 4, 5, 6, 7, 8, 9], ending, trailing));
+                caret_on(&mut buf, 8, 0);
+                assert!(buf.move_block(false));
+                assert_eq!(
+                    text(&buf),
+                    product(&[1, 2, 3, 4, 5, 6, 7, 9, 8], ending, trailing),
+                    "{ending:?} trailing={trailing}"
+                );
+                // Walk line 9 all the way to the top, past the Thai line, and back.
+                for _ in 0..7 {
+                    assert!(buf.move_block(false));
+                }
+                assert!(!buf.move_block(false));
+                assert_eq!(
+                    text(&buf),
+                    product(&[9, 1, 2, 3, 4, 5, 6, 7, 8], ending, trailing)
+                );
+                for _ in 0..8 {
+                    assert!(buf.move_block(true));
+                }
+                assert!(!buf.move_block(true));
+                assert_eq!(
+                    text(&buf),
+                    product(&[1, 2, 3, 4, 5, 6, 7, 8, 9], ending, trailing)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_selection_that_includes_the_last_line_moves_whole() {
+        let mut buf = Buffer::from_text(&product(&[1, 2, 3, 4, 5, 6, 7, 8, 9], "\n", false));
+        // Lines 8 and 9, up to the end of the file.
+        let from = buf.line_start(7) + 2;
+        buf.move_to(from, false);
+        buf.move_to(buf.rope().len_chars(), true);
+        assert!(buf.move_block(false));
+        assert_eq!(
+            text(&buf),
+            product(&[1, 2, 3, 4, 5, 6, 8, 9, 7], "\n", false)
+        );
+        assert_eq!(
+            buf.selected_lines(),
+            (6, 7),
+            "the selection follows lines 8 and 9"
+        );
+        assert!(buf.move_block(true));
+        assert_eq!(
+            text(&buf),
+            product(&[1, 2, 3, 4, 5, 6, 7, 8, 9], "\n", false)
+        );
+        assert_eq!(buf.selected_lines(), (7, 8));
+
+        // Lines 7 and 8 moving down over the last line.
+        let from = buf.line_start(6);
+        buf.move_to(from, false);
+        buf.move_to(buf.line_start(7) + 3, true);
+        assert!(buf.move_block(true));
+        assert_eq!(
+            text(&buf),
+            product(&[1, 2, 3, 4, 5, 6, 9, 7, 8], "\n", false)
+        );
+        assert_eq!(buf.selected_lines(), (7, 8));
+    }
+
+    #[test]
+    fn moving_around_the_thai_line_keeps_the_caret_on_a_char() {
+        let mut buf = Buffer::from_text(&product(&[1, 2, 3, 4, 5, 6, 7, 8, 9], "\n", false));
+        caret_on(&mut buf, 2, 20);
+        assert!(buf.move_block(true));
+        assert_eq!(
+            text(&buf),
+            product(&[1, 2, 4, 3, 5, 6, 7, 8, 9], "\n", false)
+        );
+        assert_eq!(buf.cursor_line_col(), (3, 20));
+        assert_eq!(
+            buf.rope().line(3).to_string(),
+            format!("{}\n", PRODUCT_LINES[2])
+        );
+        assert!(buf.move_block(false));
+        assert!(buf.move_block(false));
+        assert_eq!(
+            text(&buf),
+            product(&[1, 3, 2, 4, 5, 6, 7, 8, 9], "\n", false)
+        );
+        assert_eq!(buf.cursor_line_col(), (1, 20));
+    }
+
+    #[test]
+    fn the_empty_line_after_a_final_break_does_not_move() {
+        let mut buf = Buffer::from_text("a\nb\n");
+        buf.move_cursor(Movement::DocumentEnd, false);
+        assert!(!buf.move_block(false));
+        assert!(!buf.move_block(true));
+        assert_eq!(text(&buf), "a\nb\n");
+    }
+
+    #[test]
+    fn swapping_line_runs_gives_the_last_line_a_break() {
+        assert_eq!(swap_line_runs("a\n", "b\n"), ("b\na\n".into(), 2));
+        assert_eq!(swap_line_runs("a\n", "b"), ("b\na".into(), 2));
+        assert_eq!(swap_line_runs("a\r\n", "b"), ("b\r\na".into(), 3));
+        assert_eq!(swap_line_runs("a\nb\n", "ก่"), ("ก่\na\nb".into(), 7));
+        assert_eq!(split_line_break("x\r\n"), ("x", "\r\n"));
+        assert_eq!(split_line_break("x\u{2028}"), ("x", "\u{2028}"));
+        assert_eq!(split_line_break("x"), ("x", ""));
     }
 }
