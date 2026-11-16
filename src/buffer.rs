@@ -622,6 +622,51 @@ impl Buffer {
         hash
     }
 
+    /// Char index on `line` drawn at display column `vcol` (tabs and wide graphemes counted).
+    /// A column inside a wide grapheme or a tab gives that grapheme's start; past the end
+    /// of the line gives the line end. A line past the last one gives the document end.
+    pub fn pos_at_visual(&self, line: usize, vcol: usize) -> usize {
+        if line >= self.rope.len_lines() {
+            return self.rope.len_chars();
+        }
+        self.line_start(line) + col_at_visual(&self.line_content(line), vcol, self.tab_width)
+    }
+
+    /// The run of word, punctuation, or whitespace graphemes at `pos`, for a double-click.
+    pub fn word_range(&self, pos: usize) -> (usize, usize) {
+        let pos = pos.min(self.rope.len_chars());
+        let line = self.rope.char_to_line(pos);
+        let start = self.line_start(line);
+        let spans = grapheme_spans(&self.line_content(line));
+        let col = pos - start;
+        let Some(at) = spans
+            .iter()
+            .position(|span| span.0 <= col && col < span.1)
+            .or_else(|| spans.len().checked_sub(1))
+        else {
+            return (pos, pos);
+        };
+        let class = spans[at].2;
+        let first = spans[..at]
+            .iter()
+            .rev()
+            .take_while(|s| s.2 == class)
+            .count();
+        let last = spans[at..].iter().take_while(|s| s.2 == class).count();
+        (start + spans[at - first].0, start + spans[at + last - 1].1)
+    }
+
+    /// `line` with its line break, for a triple-click: the selection ends at the next line's start.
+    pub fn line_range(&self, line: usize) -> (usize, usize) {
+        let line = line.min(self.rope.len_lines().saturating_sub(1));
+        let end = if line + 1 < self.rope.len_lines() {
+            self.line_start(line + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        (self.line_start(line), end)
+    }
+
     /// Puts the cursor on `head`. `extend` keeps the anchor, the same way Shift navigation does.
     pub fn move_to(&mut self, head: usize, extend: bool) {
         self.history.seal();
@@ -2633,5 +2678,44 @@ mod tests {
         assert_eq!(text(&buf), "  // let x = 1;\n");
         assert!(buf.toggle_comment("//"));
         assert_eq!(text(&buf), "  let x = 1;\n");
+    }
+
+    #[test]
+    fn pos_at_visual_maps_cells_through_tabs_and_wide_chars() {
+        let buf = Buffer::from_text("a\tb界c\nnext");
+        let tab = buf.tab_width();
+        assert_eq!(buf.pos_at_visual(0, 0), 0);
+        assert_eq!(buf.pos_at_visual(0, 1), 1);
+        assert_eq!(buf.pos_at_visual(0, tab - 1), 1, "inside the tab");
+        assert_eq!(buf.pos_at_visual(0, tab), 2);
+        assert_eq!(buf.pos_at_visual(0, tab + 1), 3);
+        assert_eq!(buf.pos_at_visual(0, tab + 2), 3, "right half of 界");
+        assert_eq!(buf.pos_at_visual(0, tab + 3), 4);
+        assert_eq!(
+            buf.pos_at_visual(0, 99),
+            5,
+            "past the end: before the break"
+        );
+        assert_eq!(buf.pos_at_visual(1, 2), 8);
+        assert_eq!(buf.pos_at_visual(9, 0), buf.rope().len_chars());
+    }
+
+    #[test]
+    fn word_range_takes_the_run_of_one_kind() {
+        let buf = Buffer::from_text("let foo_bar = a+b;\nx");
+        assert_eq!(buf.word_range(5), (4, 11));
+        assert_eq!(buf.word_range(4), (4, 11));
+        assert_eq!(buf.word_range(11), (11, 12), "the space");
+        assert_eq!(buf.word_range(0), (0, 3));
+        assert_eq!(buf.word_range(18), (17, 18), "past the end: the last run");
+        assert_eq!(Buffer::from_text("").word_range(0), (0, 0));
+    }
+
+    #[test]
+    fn line_range_includes_the_line_break() {
+        let buf = Buffer::from_text("one\ntwo\nthree");
+        assert_eq!(buf.line_range(0), (0, 4));
+        assert_eq!(buf.line_range(2), (8, 13));
+        assert_eq!(buf.line_range(7), (8, 13));
     }
 }

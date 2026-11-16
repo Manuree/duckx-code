@@ -8,8 +8,9 @@ use std::time::Duration;
 use crossterm::{
     cursor::SetCursorStyle,
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, EventStream, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -79,6 +80,7 @@ fn restore_terminal() -> io::Result<()> {
     let _ = execute!(stdout, PopKeyboardEnhancementFlags);
     let _ = execute!(
         stdout,
+        DisableMouseCapture,
         SetCursorStyle::DefaultUserShape,
         DisableBracketedPaste,
         LeaveAlternateScreen
@@ -294,6 +296,9 @@ fn route_event(
     event: &crossterm::event::Event,
     paste_burst: &mut duckx_code::agent::PasteBurst,
 ) -> bool {
+    if let crossterm::event::Event::Mouse(mouse) = event {
+        return app.handle_mouse(*mouse);
+    }
     let action = if app.pane_select.is_some() {
         input::route_pane_select(event, app.keys())
     } else {
@@ -335,7 +340,17 @@ async fn drive(
     let mut last_explorer_height: Option<usize> = None;
     let mut paste_burst = duckx_code::agent::PasteBurst::default();
     let mut burst = KeyBurst::default();
+    // Mouse capture follows Settings -> Editor -> Mouse; Off leaves selection to the terminal.
+    let mut mouse_captured = false;
     while !app.should_quit {
+        if app.editor_prefs.mouse != mouse_captured {
+            mouse_captured = app.editor_prefs.mouse;
+            if mouse_captured {
+                execute!(io::stdout(), EnableMouseCapture)?;
+            } else {
+                execute!(io::stdout(), DisableMouseCapture)?;
+            }
+        }
         sync_folder_watch(&mut folder_watch, &app.explorer.root, &fs_tx, &mut fs_due);
         let queued = app.take_jobs();
         if !queued.is_empty() {

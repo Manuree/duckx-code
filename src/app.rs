@@ -33,6 +33,7 @@ mod lsp_nav;
 mod lsp_servers;
 pub use lsp_servers::{Dot, Found, ServerView};
 mod lsp_sync;
+mod mouse;
 mod notice;
 mod preview;
 
@@ -773,6 +774,8 @@ pub struct App {
     tree_scan: Option<TreeScan>,
     /// Read-only Markdown windows opened by `preview`.
     previews: Vec<Preview>,
+    /// The last click and the drag in progress, for double-clicks and drag selection.
+    mouse: mouse::MouseState,
     /// Rendered preview lines, reused until the source text, width, or theme changes.
     preview_cache: RefCell<Vec<preview::RenderedPreview>>,
     /// How many times a preview was laid out from scratch (cache misses).
@@ -885,6 +888,7 @@ impl App {
             lsp_resetting: false,
             tree_scan: None,
             previews: Vec::new(),
+            mouse: mouse::MouseState::default(),
             preview_cache: RefCell::new(Vec::new()),
             preview_renders: std::cell::Cell::new(0),
             preview_picker: None,
@@ -3601,6 +3605,7 @@ impl App {
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
             | SettingId::AutoIndent
+            | SettingId::Mouse
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.set_choice(id, index);
@@ -3673,6 +3678,7 @@ impl App {
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
             | SettingId::AutoIndent
+            | SettingId::Mouse
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.restore_choice(id, origin);
@@ -3738,6 +3744,7 @@ impl App {
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
             | SettingId::AutoIndent
+            | SettingId::Mouse
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => self.editor_prefs.choice_token(id),
             SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
@@ -3804,6 +3811,7 @@ impl App {
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
             | SettingId::AutoIndent
+            | SettingId::Mouse
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => (
                 self.editor_prefs.choice_index(id),
@@ -3930,6 +3938,7 @@ impl App {
             | SettingId::IndentWithSpaces
             | SettingId::LineEnding
             | SettingId::AutoIndent
+            | SettingId::Mouse
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.reset(id);

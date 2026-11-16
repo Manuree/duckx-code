@@ -19,6 +19,31 @@ use crate::app::App;
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Rows the prompt (or the pending question) keeps at the bottom of the panel.
+fn prompt_height(app: &App, inner: Rect, content: usize) -> usize {
+    if app.agent.pending.is_some() {
+        1usize
+    } else {
+        let prompt_rows = wrap_rows(&app.agent.prompt, content);
+        let prompt_limit = (inner.height as usize).saturating_sub(1).max(1);
+        // Grow with content, cap at 8 rows, scroll within that window.
+        prompt_rows
+            .len()
+            .clamp(1, 8.min(prompt_limit).min(inner.height as usize))
+    }
+}
+
+/// How far the transcript in the panel at `area` can scroll back, as `render` draws it.
+pub fn max_scroll(app: &App, area: Rect) -> usize {
+    let inner = panel("").inner(area);
+    if area.width < 4 || area.height < 3 || inner.width == 0 || inner.height == 0 {
+        return 0;
+    }
+    let content = (inner.width as usize).saturating_sub(3).max(1);
+    let room = (inner.height as usize).saturating_sub(prompt_height(app, inner, content));
+    transcript_lines(app, content).len().saturating_sub(room)
+}
+
 /// Bottom assistant panel. Messages and the prompt wrap. The prompt keeps the bottom rows.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     if area.width < 4 || area.height < 3 {
@@ -47,16 +72,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let width = inner.width as usize;
     let content = width.saturating_sub(3).max(1);
     let pending = app.agent.pending.as_ref();
-    let prompt_height = if pending.is_some() {
-        1usize
-    } else {
-        let prompt_rows = wrap_rows(&app.agent.prompt, content);
-        let prompt_limit = (inner.height as usize).saturating_sub(1).max(1);
-        // Grow with content, cap at 8 rows, scroll within that window.
-        prompt_rows
-            .len()
-            .clamp(1, 8.min(prompt_limit).min(inner.height as usize))
-    };
+    let prompt_height = prompt_height(app, inner, content);
     let transcript_room = (inner.height as usize).saturating_sub(prompt_height);
     let transcript = transcript_lines(app, content);
     let max_scroll = transcript.len().saturating_sub(transcript_room);

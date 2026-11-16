@@ -508,6 +508,20 @@ impl Explorer {
         self.end_nav(extend);
     }
 
+    /// Selects visible row `index`, as a click does. `extend` makes a `Shift` range.
+    pub fn select_row(&mut self, index: usize, extend: bool) {
+        self.begin_nav(extend);
+        self.select_index(index);
+        self.end_nav(extend);
+    }
+
+    /// Scrolls the tree by `delta` rows without moving the selection, as the wheel does.
+    pub fn scroll_by(&mut self, delta: isize) {
+        let total = self.visible_rows().len();
+        let max = total.saturating_sub(self.height.max(1));
+        self.scroll = (self.scroll as isize + delta).clamp(0, max as isize) as usize;
+    }
+
     pub fn select_first(&mut self, extend: bool) {
         self.begin_nav(extend);
         self.select_index(0);
@@ -1004,5 +1018,33 @@ mod tests {
         assert!(!explorer.entries().iter().any(|e| e.path.starts_with("lib")));
         assert_eq!(explorer.marked_count(), 0);
         assert_eq!(selected_name(&explorer), "Cargo.toml");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_without_moving_the_selection_and_stops_at_the_ends() {
+        let mut explorer = sample();
+        explorer.height = 2;
+        let rows = explorer.visible_rows().len();
+        assert!(rows >= 4);
+        let before = explorer.selected_index();
+        explorer.scroll_by(1);
+        assert_eq!(explorer.scroll, 1);
+        explorer.scroll_by(100);
+        assert_eq!(explorer.scroll, rows - 2);
+        explorer.scroll_by(-100);
+        assert_eq!(explorer.scroll, 0);
+        assert_eq!(explorer.selected_index(), before);
+    }
+
+    #[test]
+    fn select_row_picks_a_row_and_can_extend() {
+        let mut explorer = sample();
+        explorer.select_row(1, false);
+        assert_eq!(explorer.selected_index(), Some(1));
+        explorer.select_row(3, true);
+        assert_eq!(explorer.selected_index(), Some(3));
+        assert_eq!(explorer.shift_paths.len(), 3, "rows 1 to 3");
+        explorer.select_row(0, false);
+        assert!(explorer.shift_paths.is_empty());
     }
 }

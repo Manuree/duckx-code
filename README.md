@@ -30,6 +30,7 @@ Notes:
 ## Features
 
 * **Modeless editing** with arrow-key navigation, Shift selection, multi-window splits, and tabs per window ([DOCUMENTS.md](DOCUMENTS.md)).
+* **Mouse:** click to move the cursor, drag to select buffer text (never the line numbers), double-click for a word, triple-click for a line, wheel to scroll, and click to switch tabs or focus the sidebar and assistant ([DOCUMENTS.md](DOCUMENTS.md#mouse)).
 * **Command Bar** (`F1` or `Shift + Space`): every action also runs by name, with fuzzy matching.
 * **File explorer** sidebar (`Ctrl + B`) and a workspace **file picker** (`Ctrl + P`).
 * **Syntax highlighting** with tree-sitter for Rust, Python, JavaScript, TypeScript, Go, C, C++, C#, Java, and more.
@@ -75,6 +76,8 @@ duckx-code path\to\file.rs # open a file; a missing path opens as a new file
 ```
 
 `Ctrl+S` saves. `Ctrl+Q` quits, and asks first when a file has unsaved changes. `Ctrl+C` copies; it does not quit. `Shift+Space` or `F1` opens the Command Bar.
+
+duckx-code captures the mouse by default. To use the terminal's own selection instead, hold `Shift` while dragging (Windows Terminal supports this, as do most terminals), or turn off Settings → Editor → **Mouse**.
 
 ## Configuration
 
