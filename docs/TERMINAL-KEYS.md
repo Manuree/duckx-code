@@ -74,6 +74,7 @@ These keys encode fine, but by default something in front of duckx-code may use 
 * **`Ctrl + Home` / `Ctrl + End`, with or without `Shift`.**
 * **`Tab` and `Shift + Tab`:** indent and outdent, snippet placeholders, accepting a completion, and the Command Bar / assistant switch. `Shift + Tab` is `ESC [Z` everywhere.
 * **`Enter`, `Esc`, and `Backspace`:** dialogs, pickers, menus, Settings.
+* **`Esc` twice (open the Command Bar):** two plain `Esc` presses. In a legacy terminal, two presses that arrive in the same instant can be read as one key; a normal double tap is two keys.
 * **F-keys:** `F2`–`F8` and `F12`, and `Shift` with them (`Shift + F2`, `F3`, `F8`, `F12`), apart from the cases in section 2. A few terminals, such as rxvt and the Linux console, send `Shift + F-key` as a higher F-key.
 * **Plain letters in Settings and dialogs:** `r` and `e` on a language server row, and the dialog letters (`Y` / `N` / `C`).
 

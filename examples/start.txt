@@ -7,6 +7,7 @@ jump/      go to a line, a bracket, or a name
 lang/      see colors for each language
 server/    format a file and jump to an error
 about/     open the page with the duck logo
+command/   open the Command Bar with Esc twice
 agent/     ask the assistant to change a file
 agent/modes.txt  plan and ask modes, and edits that keep your cursor
 agent/tools.txt  let the assistant search, ask the language server, and edit

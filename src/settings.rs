@@ -21,6 +21,8 @@ pub enum SettingId {
     AutoIndent,
     /// Click, drag, and wheel in the editor, the sidebar, and the panels.
     Mouse,
+    /// Two quick `Esc` presses with nothing to close open the Command Bar.
+    DoubleEscCommandBar,
     /// Highlight the bracket at the cursor and its partner.
     MatchBrackets,
     /// Color brackets by nesting depth.
@@ -1471,6 +1473,7 @@ impl AiPrefs {
                 | SettingId::LineEnding
                 | SettingId::AutoIndent
                 | SettingId::Mouse
+                | SettingId::DoubleEscCommandBar
                 | SettingId::MatchBrackets
                 | SettingId::ColorizeBrackets
                 | SettingId::ColorTheme
@@ -1784,6 +1787,9 @@ pub struct EditorPrefs {
     /// Capture the mouse for clicks, drags, and the wheel. On by default.
     #[serde(default = "enabled")]
     pub mouse: bool,
+    /// Two quick `Esc` presses with nothing to close open the Command Bar. On by default.
+    #[serde(default = "enabled")]
+    pub double_esc_command_bar: bool,
     /// Highlight the bracket at the cursor and its partner. On by default.
     #[serde(default = "enabled")]
     pub match_brackets: bool,
@@ -1800,6 +1806,7 @@ impl Default for EditorPrefs {
             line_ending: LineEndingPref::Auto,
             auto_indent: true,
             mouse: true,
+            double_esc_command_bar: true,
             match_brackets: true,
             colorize_brackets: true,
         }
@@ -1818,6 +1825,7 @@ impl EditorPrefs {
             SettingId::IndentWithSpaces
             | SettingId::AutoIndent
             | SettingId::Mouse
+            | SettingId::DoubleEscCommandBar
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => vec!["On".into(), "Off".into()],
             SettingId::LineEnding => vec!["Auto".into(), "LF".into(), "CRLF".into()],
@@ -1834,6 +1842,7 @@ impl EditorPrefs {
             SettingId::IndentWithSpaces => usize::from(!self.indent_with_spaces),
             SettingId::AutoIndent => usize::from(!self.auto_indent),
             SettingId::Mouse => usize::from(!self.mouse),
+            SettingId::DoubleEscCommandBar => usize::from(!self.double_esc_command_bar),
             SettingId::MatchBrackets => usize::from(!self.match_brackets),
             SettingId::ColorizeBrackets => usize::from(!self.colorize_brackets),
             SettingId::LineEnding => self.line_ending.index(),
@@ -1847,6 +1856,7 @@ impl EditorPrefs {
             SettingId::IndentWithSpaces => on_off(self.indent_with_spaces),
             SettingId::AutoIndent => on_off(self.auto_indent),
             SettingId::Mouse => on_off(self.mouse),
+            SettingId::DoubleEscCommandBar => on_off(self.double_esc_command_bar),
             SettingId::MatchBrackets => on_off(self.match_brackets),
             SettingId::ColorizeBrackets => on_off(self.colorize_brackets),
             SettingId::LineEnding => self.line_ending.as_str().to_string(),
@@ -1871,6 +1881,7 @@ impl EditorPrefs {
             SettingId::IndentWithSpaces => self.indent_with_spaces = index == 0,
             SettingId::AutoIndent => self.auto_indent = index == 0,
             SettingId::Mouse => self.mouse = index == 0,
+            SettingId::DoubleEscCommandBar => self.double_esc_command_bar = index == 0,
             SettingId::MatchBrackets => self.match_brackets = index == 0,
             SettingId::ColorizeBrackets => self.colorize_brackets = index == 0,
             SettingId::LineEnding => self.line_ending = LineEndingPref::from_index(index),
@@ -1890,6 +1901,7 @@ impl EditorPrefs {
             SettingId::IndentWithSpaces => self.indent_with_spaces = token != "off",
             SettingId::AutoIndent => self.auto_indent = token != "off",
             SettingId::Mouse => self.mouse = token != "off",
+            SettingId::DoubleEscCommandBar => self.double_esc_command_bar = token != "off",
             SettingId::MatchBrackets => self.match_brackets = token != "off",
             SettingId::ColorizeBrackets => self.colorize_brackets = token != "off",
             SettingId::LineEnding => {
@@ -1910,6 +1922,9 @@ impl EditorPrefs {
             SettingId::IndentWithSpaces => self.indent_with_spaces = defaults.indent_with_spaces,
             SettingId::AutoIndent => self.auto_indent = defaults.auto_indent,
             SettingId::Mouse => self.mouse = defaults.mouse,
+            SettingId::DoubleEscCommandBar => {
+                self.double_esc_command_bar = defaults.double_esc_command_bar
+            }
             SettingId::MatchBrackets => self.match_brackets = defaults.match_brackets,
             SettingId::ColorizeBrackets => self.colorize_brackets = defaults.colorize_brackets,
             SettingId::LineEnding => self.line_ending = defaults.line_ending,
@@ -2329,6 +2344,11 @@ pub fn sections() -> &'static [Section] {
                             label: "Mouse",
                             detail: "Click, drag, and scroll in the app. Off: the terminal selects text.",
                             id: SettingId::Mouse,
+                        },
+                        Item {
+                            label: "Double Esc opens Command Bar",
+                            detail: "Press Esc twice fast, with nothing to close, to open the Command Bar.",
+                            id: SettingId::DoubleEscCommandBar,
                         },
                         Item {
                             label: "Match brackets",

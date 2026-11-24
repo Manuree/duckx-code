@@ -122,6 +122,9 @@ fn wrap_index(index: usize, len: usize, delta: isize) -> usize {
 /// Lines kept visible above/below the cursor while scrolling.
 pub const SCROLLOFF: usize = 3;
 
+/// Longest gap between two `Esc` presses that still counts as a double `Esc`.
+pub const DOUBLE_ESC_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct View {
     pub scroll_y: usize,
@@ -776,6 +779,9 @@ pub struct App {
     previews: Vec<Preview>,
     /// The last click and the drag in progress, for double-clicks and drag selection.
     mouse: mouse::MouseState,
+    /// When the last `Esc` that had nothing to close was pressed. A second one within
+    /// [`DOUBLE_ESC_WINDOW`] opens the Command Bar (Settings → Editor).
+    idle_esc: Option<std::time::Instant>,
     /// Rendered preview lines, reused until the source text, width, or theme changes.
     preview_cache: RefCell<Vec<preview::RenderedPreview>>,
     /// How many times a preview was laid out from scratch (cache misses).
@@ -889,6 +895,7 @@ impl App {
             tree_scan: None,
             previews: Vec::new(),
             mouse: mouse::MouseState::default(),
+            idle_esc: None,
             preview_cache: RefCell::new(Vec::new()),
             preview_renders: std::cell::Cell::new(0),
             preview_picker: None,
@@ -2548,6 +2555,9 @@ impl App {
     }
 
     pub fn handle(&mut self, action: SemanticAction) {
+        if action != SemanticAction::Dismiss {
+            self.idle_esc = None;
+        }
         if self.preview_focused() {
             self.message = None;
             if self.handle_preview_action(&action) {
@@ -2577,6 +2587,60 @@ impl App {
         if self.explorer.open || !self.explorer.entries().is_empty() {
             self.queue_tree_scan(false);
         }
+    }
+
+    /// `Esc` in the editor: leave the snippet and close LSP popups. When there was
+    /// nothing to close, a second such `Esc` within [`DOUBLE_ESC_WINDOW`] opens the
+    /// Command Bar (Settings → Editor → Double Esc opens Command Bar). An `Esc` that
+    /// closed something never counts as the first press.
+    pub(crate) fn dismiss_at(&mut self, now: std::time::Instant) {
+        let closed_something = self.nav.snippet.is_some()
+            || self.nav.hover.is_some()
+            || self.completion_view().is_some()
+            || self.action_view().is_some()
+            || self.reference_view().is_some();
+        self.clear_snippet();
+        self.dismiss_lsp_popups();
+        let first = self.idle_esc.take();
+        if closed_something
+            || !self.editor_prefs.double_esc_command_bar
+            || self.agent.pending.is_some()
+        {
+            return;
+        }
+        let quick = first
+            .and_then(|first| now.checked_duration_since(first))
+            .is_some_and(|gap| gap <= DOUBLE_ESC_WINDOW);
+        if quick {
+            self.open_command_bar();
+        } else {
+            self.idle_esc = Some(now);
+        }
+    }
+
+    /// A key press that no binding took (an unbound `Alt` chord, say) still sits
+    /// between two `Esc` presses, so they are not a double `Esc`.
+    pub fn note_unrouted(&mut self, event: &crossterm::event::Event) {
+        if let crossterm::event::Event::Key(key) = event
+            && key.kind != crossterm::event::KeyEventKind::Release
+        {
+            self.idle_esc = None;
+        }
+    }
+
+    /// `double-esc`: flip Double Esc opens Command Bar and save it.
+    fn toggle_double_esc(&mut self) {
+        self.editor_prefs.double_esc_command_bar = !self.editor_prefs.double_esc_command_bar;
+        self.idle_esc = None;
+        self.queue_settings_save();
+        self.message = Some(format!(
+            "Double Esc opens Command Bar {}",
+            if self.editor_prefs.double_esc_command_bar {
+                "on"
+            } else {
+                "off"
+            }
+        ));
     }
 
     /// `bracket-match` / `bracket-colors`: flip the Editor setting and save it.
@@ -2703,10 +2767,7 @@ impl App {
                 self.dismiss_lsp_popups();
                 self.edit(|buffer| buffer.outdent());
             }
-            SemanticAction::Dismiss => {
-                self.clear_snippet();
-                self.dismiss_lsp_popups();
-            }
+            SemanticAction::Dismiss => self.dismiss_at(std::time::Instant::now()),
             SemanticAction::SelectAll => {
                 self.dismiss_lsp_popups();
                 self.buffer_mut().select_all();
@@ -3606,6 +3667,7 @@ impl App {
             | SettingId::LineEnding
             | SettingId::AutoIndent
             | SettingId::Mouse
+            | SettingId::DoubleEscCommandBar
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.set_choice(id, index);
@@ -3679,6 +3741,7 @@ impl App {
             | SettingId::LineEnding
             | SettingId::AutoIndent
             | SettingId::Mouse
+            | SettingId::DoubleEscCommandBar
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.restore_choice(id, origin);
@@ -3745,6 +3808,7 @@ impl App {
             | SettingId::LineEnding
             | SettingId::AutoIndent
             | SettingId::Mouse
+            | SettingId::DoubleEscCommandBar
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => self.editor_prefs.choice_token(id),
             SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
@@ -3812,6 +3876,7 @@ impl App {
             | SettingId::LineEnding
             | SettingId::AutoIndent
             | SettingId::Mouse
+            | SettingId::DoubleEscCommandBar
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => (
                 self.editor_prefs.choice_index(id),
@@ -3939,6 +4004,7 @@ impl App {
             | SettingId::LineEnding
             | SettingId::AutoIndent
             | SettingId::Mouse
+            | SettingId::DoubleEscCommandBar
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.reset(id);
@@ -5161,6 +5227,7 @@ impl App {
             CommandId::ShowHidden => self.toggle_hidden(),
             CommandId::BracketMatch => self.toggle_bracket_pref(false),
             CommandId::BracketColors => self.toggle_bracket_pref(true),
+            CommandId::DoubleEsc => self.toggle_double_esc(),
             CommandId::LspRestart => self.restart_current_server(),
             CommandId::Focus => self.toggle_focus(),
             CommandId::Preview => self.open_preview(arg.unwrap_or(""))?,
@@ -13036,5 +13103,146 @@ mod tests {
             text: "hi".into(),
         });
         assert_eq!(app.ai.recent_models(), ["qwen3:8b"]);
+    }
+
+    #[test]
+    fn double_esc_with_nothing_to_close_opens_the_command_bar() {
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        let t0 = std::time::Instant::now();
+        app.dismiss_at(t0);
+        assert_eq!(app.focus(), Focus::Editor, "one Esc does nothing");
+        app.dismiss_at(t0 + std::time::Duration::from_millis(150));
+        assert_eq!(app.focus(), Focus::CommandBar);
+        // Esc closes the bar as before, and that Esc is not a first press.
+        bar(&mut app, CommandBarAction::Close);
+        assert_eq!(app.focus(), Focus::Editor);
+        app.dismiss_at(t0 + std::time::Duration::from_millis(300));
+        assert_eq!(app.focus(), Focus::Editor);
+        // Through the real router and `handle`, two Esc presses in a row.
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        let esc = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        for _ in 0..2 {
+            let action = crate::input::route(&esc, app.focus(), false).unwrap();
+            assert_eq!(action, SemanticAction::Dismiss);
+            app.handle(action);
+        }
+        assert_eq!(app.focus(), Focus::CommandBar);
+    }
+
+    #[test]
+    fn an_esc_that_closed_a_popup_is_not_the_first_of_a_double_esc() {
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        let t0 = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        app.nav.hover = Some("fn hi()".into());
+        app.dismiss_at(t0);
+        assert!(app.nav.hover.is_none(), "Esc still closes the hover");
+        app.dismiss_at(t0 + ms(100));
+        assert_eq!(app.focus(), Focus::Editor, "the closing Esc did not count");
+        app.dismiss_at(t0 + ms(200));
+        assert_eq!(app.focus(), Focus::CommandBar);
+
+        // Leaving a snippet is closing something too.
+        let mut app = App::new(Buffer::from_text("call(a, b)"), None);
+        app.dismiss_at(t0);
+        app.arm_snippet(5, &[(0, 1), (3, 4)]);
+        app.dismiss_at(t0 + ms(100));
+        assert!(app.nav.snippet.is_none());
+        assert_eq!(app.focus(), Focus::Editor);
+    }
+
+    #[test]
+    fn double_esc_needs_both_presses_inside_the_window_and_nothing_between() {
+        let ms = std::time::Duration::from_millis;
+        let t0 = std::time::Instant::now();
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        app.dismiss_at(t0);
+        app.dismiss_at(t0 + DOUBLE_ESC_WINDOW + ms(1));
+        assert_eq!(app.focus(), Focus::Editor, "too slow");
+        // The slow press starts a new pair.
+        app.dismiss_at(t0 + DOUBLE_ESC_WINDOW + ms(100));
+        assert_eq!(app.focus(), Focus::CommandBar);
+
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        app.dismiss_at(t0);
+        app.handle(SemanticAction::Move {
+            movement: Movement::Right,
+            extend: false,
+        });
+        app.dismiss_at(t0 + ms(50));
+        assert_eq!(app.focus(), Focus::Editor, "another key in between resets");
+
+        // Alt+Esc and Alt combos are not Esc presses.
+        let alt = |code| {
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                code,
+                crossterm::event::KeyModifiers::ALT,
+            ))
+        };
+        assert_ne!(
+            crate::input::route(&alt(crossterm::event::KeyCode::Esc), Focus::Editor, false),
+            Some(SemanticAction::Dismiss)
+        );
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        app.handle(SemanticAction::Dismiss);
+        // What `main.rs` does with a key no binding takes.
+        let chord = alt(crossterm::event::KeyCode::Char('x'));
+        match crate::input::route(&chord, Focus::Editor, false) {
+            Some(action) => app.handle(action),
+            None => app.note_unrouted(&chord),
+        }
+        app.handle(SemanticAction::Dismiss);
+        assert_eq!(app.focus(), Focus::Editor);
+    }
+
+    #[test]
+    fn double_esc_setting_is_an_editor_row_on_by_default_and_off_disables_it() {
+        use crate::settings::{EditorPrefs, SettingId, SettingsFile};
+        let (config, _config_guard) = temp_dir();
+        let mut app = App::new(Buffer::from_text("hi"), None);
+        app.load_appearance(&config);
+        assert!(app.editor_prefs.double_esc_command_bar);
+        let editor = crate::settings::sections()
+            .iter()
+            .find(|section| section.name == "Editor")
+            .unwrap();
+        let row = editor
+            .items
+            .iter()
+            .find(|item| item.id == SettingId::DoubleEscCommandBar)
+            .unwrap();
+        assert_eq!(row.label, "Double Esc opens Command Bar");
+        let older: SettingsFile = serde_json::from_str(r#"{"editor": {"tab_width": 2}}"#).unwrap();
+        assert!(older.editor.double_esc_command_bar);
+        let mut prefs = EditorPrefs::default();
+        assert_eq!(prefs.choice_label(SettingId::DoubleEscCommandBar), "On");
+        prefs.set_choice(SettingId::DoubleEscCommandBar, 1);
+        assert_eq!(prefs.choice_token(SettingId::DoubleEscCommandBar), "off");
+        prefs.reset(SettingId::DoubleEscCommandBar);
+        assert!(prefs.double_esc_command_bar);
+
+        run(&mut app, "double-esc");
+        assert!(!app.editor_prefs.double_esc_command_bar);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Double Esc opens Command Bar off")
+        );
+        for _ in 0..4 {
+            finish_jobs(&mut app);
+        }
+        let saved = std::fs::read_to_string(config.join("settings.json")).unwrap();
+        assert!(
+            saved.contains("\"double_esc_command_bar\": false"),
+            "{saved}"
+        );
+        let t0 = std::time::Instant::now();
+        app.dismiss_at(t0);
+        app.dismiss_at(t0 + std::time::Duration::from_millis(100));
+        assert_eq!(app.focus(), Focus::Editor, "Off: Esc never opens the bar");
+        run(&mut app, "double-esc");
+        assert!(app.editor_prefs.double_esc_command_bar);
     }
 }

@@ -342,6 +342,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 | :--- | :--- |
 | `Shift + Space` | Open the Command Bar |
 | `F1` / `Ctrl + ;` / `Ctrl + Shift + :` | Open the Command Bar (fallbacks) |
+| `Esc` `Esc` | Open the Command Bar: press `Esc` twice quickly (within 0.4 s) in the editor when there is nothing left to close. An `Esc` that closes a popup or leaves a snippet does not count. Turn it off with Settings → Editor → **Double Esc opens Command Bar** or the `double-esc` command |
 | Type | Filter commands in real time |
 | `Up` / `Down` (or `Shift + Tab` for up) | Move the highlight |
 | `Tab` | Leave the bar and open the assistant. `Tab` in the assistant opens the bar again |
@@ -454,6 +455,7 @@ If no OS clipboard is available (e.g. a headless session), `copy`, `cut`, and `p
 | `diff` | — | Show or hide changes against HEAD in the gutter. See [Editor Windows](#7-editor-windows). | — |
 | `bracket-match` | — | Turn bracket matching on or off. Flips and saves **Match brackets** (Settings → Editor). | — |
 | `bracket-colors` | — | Turn bracket pair colors on or off. Flips and saves **Colorize bracket pairs** (Settings → Editor). | — |
+| `double-esc` | — | Turn double `Esc` opening the Command Bar on or off. Flips and saves **Double Esc opens Command Bar** (Settings → Editor). | — |
 | `hidden` | — | Show or hide dot files and folders (`.claude`, `.env`) in the explorer, the file picker, and searches. Flips and saves **Show hidden files** (Settings → Files). `.git` stays hidden. | — |
 | `focus` | — | Show only the buffer in use. The title, status bar, diagnostic line, sidebar, and other windows hide. The command bar, and find or replace, appear only while they are open. Only `focus` again brings the rest back. See [Editor Windows](#7-editor-windows). | — |
 | `split-right` | — | Open an empty editor to the right of the focused one | — |
@@ -673,6 +675,7 @@ Editor, Files, and Keybindings are saved in the same `settings.json` as the them
 | Line endings | Auto, LF, CRLF | Auto keeps the ending detected in the file. LF or CRLF is the ending written the next time the file is saved. |
 | Auto indent | On, Off | On indents after `{ ( [` and block openers on `Enter`, splits a pair such as `{}` around the cursor, and moves a typed closer back to its opener's indent. Off only keeps the current line's indent. The default is On. See [Auto indent](#auto-indent). |
 | Mouse | On, Off | On lets clicks, drags, and the wheel work inside duckx-code (see [Mouse](#mouse)); `Shift` + drag still uses the terminal's own selection. Off leaves the mouse to the terminal, so dragging selects screen text as usual. The default is On. |
+| Double Esc opens Command Bar | On, Off | On opens the Command Bar when `Esc` is pressed twice quickly (within 0.4 s) in the editor and the first `Esc` had nothing to close (no hover, completion, code action or reference list, and no snippet). A single `Esc` works as before, and `Alt` chords never count. Off leaves `Esc` as it was. The default is On. The `double-esc` command flips it. |
 | Match brackets | On, Off | On draws the bracket at the cursor (or just before it) and its pair bold on a soft background, in the focused window, when both are on screen. A bracket with no pair is drawn in the error color. Brackets in strings and comments are skipped. The default is On. The `bracket-match` command flips it. |
 | Colorize bracket pairs | On, Off | On colors `()` `[]` `{}` by how deep they are nested, cycling through the syntax theme's bracket colors. Unmatched ones use the error color. The default is On. The `bracket-colors` command flips it. |
 | Trim trailing space | On, Off | On removes spaces and tabs at the end of a line when the file is saved. The default is Off. |

@@ -43,6 +43,8 @@ pub enum CommandId {
     BracketMatch,
     /// Turn bracket pair colors on or off (Settings → Editor → Colorize bracket pairs).
     BracketColors,
+    /// Turn double `Esc` opening the Command Bar on or off (Settings → Editor).
+    DoubleEsc,
     /// Restart the language server of the focused file, looking for it on `PATH` again.
     LspRestart,
     /// Show only the focused buffer, without the title or status bar.
@@ -286,6 +288,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         id: CommandId::BracketColors,
         name: "bracket-colors",
         description: "Color brackets by nesting depth, or stop",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::DoubleEsc,
+        name: "double-esc",
+        description: "Open the Command Bar with Esc twice, or stop",
         shortcut: "",
         arg: None,
         editor: true,
@@ -916,6 +927,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::ShowHidden => 266,
         CommandId::BracketMatch => 267,
         CommandId::BracketColors => 268,
+        CommandId::DoubleEsc => 265,
         CommandId::LspRestart => 269,
         CommandId::Focus => 258,
         CommandId::Preview => 257,
@@ -1432,6 +1444,7 @@ mod tests {
                 "focus",
                 "reveal",
                 "explorer",
+                "double-esc",
                 "hidden",
                 "bracket-match",
                 "bracket-colors",

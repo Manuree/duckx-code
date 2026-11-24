@@ -112,6 +112,7 @@ fn allowed_in_preview(id: CommandId) -> bool {
             | CommandId::CopyPath
             | CommandId::CopyRelativePath
             | CommandId::Rename
+            | CommandId::DoubleEsc
     )
 }
 

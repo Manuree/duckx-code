@@ -314,6 +314,7 @@ fn route_event(
         )
     };
     let Some(action) = action else {
+        app.note_unrouted(event);
         return false;
     };
     app.handle(action);
