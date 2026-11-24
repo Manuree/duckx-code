@@ -343,7 +343,7 @@ impl App {
         self.arm_snippet(inserted_at, &parsed.stops);
     }
 
-    fn arm_snippet(&mut self, inserted_at: usize, stops: &[(usize, usize)]) {
+    pub(super) fn arm_snippet(&mut self, inserted_at: usize, stops: &[(usize, usize)]) {
         let stops: Vec<(usize, usize)> = stops
             .iter()
             .map(|(start, end)| (inserted_at + start, inserted_at + end))

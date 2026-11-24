@@ -1,0 +1,13 @@
+Open the Command Bar with Esc
+
+Press Esc two times, fast, when nothing is open.
+The Command Bar opens at the bottom.
+Esc closes it again.
+
+If a list or a hint box is open, the first Esc closes it.
+That Esc does not count. Press Esc two more times.
+
+Turn it off: Settings, Editor, Double Esc opens Command Bar.
+Or type double-esc in the Command Bar and press Enter.
+
+F1 and Shift+Space still open the Command Bar too.

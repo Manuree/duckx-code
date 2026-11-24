@@ -37,6 +37,9 @@ impl App {
 
     /// [`handle_mouse`](Self::handle_mouse) with the time of the event, for double-clicks.
     pub fn handle_mouse_at(&mut self, event: MouseEvent, now: Instant) -> bool {
+        if event.kind != MouseEventKind::Moved {
+            self.idle_esc = None;
+        }
         if !self.editor_prefs.mouse || self.pane_select.is_some() {
             self.mouse = MouseState::default();
             return false;
