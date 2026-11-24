@@ -338,9 +338,9 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 
 Settings → Editor → **Modeless** is On by default, and then nothing in this section applies: keys work exactly as described everywhere else in this file. Turn it Off (or run `modeless`) for three modes in the editor. The mode is shown in three places at once, so it is never a guess:
 
-* **The status bar badge:** `NORMAL` (blue), `INSERT` (green), `VISUAL` or `V-LINE` (orange in Tokyo Night). A started key sequence or count shows right after it, such as `3d` or `g`.
+* **The status bar badge:** `NORMAL` (blue), `INSERT` (green), `VISUAL` or `V-LINE` (pink). Each mode has its own color in every built-in theme, never shared with another badge. A started key sequence or count shows right after it, such as `3d` or `g`.
 * **The hint row** just above the status bar lists the keys that do something in this mode, with a short word each (`i insert  v select  dd del line … ? keys`). While a sequence is started it lists only the keys that can finish it, plus `Esc cancel`. Turn it off with Settings → Editor → **Mode hints** or `mode-hints`.
-* **The cursor:** a block in Normal, a green underline in Insert, and an orange block in Visual. The cursor line number takes the mode color too.
+* **The cursor:** a block in Normal, a green underline in Insert, and a pink block in Visual. The cursor line number takes the mode color too.
 
 **Start mode** (Settings → Editor) picks the mode when Modeless turns off and when duckx-code starts: Normal (the default) or Insert. There is one mode for the whole app; switching windows or tabs keeps it, except that Visual becomes Normal when another window gets the focus.
 
@@ -730,7 +730,7 @@ While the Command Bar is open the file name is hidden, and matching commands flo
 
 | Section | Element | Meaning |
 | :--- | :--- | :--- |
-| Left | `NORMAL` / `FILE` / `COMMAND` / `FIND` / `REPLACE` / `OPEN` / `SETTINGS` / `ABOUT` | Where keystrokes go. `NORMAL` (blue) while editing the file or the sidebar. `FILE` (orange) while the explorer is in FILE mode, entered with `select`. `FILTER` (teal) while the explorer is showing a file search. `COMMAND` (purple) while the Command Bar is open. `FIND` (yellow) while searching; printable keys jump to that text instead of inserting. `REPLACE` (orange) while typing a replacement. `OPEN` (purple) while the file picker is open. `SETTINGS` (green) while the settings page is open. `ABOUT` (yellow) while the about page is open. Printable keys insert text while the badge reads `NORMAL`. |
+| Left | `NORMAL` / `FILE` / `COMMAND` / `FIND` / `REPLACE` / `OPEN` / `SETTINGS` / `ABOUT` | Where keystrokes go. `NORMAL` (blue) while editing the file or the sidebar. `FILE` (orange) while the explorer is in FILE mode, entered with `select`. `FILTER` (teal) while the explorer is showing a file search. `COMMAND` (purple) while the Command Bar is open. `FIND` (yellow) while searching; printable keys jump to that text instead of inserting. `REPLACE` (orange) while typing a replacement. `OPEN` (purple) while the file picker is open. `SETTINGS` (slate gray) while the settings page is open. `ABOUT` (yellow) while the about page is open. Printable keys insert text while the badge reads `NORMAL`. With Modeless off, `NORMAL`, `INSERT` (green), `VISUAL` and `V-LINE` (pink) show the editing mode instead; see [Modal editing](#modal-editing-modeless-off). |
 | Left | Git branch | Shown while the bar is closed and the working directory is inside a repository. The branch icon and the branch name sit between the badge and the file. A detached HEAD shows the first 7 characters of the commit hash. Outside a repository this section is omitted. Hidden while the Command Bar, FIND mode, or REPLACE mode is open. |
 | Left | Icon + path | Shown while the Command Bar, FIND mode, and REPLACE mode are closed. File-type icon, the directory dimmed, and the file name in bold. A file saved as a bare name shows the folder duckx-code was started from. `[No Name]` when the buffer has no path. `[+]` after the name while there are unsaved changes. A yellow message after it is state of the moment only (`Saving hello.rs…`, `3 of 12`, `Press Enter again to delete Lab`) and goes at the next key press. Results and errors (`Saved E:\Work\duckx-code\hello.rs`, `Copied 5 characters`) are [notices](#notices). |
 | Left | `❯` input | Shown while the bar is open, in place of the file name. Matching commands are stacked on the rows above this line. |
@@ -827,7 +827,7 @@ Both are JSON documents. Built-ins, in cycle order:
 
 Tokyo Night follows the [VS Code theme](https://github.com/tokyo-night/tokyo-night-vscode-theme) (`themes/tokyo-night-color-theme.json`). The focused line number stays yellow, and the status bar keeps the lualine sections. A selected span uses the opaque mix of `editor.selectionBackground` (`#515c7e` at 30%) over the editor background, `#2b2f41`.
 
-Catppuccin colors follow the [Catppuccin palette](https://github.com/catppuccin/palette). Interface roles use `base`, `mantle`, `surface`, `overlay`, and the accent colors (blue, mauve, green, yellow, red, peach). Syntax roles use mauve for keywords, blue for functions, yellow for types, green for strings, peach for numbers, sky for operators, maroon for parameters, and lavender for properties.
+Catppuccin colors follow the [Catppuccin palette](https://github.com/catppuccin/palette). Interface roles use `base`, `mantle`, `surface`, `overlay`, and the accent colors (blue, mauve, green, yellow, red, peach, pink). The status badges are blue NORMAL, mauve COMMAND, green INSERT, pink VISUAL, peach FILE, yellow FIND, and a `subtext` slate gray SETTINGS. Syntax roles use mauve for keywords, blue for functions, yellow for types, green for strings, peach for numbers, sky for operators, maroon for parameters, and lavender for properties.
 
 The choice is written to `settings.json`:
 
