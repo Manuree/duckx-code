@@ -4,7 +4,7 @@
 
 **CLI Code Editor For 75% keyboards. No vim motions. Write code with Ollama, LM Studio, any OpenAI-compatible server, or OpenRouter.**
 
-duckx-code is a modeless terminal editor for a 75% keyboard. The cursor moves with the dedicated arrow keys, Home, End, Page Up, and Page Down. There are no vim motions: no `hjkl`, no `w`/`b`, and no operator-pending commands. Printable keys insert text immediately. Hold Shift with any navigation key to select. `F6` opens an assistant that writes and edits code through a local model on Ollama or LM Studio, or a cloud model through an OpenAI-compatible server or OpenRouter.
+duckx-code is a modeless terminal editor for a 75% keyboard. The cursor moves with the dedicated arrow keys, Home, End, Page Up, and Page Down. By default there are no vim motions: no `hjkl`, no `w`/`b`, and no operator-pending commands. Printable keys insert text immediately. If you prefer modes, turn off Settings → Editor → **Modeless** for Normal, Insert, and Visual modes that always show which mode you are in and which keys it takes. Hold Shift with any navigation key to select. `F6` opens an assistant that writes and edits code through a local model on Ollama or LM Studio, or a cloud model through an OpenAI-compatible server or OpenRouter.
 
 ## Supported terminals
 
@@ -30,6 +30,7 @@ Notes:
 ## Features
 
 * **Modeless editing** with arrow-key navigation, Shift selection, multi-window splits, and tabs per window ([DOCUMENTS.md](DOCUMENTS.md)).
+* **Optional modes** (Settings → Editor → **Modeless** Off): Normal, Insert, Visual, and Visual Line, with a colored mode badge, a hint row of the keys that work in the current mode, and a `?` list of every key. Each mode key is also a Command Bar command ([DOCUMENTS.md](DOCUMENTS.md#modal-editing-modeless-off)).
 * **Mouse:** click to move the cursor, drag to select buffer text (never the line numbers), double-click for a word, triple-click for a line, wheel to scroll, and click to switch tabs or focus the sidebar and assistant ([DOCUMENTS.md](DOCUMENTS.md#mouse)).
 * **Command Bar** (`F1`, `Shift + Space`, or `Esc` twice when there is nothing to close): every action also runs by name, with fuzzy matching.
 * **File explorer** sidebar (`Ctrl + B`) and a workspace **file picker** (`Ctrl + P`).

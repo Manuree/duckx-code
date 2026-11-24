@@ -1,0 +1,19 @@
+Select and change text in Visual mode (Modeless off)
+
+Put the cursor on "quick" below. Press v, then w.
+The badge says VISUAL and the selection is orange.
+
+The quick brown fox jumps over the lazy dog.
+
+Press y to copy it. The cursor goes back to its start.
+Press $ then p to paste it at the end of the line.
+
+Put the cursor inside the parentheses. Press v, then i(.
+
+call(first, second, third)
+
+Press c to delete the selection and type something new.
+Press Esc when done.
+
+Selecting with Shift and the arrows, Ctrl+A, or the mouse
+also switches to VISUAL. Esc goes back to NORMAL.

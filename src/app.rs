@@ -33,6 +33,7 @@ mod lsp_nav;
 mod lsp_servers;
 pub use lsp_servers::{Dot, Found, ServerView};
 mod lsp_sync;
+mod modal;
 mod mouse;
 mod notice;
 mod preview;
@@ -782,6 +783,10 @@ pub struct App {
     /// When the last `Esc` that had nothing to close was pressed. A second one within
     /// [`DOUBLE_ESC_WINDOW`] opens the Command Bar (Settings → Editor).
     idle_esc: Option<std::time::Instant>,
+    /// Modal editing state (Settings → Editor → Modeless off). Unused while Modeless is on.
+    pub(crate) modal_state: crate::modal::ModalState,
+    /// Whether [`modal_state`](Self::modal_state) was set up for Modeless off; see `sync_modal`.
+    modal_applied: bool,
     /// Rendered preview lines, reused until the source text, width, or theme changes.
     preview_cache: RefCell<Vec<preview::RenderedPreview>>,
     /// How many times a preview was laid out from scratch (cache misses).
@@ -896,6 +901,8 @@ impl App {
             previews: Vec::new(),
             mouse: mouse::MouseState::default(),
             idle_esc: None,
+            modal_state: crate::modal::ModalState::default(),
+            modal_applied: false,
             preview_cache: RefCell::new(Vec::new()),
             preview_renders: std::cell::Cell::new(0),
             preview_picker: None,
@@ -2558,16 +2565,34 @@ impl App {
         if action != SemanticAction::Dismiss {
             self.idle_esc = None;
         }
+        // `None` while Modeless is on: modal editing then changes nothing below.
+        let modal = self.modal_before(&action);
         if self.preview_focused() {
             self.message = None;
             if self.handle_preview_action(&action) {
+                self.modal_after(modal);
                 return;
             }
         }
-        self.handle_inner(action);
-        self.prune_previews();
-        self.sync_show_hidden();
-        self.settle_settings_row();
+        match modal {
+            Some(mut before) => {
+                before.set_line_motion(self.visual_line_motion(&action));
+                if !before.line_motion() {
+                    self.handle_inner(action);
+                }
+                self.prune_previews();
+                self.sync_show_hidden();
+                self.settle_settings_row();
+                self.modal_after(Some(before));
+            }
+            None => {
+                self.handle_inner(action);
+                self.prune_previews();
+                self.sync_show_hidden();
+                self.settle_settings_row();
+                self.modal_after(None);
+            }
+        }
     }
 
     /// Show hidden files changed (Settings, `hidden`, or a reloaded settings file):
@@ -2903,6 +2928,7 @@ impl App {
             SemanticAction::PreviewSide(action) => self.handle_preview_side(action),
             SemanticAction::ToggleAgent => self.toggle_agent(),
             SemanticAction::Agent(action) => self.handle_agent_input(action),
+            SemanticAction::Modal(action) => self.handle_modal(action),
         }
     }
 
@@ -3668,6 +3694,9 @@ impl App {
             | SettingId::AutoIndent
             | SettingId::Mouse
             | SettingId::DoubleEscCommandBar
+            | SettingId::Modeless
+            | SettingId::ModeHints
+            | SettingId::StartMode
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.set_choice(id, index);
@@ -3742,6 +3771,9 @@ impl App {
             | SettingId::AutoIndent
             | SettingId::Mouse
             | SettingId::DoubleEscCommandBar
+            | SettingId::Modeless
+            | SettingId::ModeHints
+            | SettingId::StartMode
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.restore_choice(id, origin);
@@ -3809,6 +3841,9 @@ impl App {
             | SettingId::AutoIndent
             | SettingId::Mouse
             | SettingId::DoubleEscCommandBar
+            | SettingId::Modeless
+            | SettingId::ModeHints
+            | SettingId::StartMode
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => self.editor_prefs.choice_token(id),
             SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
@@ -3877,6 +3912,9 @@ impl App {
             | SettingId::AutoIndent
             | SettingId::Mouse
             | SettingId::DoubleEscCommandBar
+            | SettingId::Modeless
+            | SettingId::ModeHints
+            | SettingId::StartMode
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => (
                 self.editor_prefs.choice_index(id),
@@ -3950,6 +3988,7 @@ impl App {
                 tab.buffer.apply_editor_style(spaces, width, forced);
             }
         }
+        self.sync_modal();
     }
 
     fn style_buffer(&self, mut buffer: crate::buffer::Buffer) -> crate::buffer::Buffer {
@@ -4005,6 +4044,9 @@ impl App {
             | SettingId::AutoIndent
             | SettingId::Mouse
             | SettingId::DoubleEscCommandBar
+            | SettingId::Modeless
+            | SettingId::ModeHints
+            | SettingId::StartMode
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.reset(id);
@@ -5228,6 +5270,25 @@ impl App {
             CommandId::BracketMatch => self.toggle_bracket_pref(false),
             CommandId::BracketColors => self.toggle_bracket_pref(true),
             CommandId::DoubleEsc => self.toggle_double_esc(),
+            CommandId::Modeless => self.toggle_modeless(),
+            CommandId::ModeHints => self.toggle_mode_hints(),
+            CommandId::ModeNormal
+            | CommandId::ModeInsert
+            | CommandId::ModeVisual
+            | CommandId::ModeVisualLine
+            | CommandId::InsertAfter
+            | CommandId::InsertLineStart
+            | CommandId::InsertLineEnd
+            | CommandId::OpenLineBelow
+            | CommandId::OpenLineAbove
+            | CommandId::SwapSelectionEnds
+            | CommandId::ChangeSelection
+            | CommandId::Keys => {
+                if self.editor_prefs.modeless {
+                    return Err(format!("{} applies with Modeless off", spec(id).name));
+                }
+                self.run_modal_command(id);
+            }
             CommandId::LspRestart => self.restart_current_server(),
             CommandId::Focus => self.toggle_focus(),
             CommandId::Preview => self.open_preview(arg.unwrap_or(""))?,

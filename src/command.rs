@@ -146,6 +146,34 @@ pub enum CommandId {
     SelectInsideBrackets,
     /// Enter PANE mode: arrows pick a window, `Enter` focuses it.
     Pane,
+    /// Turn Modeless on or off (Settings → Editor → Modeless).
+    Modeless,
+    /// Show or hide the key hints of the current mode (Settings → Editor → Mode hints).
+    ModeHints,
+    /// Modeless off: return to Normal mode.
+    ModeNormal,
+    /// Modeless off: type at the cursor (Insert mode).
+    ModeInsert,
+    /// Modeless off: select characters (Visual mode).
+    ModeVisual,
+    /// Modeless off: select whole lines (Visual Line mode).
+    ModeVisualLine,
+    /// Modeless off: type after the character under the cursor.
+    InsertAfter,
+    /// Modeless off: type at the start of the line.
+    InsertLineStart,
+    /// Modeless off: type at the end of the line.
+    InsertLineEnd,
+    /// Modeless off: open a new line below and type there.
+    OpenLineBelow,
+    /// Modeless off: open a new line above and type there.
+    OpenLineAbove,
+    /// Modeless off: move the cursor to the other end of the selection.
+    SwapSelectionEnds,
+    /// Modeless off: delete the selection and type in its place.
+    ChangeSelection,
+    /// Modeless off: list every key of the current mode.
+    Keys,
     /// Open the assistant panel and make it one row taller.
     AgentTaller,
     /// Open the assistant panel and make it one row shorter.
@@ -298,6 +326,132 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "double-esc",
         description: "Open the Command Bar with Esc twice, or stop",
         shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::Modeless,
+        name: "modeless",
+        description: "Type anywhere (on), or use Normal, Insert, and Visual modes (off)",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::ModeHints,
+        name: "mode-hints",
+        description: "Show the keys of the current mode above the status bar, or stop",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::ModeNormal,
+        name: "mode-normal",
+        description: "Return to Normal mode",
+        shortcut: "Esc",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::ModeInsert,
+        name: "mode-insert",
+        description: "Type at the cursor (Insert mode)",
+        shortcut: "i",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::ModeVisual,
+        name: "mode-visual",
+        description: "Select characters (Visual mode)",
+        shortcut: "v",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::ModeVisualLine,
+        name: "mode-visual-line",
+        description: "Select whole lines (Visual Line mode)",
+        shortcut: "V",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::InsertAfter,
+        name: "insert-after",
+        description: "Type after the character under the cursor",
+        shortcut: "a",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::InsertLineStart,
+        name: "insert-line-start",
+        description: "Type at the start of the line",
+        shortcut: "I",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::InsertLineEnd,
+        name: "insert-line-end",
+        description: "Type at the end of the line",
+        shortcut: "A",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::OpenLineBelow,
+        name: "open-line-below",
+        description: "Open a new line below and type there",
+        shortcut: "o",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::OpenLineAbove,
+        name: "open-line-above",
+        description: "Open a new line above and type there",
+        shortcut: "O",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::SwapSelectionEnds,
+        name: "swap-selection-ends",
+        description: "Move the cursor to the other end of the selection",
+        shortcut: "o",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::ChangeSelection,
+        name: "change-selection",
+        description: "Delete the selection and type in its place",
+        shortcut: "c",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::Keys,
+        name: "keys",
+        description: "List every key of the current mode",
+        shortcut: "?",
         arg: None,
         editor: true,
         explorer: false,
@@ -928,6 +1082,20 @@ fn importance(id: CommandId) -> u16 {
         CommandId::BracketMatch => 267,
         CommandId::BracketColors => 268,
         CommandId::DoubleEsc => 265,
+        CommandId::Modeless => 261,
+        CommandId::ModeHints => 263,
+        CommandId::Keys => 281,
+        CommandId::ModeNormal => 282,
+        CommandId::ModeInsert => 283,
+        CommandId::ModeVisual => 284,
+        CommandId::ModeVisualLine => 285,
+        CommandId::InsertAfter => 286,
+        CommandId::InsertLineStart => 287,
+        CommandId::InsertLineEnd => 288,
+        CommandId::OpenLineBelow => 289,
+        CommandId::OpenLineAbove => 291,
+        CommandId::SwapSelectionEnds => 292,
+        CommandId::ChangeSelection => 293,
         CommandId::LspRestart => 269,
         CommandId::Focus => 258,
         CommandId::Preview => 257,
@@ -1026,7 +1194,40 @@ pub fn manages_files(id: CommandId) -> bool {
     matches!(id, CommandId::Move | CommandId::Delete)
 }
 
+thread_local! {
+    /// True while Modeless is off, so the mode commands are offered.
+    static MODAL_COMMANDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Offer the mode commands (`mode-normal`, `keys`, …) or hide them. The app calls this
+/// whenever Settings → Editor → Modeless changes; they are hidden while it is on.
+pub fn show_modal_commands(on: bool) {
+    MODAL_COMMANDS.with(|cell| cell.set(on));
+}
+
+/// Commands that only mean something while Modeless is off.
+pub fn modal_only(id: CommandId) -> bool {
+    matches!(
+        id,
+        CommandId::ModeNormal
+            | CommandId::ModeInsert
+            | CommandId::ModeVisual
+            | CommandId::ModeVisualLine
+            | CommandId::InsertAfter
+            | CommandId::InsertLineStart
+            | CommandId::InsertLineEnd
+            | CommandId::OpenLineBelow
+            | CommandId::OpenLineAbove
+            | CommandId::SwapSelectionEnds
+            | CommandId::ChangeSelection
+            | CommandId::Keys
+    )
+}
+
 fn allows(spec: &CommandSpec, context: CommandContext, files: bool) -> bool {
+    if modal_only(spec.id) && !MODAL_COMMANDS.with(|cell| cell.get()) {
+        return false;
+    }
     match context {
         CommandContext::Editor => spec.editor,
         CommandContext::Explorer => spec.explorer && (files || !manages_files(spec.id)),
@@ -1444,6 +1645,8 @@ mod tests {
                 "focus",
                 "reveal",
                 "explorer",
+                "modeless",
+                "mode-hints",
                 "double-esc",
                 "hidden",
                 "bracket-match",
@@ -1560,6 +1763,7 @@ mod tests {
                 "goto-references",
                 "hover",
                 "rename-symbol",
+                "modeless",
                 "move-line-up",
                 "duplicate-line-up"
             ]
@@ -1573,6 +1777,7 @@ mod tests {
                 "goto-references",
                 "hover",
                 "rename-symbol",
+                "modeless",
                 "move-line-up",
                 "duplicate-line-up"
             ]

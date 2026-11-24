@@ -141,6 +141,13 @@ pub struct StatusColors {
     /// Badge while the explorer is in FILE mode. Missing keys keep the Tokyo Night orange.
     #[serde(default = "default_select_color")]
     pub select: Rgb,
+    /// Badge, cursor, and line number in INSERT mode (Modeless off). Missing keys use the
+    /// git `added` green.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert: Option<Rgb>,
+    /// Badge, cursor, and line number in VISUAL mode (Modeless off). Missing keys use `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual: Option<Rgb>,
     pub b_bg: Rgb,
     pub b_fg: Rgb,
     pub c_bg: Rgb,
@@ -334,6 +341,12 @@ pub struct UiStyles {
     pub status_select: Style,
     pub status_find_bg: Color,
     pub status_find: Style,
+    /// INSERT badge (Modeless off).
+    pub status_insert_bg: Color,
+    pub status_insert: Style,
+    /// VISUAL and V-LINE badge (Modeless off).
+    pub status_visual_bg: Color,
+    pub status_visual: Style,
     pub status_filter_bg: Color,
     pub status_filter: Style,
     pub status_b: Style,
@@ -418,6 +431,10 @@ impl UiStyles {
             status_settings: badge(status.settings),
             status_select_bg: status.select.into(),
             status_select: badge(status.select),
+            status_insert_bg: status.insert.unwrap_or(git.added).into(),
+            status_insert: badge(status.insert.unwrap_or(git.added)),
+            status_visual_bg: status.visual.unwrap_or(status.command).into(),
+            status_visual: badge(status.visual.unwrap_or(status.command)),
             status_find_bg: status.message.into(),
             status_find: badge(status.message),
             status_filter_bg: git.untracked.into(),
@@ -835,6 +852,88 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::*;
+
+    fn rgb(color: Color) -> (u8, u8, u8) {
+        match color {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("built-in badges are RGB, got {other:?}"),
+        }
+    }
+
+    /// WCAG relative luminance.
+    fn luminance(color: Color) -> f64 {
+        let (r, g, b) = rgb(color);
+        let channel = |c: u8| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.039_28 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (dark, light) = {
+            let (x, y) = (luminance(a), luminance(b));
+            if x < y { (x, y) } else { (y, x) }
+        };
+        (light + 0.05) / (dark + 0.05)
+    }
+
+    fn distance(a: Color, b: Color) -> f64 {
+        let (a, b) = (rgb(a), rgb(b));
+        let d = |x: u8, y: u8| (f64::from(x) - f64::from(y)).powi(2);
+        (d(a.0, b.0) + d(a.1, b.1) + d(a.2, b.2)).sqrt()
+    }
+
+    #[test]
+    fn insert_visual_and_settings_badges_have_their_own_readable_colors_in_every_theme() {
+        for theme in builtin_colors() {
+            assert!(
+                theme.status.insert.is_some(),
+                "{}: explicit insert",
+                theme.id
+            );
+            assert!(
+                theme.status.visual.is_some(),
+                "{}: explicit visual",
+                theme.id
+            );
+            let ui = UiStyles::from_color(&theme);
+            let own = [
+                ("INSERT", ui.status_insert_bg),
+                ("VISUAL", ui.status_visual_bg),
+                ("SETTINGS", ui.status_settings_bg),
+            ];
+            let others = [
+                ("NORMAL/PREVIEW", ui.status_a_bg),
+                ("COMMAND/AGENT/OPEN", ui.status_command_bg),
+                ("FILE/REPLACE", ui.status_select_bg),
+                ("FIND/ABOUT", ui.status_find_bg),
+                ("FILTER", ui.status_filter_bg),
+                ("PANE", ui.diagnostic_warning),
+            ];
+            for (i, (name, bg)) in own.iter().enumerate() {
+                for (other, other_bg) in own.iter().skip(i + 1).chain(others.iter()) {
+                    assert!(
+                        distance(*bg, *other_bg) >= 40.0,
+                        "{}: {name} {bg:?} is too close to {other} {other_bg:?}",
+                        theme.id
+                    );
+                }
+                let fg: Color = theme.status.badge_fg.into();
+                let min = if *name == "INSERT" { 2.7 } else { 3.0 };
+                assert!(
+                    contrast(fg, *bg) >= min,
+                    "{}: {name} text is hard to read ({:.2})",
+                    theme.id,
+                    contrast(fg, *bg)
+                );
+            }
+        }
+    }
 
     fn temp_dir() -> (PathBuf, impl Drop) {
         let nanos = std::time::SystemTime::now()

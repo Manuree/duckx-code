@@ -45,8 +45,10 @@ pub fn reserved_height(app: &App, width: u16, height: u16) -> u16 {
 }
 
 /// One row above the status line while FIND or REPLACE mode is open.
+/// Modeless off: one row for the mode's keys (Settings → Editor → Mode hints).
 pub fn mode_hint_rows(app: &App, width: u16, height: u16) -> u16 {
-    if (app.find_mode.is_some() || app.replace_mode.is_some()) && width >= 20 && height >= 3 {
+    let searching = app.find_mode.is_some() || app.replace_mode.is_some();
+    if (searching || app.mode_hints_shown()) && width >= 20 && height >= 3 {
         1
     } else {
         0
@@ -85,6 +87,105 @@ pub fn render_mode_hint(frame: &mut Frame, app: &App, area: Rect) {
         .style(theme.hint),
         rect,
     );
+}
+
+/// The keys of the current mode, one row: a strip in the mode color, then `key word`
+/// pairs. A notice (an unbound key) comes first. Pairs that do not fit are left out
+/// from the end, but the last one (`? keys` or `Esc normal`) always stays.
+pub fn render_modal_hint(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(state) = app.modal_input() else {
+        return;
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let theme = *app.styles();
+    let color = app.mode_color().unwrap_or(theme.status_a_bg);
+    let width = area.width as usize;
+    let mut spans = vec![Span::styled("▌", theme.hint.fg(color))];
+    let mut used = 1;
+    if let Some(notice) = state.notice.as_deref() {
+        let text = format!(" {notice} ");
+        used += text.width();
+        spans.push(Span::styled(
+            text,
+            theme.status_message.bg(theme.hint.bg.unwrap_or_default()),
+        ));
+    }
+    let pairs = crate::modal::hints(state, app.keys());
+    let pair_width = |hint: &crate::modal::Hint| 1 + hint.key.width() + 1 + hint.word.width() + 1;
+    let mut shown: Vec<&crate::modal::Hint> = Vec::new();
+    if let Some((last, rest)) = pairs.split_last() {
+        let mut room = width.saturating_sub(used + pair_width(last));
+        for hint in rest {
+            let need = pair_width(hint);
+            if need > room {
+                break;
+            }
+            room -= need;
+            shown.push(hint);
+        }
+        if pair_width(last) <= width.saturating_sub(used) {
+            shown.push(last);
+        }
+    }
+    for hint in shown {
+        spans.push(Span::styled(
+            format!(" {}", hint.key),
+            theme.hint_keys.fg(color),
+        ));
+        spans.push(Span::styled(format!(" {} ", hint.word), theme.hint));
+        used += pair_width(hint);
+    }
+    spans.push(Span::styled(
+        " ".repeat(width.saturating_sub(used)),
+        theme.hint,
+    ));
+    let rect = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(theme.hint), rect);
+}
+
+/// The `?` key list, a dropdown standing on `floor` (the hint row or status line).
+pub fn render_key_list(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
+    let Some(state) = app.modal_input() else {
+        return;
+    };
+    let Some(list) = state.key_list.as_ref() else {
+        return;
+    };
+    let entries = crate::modal::key_list(state.mode, &list.query);
+    let rows: Vec<Row> = entries
+        .iter()
+        .map(|entry| {
+            let tag = crate::modal::command_name(entry)
+                .map(str::to_string)
+                .or_else(|| crate::modal::mirror_name(entry))
+                .unwrap_or_default();
+            Row::new(entry.keys).detail(entry.label).tag(tag)
+        })
+        .collect();
+    let mode = state.mode.badge().trim();
+    let title = if list.query.is_empty() {
+        format!(" Keys · {mode} ")
+    } else {
+        format!(" Keys · {mode} · {} ", list.query)
+    };
+    let dropdown = List::new(&title, "↑↓  enter  type to filter  esc ", &rows)
+        .selected(Some(list.selected))
+        .empty("No key matches")
+        .label_width(4);
+    let room = floor.saturating_sub(area.y);
+    if room < 3 || area.width < 20 {
+        return;
+    }
+    let height = super::dropdown::frame_height(rows.len().max(1), 14).min(room);
+    let width = dropdown.natural_width().min(area.width);
+    let rect = Rect::new(area.x, floor - height, width, height);
+    super::dropdown::render(frame, rect, &dropdown, &theme_of(app));
+}
+
+fn theme_of(app: &App) -> crate::theme::UiStyles {
+    *app.styles()
 }
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {

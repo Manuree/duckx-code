@@ -864,6 +864,58 @@ impl Buffer {
         self.selection = Selection::point(self.line_start(line));
     }
 
+    /// Ends the current undo step, so the next typing starts a new one.
+    pub fn seal_undo(&mut self) {
+        self.history.seal();
+    }
+
+    /// Selects from `anchor` to `head` (clamped to the text), with no sticky selection.
+    /// Modal editing uses it to shape Visual and Visual Line selections.
+    pub fn select_range(&mut self, anchor: usize, head: usize) {
+        self.history.seal();
+        self.target_col = None;
+        self.sticky = None;
+        let len = self.rope.len_chars();
+        self.selection = Selection {
+            anchor: anchor.min(len),
+            head: head.min(len),
+        };
+    }
+
+    /// `(start, content end, next line start)` of zero-based `line`, clamped to the
+    /// last line. The content end is before the line break; the next line start is
+    /// the end of the text on the last line.
+    pub fn line_bounds(&self, line: usize) -> (usize, usize, usize) {
+        let line = line.min(self.rope.len_lines().saturating_sub(1));
+        let start = self.line_start(line);
+        let (_, next) = self.line_range(line);
+        (start, start + self.line_content_len(line), next)
+    }
+
+    /// Swaps the selection's anchor and head, so the cursor moves to the other end.
+    pub fn swap_selection_ends(&mut self) {
+        self.history.seal();
+        self.target_col = None;
+        let sel = self.selection;
+        self.selection = Selection {
+            anchor: sel.head,
+            head: sel.anchor,
+        };
+    }
+
+    /// Indents every line the selection touches (or the cursor line), never
+    /// inserting at the caret the way a single-line [`indent`](Self::indent) does.
+    pub fn indent_lines(&mut self) {
+        self.resolve_sticky();
+        let (first, last) = self.selected_lines();
+        let unit = self.indent_style.unit();
+        let edits = (first..=last)
+            .filter(|&line| self.line_content_len(line) > 0)
+            .map(|line| (self.line_start(line), 0, unit.clone()))
+            .collect();
+        self.apply_batch(edits);
+    }
+
     pub fn select_all(&mut self) {
         self.history.seal();
         self.target_col = None;

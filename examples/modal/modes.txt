@@ -1,0 +1,24 @@
+Try Normal, Insert, and Visual modes
+
+Turn them on: Settings, Editor, Modeless, Off.
+Or type modeless in the Command Bar and press Enter.
+The status bar now says NORMAL, and the row above it lists the keys.
+
+Move the cursor here with j or the arrows.
+Press A to type at the end of this line:
+Press Esc. The badge says NORMAL again.
+
+Press V on the next line, then j twice, then > to indent them.
+one
+two
+three
+
+Press 3dd on the first of these lines to delete all three.
+delete me
+delete me
+delete me
+
+Press ? to see every key. Type to filter, Enter runs one.
+
+Turn modes off again: modeless in the Command Bar.
+Everything then types the way it always did.

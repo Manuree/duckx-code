@@ -567,6 +567,11 @@ pub fn render(frame: &mut Frame, app: &App) {
         let bracket_match = (app.editor_prefs.match_brackets && focused)
             .then(|| editor.tab().bracket_match(start, end))
             .flatten();
+        // Modeless off: the cursor line number takes the mode color.
+        let mut pane_theme = theme;
+        if focused && let Some(color) = app.mode_color() {
+            pane_theme.gutter_active = pane_theme.gutter_active.fg(color);
+        }
         viewport::render(
             frame,
             &editor.tab().buffer,
@@ -574,7 +579,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             pane.gutter,
             pane.text,
             focused,
-            &theme,
+            &pane_theme,
             &app.appearance.syntax,
             viewport::Decorations {
                 highlights: &highlights,
@@ -600,6 +605,8 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_pane_candidate(frame, app, &layout, &theme);
     if (app.find_mode.is_some() || app.replace_mode.is_some()) && layout.command.height > 0 {
         command_bar::render_mode_hint(frame, app, layout.command);
+    } else if app.command_bar.is_none() && app.mode_hints_shown() && layout.command.height > 0 {
+        command_bar::render_modal_hint(frame, app, layout.command);
     } else if layout.command.height > 0 {
         command_bar::render(frame, app, layout.command);
     }
@@ -637,7 +644,39 @@ pub fn render(frame: &mut Frame, app: &App) {
         area.bottom()
     };
     snackbar::render(frame, app, area, floor);
-    paint_block_cursor(frame);
+    if app
+        .modal_input()
+        .is_some_and(|state| state.key_list.is_some())
+    {
+        command_bar::render_key_list(frame, app, area, floor);
+    }
+    paint_block_cursor(frame, cursor_look(app, editor_cursor));
+}
+
+/// How the editor cursor is painted. Modeless on, and every surface but an editor
+/// with Modeless off, keep the reversed block.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CursorLook {
+    Block,
+    /// Insert: an underline in the Insert color, so typing never hides a character.
+    Underline(ratatui::style::Color),
+    /// Visual: a block in the Visual color.
+    Colored(Style),
+}
+
+fn cursor_look(app: &App, editor_cursor: Option<(u16, u16)>) -> CursorLook {
+    let Some(state) = app.modal_input() else {
+        return CursorLook::Block;
+    };
+    if state.key_list.is_some() || editor_cursor.is_none() || cursor::position() != editor_cursor {
+        return CursorLook::Block;
+    }
+    let theme = app.styles();
+    match state.mode {
+        crate::modal::EditMode::Normal => CursorLook::Block,
+        crate::modal::EditMode::Insert => CursorLook::Underline(theme.status_insert_bg),
+        crate::modal::EditMode::Visual { .. } => CursorLook::Colored(theme.status_visual),
+    }
 }
 
 /// The editor's cursor is not painted through a floating panel drawn over it.
@@ -656,7 +695,7 @@ fn hide_covered_cursor(editor_cursor: Option<(u16, u16)>, panels: &[Rect]) {
 
 /// Reverse the recorded cell. A wide character keeps its glyph in the previous
 /// cell, and an empty cell gets a space so the block is visible past the text.
-fn paint_block_cursor(frame: &mut Frame) {
+fn paint_block_cursor(frame: &mut Frame, look: CursorLook) {
     let Some((x, y)) = cursor::position() else {
         return;
     };
@@ -674,7 +713,22 @@ fn paint_block_cursor(frame: &mut Frame) {
     if cell.symbol().is_empty() {
         cell.set_symbol(" ");
     }
-    cell.set_style(Style::new().add_modifier(Modifier::REVERSED));
+    match look {
+        CursorLook::Block => {
+            cell.set_style(Style::new().add_modifier(Modifier::REVERSED));
+        }
+        CursorLook::Underline(color) => {
+            cell.set_style(
+                Style::new()
+                    .fg(color)
+                    .underline_color(color)
+                    .add_modifier(Modifier::UNDERLINED | Modifier::BOLD),
+            );
+        }
+        CursorLook::Colored(style) => {
+            cell.set_style(style);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3030,7 +3084,9 @@ mod tests {
         ));
         let screen = draw(&app, 80, 24);
         assert!(screen.contains("Tab width"), "{screen}");
-        assert!(screen.contains("Spaces inserted for a Tab."), "{screen}");
+        // Each row shows its detail line when every Editor row fits twice over.
+        let tall = draw(&app, 80, 30);
+        assert!(tall.contains("Spaces inserted for a Tab."), "{tall}");
         assert!(screen.contains("4"), "{screen}");
         assert!(screen.contains("Appearance"), "{screen}");
         let opened = draw(&app, 80, 24);

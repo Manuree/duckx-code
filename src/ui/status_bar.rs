@@ -3,7 +3,7 @@ use std::path::MAIN_SEPARATOR;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -112,12 +112,41 @@ fn left_line(app: &App, width: usize) -> (Vec<Span<'static>>, usize) {
             file_line(app, " FILE ", theme.status_select, theme.status_select_bg),
             0,
         )
+    } else if let Some(state) = app.modal() {
+        (mode_line(app, state), 0)
     } else {
         (
             file_line(app, " NORMAL ", theme.status_a, theme.status_a_bg),
             0,
         )
     }
+}
+
+/// Modeless off: the mode badge in its own color, and a started sequence or
+/// count (`3d`) right after it.
+fn mode_line(app: &App, state: &crate::modal::ModalState) -> Vec<Span<'static>> {
+    use crate::modal::EditMode;
+    let theme = *app.styles();
+    let (badge, badge_bg) = match state.mode {
+        EditMode::Normal => (theme.status_a, theme.status_a_bg),
+        EditMode::Insert => (theme.status_insert, theme.status_insert_bg),
+        EditMode::Visual { .. } => (theme.status_visual, theme.status_visual_bg),
+    };
+    let mut spans = file_line(app, state.mode.badge(), badge, badge_bg);
+    let mut typed = state
+        .count
+        .map(|count| count.to_string())
+        .unwrap_or_default();
+    if let Some(first) = state.pending {
+        typed.push(first);
+    }
+    if !typed.is_empty() {
+        spans.insert(
+            1,
+            Span::styled(format!("{typed} "), badge.add_modifier(Modifier::BOLD)),
+        );
+    }
+    spans
 }
 
 /// PANE mode: an amber `PANE` badge and the keys.

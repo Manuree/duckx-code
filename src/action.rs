@@ -196,6 +196,8 @@ pub enum SemanticAction {
     /// Open, focus, or close the assistant panel.
     ToggleAgent,
     Agent(AgentAction),
+    /// Modal editing (Settings → Editor → Modeless off). Never produced while Modeless is on.
+    Modal(crate::modal::ModalAction),
 }
 
 /// Keys while the assistant prompt is focused.
