@@ -2,9 +2,9 @@
 
 [![Built With Ratatui](https://img.shields.io/badge/Built_With_Ratatui-000?logo=ratatui&logoColor=fff)](https://ratatui.rs/) [![License: MIT](https://img.shields.io/github/license/Manuree/duckx-code)](LICENSE) [![Release](https://github.com/Manuree/duckx-code/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/Manuree/duckx-code/actions/workflows/release.yml) [![Rust edition 2024](https://img.shields.io/badge/rust-edition%202024-orange?logo=rust)](https://doc.rust-lang.org/edition-guide/rust-2024/)
 
-**CLI Code Editor For 75% keyboards. No vim motions. Write code with Ollama, LM Studio, any OpenAI-compatible server, or OpenRouter.**
+**CLI Code Editor For 75% keyboards. Modeless by default, with optional Normal / Insert / Visual modes. Write code with Ollama, LM Studio, any OpenAI-compatible server, or OpenRouter.**
 
-duckx-code is a modeless terminal editor for a 75% keyboard. The cursor moves with the dedicated arrow keys, Home, End, Page Up, and Page Down. By default there are no vim motions: no `hjkl`, no `w`/`b`, and no operator-pending commands. Printable keys insert text immediately. If you prefer modes, turn off Settings → Editor → **Modeless** for Normal, Insert, and Visual modes that always show which mode you are in and which keys it takes. Hold Shift with any navigation key to select. `F6` opens an assistant that writes and edits code through a local model on Ollama or LM Studio, or a cloud model through an OpenAI-compatible server or OpenRouter.
+duckx-code is a terminal editor for a 75% keyboard, modeless by default. The cursor moves with the dedicated arrow keys, Home, End, Page Up, and Page Down. By default there are no vim motions: no `hjkl`, no `w`/`b`, and no operator-pending commands. Printable keys insert text immediately. If you prefer modes, or your terminal drops some `Ctrl`, `Alt`, or `Shift` combinations, turn off Settings → Editor → **Modeless** for Normal, Insert, and Visual modes driven by plain letter keys, which always show which mode you are in and which keys it takes (see [Optional modes](#optional-modes-for-any-terminal)). Hold Shift with any navigation key to select. `F6` opens an assistant that writes and edits code through a local model on Ollama or LM Studio, or a cloud model through an OpenAI-compatible server or OpenRouter.
 
 ## Supported terminals
 
@@ -25,12 +25,13 @@ Notes:
 * **Expected, not yet confirmed on every terminal.** The list follows from how each terminal encodes keys. It has not yet been tried on each terminal with a real keyboard. [docs/TERMINAL-KEYS.md](docs/TERMINAL-KEYS.md) has the per-key details and the fallbacks.
 * **Some terminals and desktops keep a few keys by default.** Windows Terminal keeps `Alt + Enter` and `Alt + arrows`; kitty, Ghostty, and foot keep some `Ctrl + Shift` keys; macOS keeps `Ctrl + arrows` and `Ctrl + Space`; Linux desktops may keep `Ctrl + Alt + arrows`. Free them in that program's settings, or change the duckx-code key in Settings → Keybindings.
 * **macOS:** set the Option key to act as Alt (Meta) in the terminal.
+* **Older or limited terminal?** Turn on the [optional modes](#optional-modes-for-any-terminal). Their keys are plain letters (`i`, `v`, `dd`, `yy`, `gg`, `:`), which every terminal sends, so editing does not depend on the combinations listed above.
 * **Known gap:** even in a supported terminal, `Ctrl + Shift + ]` (select to the matching bracket) can arrive as `Ctrl + }` and is not matched yet.
 
 ## Features
 
 * **Modeless editing** with arrow-key navigation, Shift selection, multi-window splits, and tabs per window ([DOCUMENTS.md](DOCUMENTS.md)).
-* **Optional modes** (Settings → Editor → **Modeless** Off): Normal, Insert, Visual, and Visual Line, with a colored mode badge, a hint row of the keys that work in the current mode, and a `?` list of every key. Each mode key is also a Command Bar command ([DOCUMENTS.md](DOCUMENTS.md#modal-editing-modeless-off)).
+* **Optional modes** (Settings → Editor → **Modeless** Off): Normal, Insert, Visual, and Visual Line, with a colored mode badge, a hint row of the keys that work in the current mode, and a `?` list of every key. The keys are plain letters, so the editor stays fully usable in older terminals that drop some `Ctrl` / `Alt` / `Shift` combinations. Each mode key is also a Command Bar command ([Optional modes](#optional-modes-for-any-terminal)).
 * **Mouse:** click to move the cursor, drag to select buffer text (never the line numbers), double-click for a word, triple-click for a line, wheel to scroll, and click to switch tabs or focus the sidebar and assistant ([DOCUMENTS.md](DOCUMENTS.md#mouse)).
 * **Command Bar** (`F1`, `Shift + Space`, or `Esc` twice when there is nothing to close): every action also runs by name, with fuzzy matching.
 * **File explorer** sidebar (`Ctrl + B`) and a workspace **file picker** (`Ctrl + P`).
@@ -38,6 +39,19 @@ Notes:
 * **Language servers:** diagnostics, hover, go to definition, references, rename, format, code actions, and completions.
 * **Assistant** (`F6`) with Agent, Plan, and Ask modes, slash commands, and `@file` mentions. Providers: Ollama, LM Studio, OpenAI-compatible servers, and OpenRouter.
 * Markdown preview, git changes in the gutter, file encodings (UTF-8, UTF-16, Windows-1252, Windows-874), color themes, and editable keybindings in Settings.
+
+## Optional modes (for any terminal)
+
+duckx-code is modeless by default: every printable key types, and actions use shortcuts such as `Ctrl + Shift + Z` or `Shift + Space`. Older or limited terminals (legacy VT encoding, some SSH clients, tmux) do not send every one of those combinations. For them, and for anyone who simply likes modes, duckx-code has optional Normal, Insert, and Visual modes whose keys are plain letters that arrive in every terminal.
+
+**Turn it on:** open Settings (`setting` in the Command Bar) → Editor → **Modeless** → Off, or run the `modeless` command. **Start mode** picks Normal or Insert at startup. Turn **Modeless** back On for the usual editor; nothing else changes.
+
+* **Normal:** move with `h j k l`, `w b`, `0 $`, `gg G`; edit with `x`, `dd`, `yy`, `p`, `u` / `U`, `>>`, `gc`; counts like `5j` and `3dd`; `/` to find, `gd` for definition, `K` for hover, and `:` for the Command Bar, which runs every other action by name.
+* **Insert:** `i`, `a`, `o` and friends start typing; `Esc` goes back to Normal.
+* **Visual / Visual Line:** `v` or `V`, then `d` cut, `y` copy, `c` change, `>` / `<` indent, `gc` comment.
+* **Always clear which mode you are in:** a colored badge (`NORMAL`, `INSERT`, `VISUAL`, `V-LINE`) in the status bar, a mode-colored cursor, a hint row above the status bar with the keys that work right now (Settings → Editor → **Mode hints**), and `?` for a searchable list of every key in the mode.
+
+All keys and details: [DOCUMENTS.md → Modal editing](DOCUMENTS.md#modal-editing-modeless-off). Which shortcuts each terminal can send: [docs/TERMINAL-KEYS.md](docs/TERMINAL-KEYS.md).
 
 ## Install
 
