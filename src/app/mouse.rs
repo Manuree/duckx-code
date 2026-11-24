@@ -37,6 +37,13 @@ impl App {
 
     /// [`handle_mouse`](Self::handle_mouse) with the time of the event, for double-clicks.
     pub fn handle_mouse_at(&mut self, event: MouseEvent, now: Instant) -> bool {
+        let handled = self.handle_mouse_event(event, now);
+        // Modeless off: a drag that selects is Visual, a click is Normal again.
+        self.modal_after_mouse(event);
+        handled
+    }
+
+    fn handle_mouse_event(&mut self, event: MouseEvent, now: Instant) -> bool {
         if event.kind != MouseEventKind::Moved {
             self.idle_esc = None;
         }

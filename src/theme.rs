@@ -141,6 +141,12 @@ pub struct StatusColors {
     /// Badge while the explorer is in FILE mode. Missing keys keep the Tokyo Night orange.
     #[serde(default = "default_select_color")]
     pub select: Rgb,
+    /// Badge, cursor, and line number in INSERT mode (Modeless off). Missing keys use `settings`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert: Option<Rgb>,
+    /// Badge, cursor, and line number in VISUAL mode (Modeless off). Missing keys use `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual: Option<Rgb>,
     pub b_bg: Rgb,
     pub b_fg: Rgb,
     pub c_bg: Rgb,
@@ -334,6 +340,12 @@ pub struct UiStyles {
     pub status_select: Style,
     pub status_find_bg: Color,
     pub status_find: Style,
+    /// INSERT badge (Modeless off).
+    pub status_insert_bg: Color,
+    pub status_insert: Style,
+    /// VISUAL and V-LINE badge (Modeless off).
+    pub status_visual_bg: Color,
+    pub status_visual: Style,
     pub status_filter_bg: Color,
     pub status_filter: Style,
     pub status_b: Style,
@@ -418,6 +430,10 @@ impl UiStyles {
             status_settings: badge(status.settings),
             status_select_bg: status.select.into(),
             status_select: badge(status.select),
+            status_insert_bg: status.insert.unwrap_or(status.settings).into(),
+            status_insert: badge(status.insert.unwrap_or(status.settings)),
+            status_visual_bg: status.visual.unwrap_or(status.command).into(),
+            status_visual: badge(status.visual.unwrap_or(status.command)),
             status_find_bg: status.message.into(),
             status_find: badge(status.message),
             status_filter_bg: git.untracked.into(),

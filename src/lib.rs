@@ -15,6 +15,7 @@ pub mod layout;
 pub mod line_edit;
 pub mod lsp;
 pub mod markdown;
+pub mod modal;
 pub mod picker;
 pub mod quotes;
 pub mod services;

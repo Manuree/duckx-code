@@ -301,6 +301,9 @@ fn route_event(
     }
     let action = if app.pane_select.is_some() {
         input::route_pane_select(event, app.keys())
+    } else if let Some(state) = app.modal_input() {
+        // Modeless off and an editor has the keys: Normal, Insert, or Visual.
+        duckx_code::modal::route(event, state, app.keys())
     } else {
         input::route_flags(
             event,

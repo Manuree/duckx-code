@@ -23,6 +23,12 @@ pub enum SettingId {
     Mouse,
     /// Two quick `Esc` presses with nothing to close open the Command Bar.
     DoubleEscCommandBar,
+    /// On: type anywhere, as before. Off: Normal, Insert, and Visual modes.
+    Modeless,
+    /// While Modeless is off, show the keys of the current mode above the status bar.
+    ModeHints,
+    /// The mode after start or after turning Modeless off.
+    StartMode,
     /// Highlight the bracket at the cursor and its partner.
     MatchBrackets,
     /// Color brackets by nesting depth.
@@ -162,6 +168,39 @@ impl LineEndingPref {
             Self::Auto => None,
             Self::Lf => Some(crate::buffer::LineEnding::Lf),
             Self::Crlf => Some(crate::buffer::LineEnding::Crlf),
+        }
+    }
+}
+
+/// The mode the editor starts in while Modeless is off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StartModePref {
+    #[default]
+    Normal,
+    Insert,
+}
+
+impl StartModePref {
+    fn index(self) -> usize {
+        match self {
+            Self::Normal => 0,
+            Self::Insert => 1,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        if index == 1 {
+            Self::Insert
+        } else {
+            Self::Normal
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Insert => "insert",
         }
     }
 }
@@ -1474,6 +1513,9 @@ impl AiPrefs {
                 | SettingId::AutoIndent
                 | SettingId::Mouse
                 | SettingId::DoubleEscCommandBar
+                | SettingId::Modeless
+                | SettingId::ModeHints
+                | SettingId::StartMode
                 | SettingId::MatchBrackets
                 | SettingId::ColorizeBrackets
                 | SettingId::ColorTheme
@@ -1790,6 +1832,15 @@ pub struct EditorPrefs {
     /// Two quick `Esc` presses with nothing to close open the Command Bar. On by default.
     #[serde(default = "enabled")]
     pub double_esc_command_bar: bool,
+    /// Type anywhere without modes. On by default; off turns on Normal, Insert, and Visual.
+    #[serde(default = "enabled")]
+    pub modeless: bool,
+    /// Show the keys of the current mode while Modeless is off. On by default.
+    #[serde(default = "enabled")]
+    pub mode_hints: bool,
+    /// The mode after start or after turning Modeless off. Normal by default.
+    #[serde(default)]
+    pub start_mode: StartModePref,
     /// Highlight the bracket at the cursor and its partner. On by default.
     #[serde(default = "enabled")]
     pub match_brackets: bool,
@@ -1807,6 +1858,9 @@ impl Default for EditorPrefs {
             auto_indent: true,
             mouse: true,
             double_esc_command_bar: true,
+            modeless: true,
+            mode_hints: true,
+            start_mode: StartModePref::Normal,
             match_brackets: true,
             colorize_brackets: true,
         }
@@ -1826,8 +1880,11 @@ impl EditorPrefs {
             | SettingId::AutoIndent
             | SettingId::Mouse
             | SettingId::DoubleEscCommandBar
+            | SettingId::Modeless
+            | SettingId::ModeHints
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => vec!["On".into(), "Off".into()],
+            SettingId::StartMode => vec!["Normal".into(), "Insert".into()],
             SettingId::LineEnding => vec!["Auto".into(), "LF".into(), "CRLF".into()],
             _ => Vec::new(),
         }
@@ -1843,6 +1900,9 @@ impl EditorPrefs {
             SettingId::AutoIndent => usize::from(!self.auto_indent),
             SettingId::Mouse => usize::from(!self.mouse),
             SettingId::DoubleEscCommandBar => usize::from(!self.double_esc_command_bar),
+            SettingId::Modeless => usize::from(!self.modeless),
+            SettingId::ModeHints => usize::from(!self.mode_hints),
+            SettingId::StartMode => self.start_mode.index(),
             SettingId::MatchBrackets => usize::from(!self.match_brackets),
             SettingId::ColorizeBrackets => usize::from(!self.colorize_brackets),
             SettingId::LineEnding => self.line_ending.index(),
@@ -1857,6 +1917,9 @@ impl EditorPrefs {
             SettingId::AutoIndent => on_off(self.auto_indent),
             SettingId::Mouse => on_off(self.mouse),
             SettingId::DoubleEscCommandBar => on_off(self.double_esc_command_bar),
+            SettingId::Modeless => on_off(self.modeless),
+            SettingId::ModeHints => on_off(self.mode_hints),
+            SettingId::StartMode => self.start_mode.as_str().to_string(),
             SettingId::MatchBrackets => on_off(self.match_brackets),
             SettingId::ColorizeBrackets => on_off(self.colorize_brackets),
             SettingId::LineEnding => self.line_ending.as_str().to_string(),
@@ -1882,6 +1945,9 @@ impl EditorPrefs {
             SettingId::AutoIndent => self.auto_indent = index == 0,
             SettingId::Mouse => self.mouse = index == 0,
             SettingId::DoubleEscCommandBar => self.double_esc_command_bar = index == 0,
+            SettingId::Modeless => self.modeless = index == 0,
+            SettingId::ModeHints => self.mode_hints = index == 0,
+            SettingId::StartMode => self.start_mode = StartModePref::from_index(index),
             SettingId::MatchBrackets => self.match_brackets = index == 0,
             SettingId::ColorizeBrackets => self.colorize_brackets = index == 0,
             SettingId::LineEnding => self.line_ending = LineEndingPref::from_index(index),
@@ -1902,6 +1968,15 @@ impl EditorPrefs {
             SettingId::AutoIndent => self.auto_indent = token != "off",
             SettingId::Mouse => self.mouse = token != "off",
             SettingId::DoubleEscCommandBar => self.double_esc_command_bar = token != "off",
+            SettingId::Modeless => self.modeless = token != "off",
+            SettingId::ModeHints => self.mode_hints = token != "off",
+            SettingId::StartMode => {
+                self.start_mode = if token == "insert" {
+                    StartModePref::Insert
+                } else {
+                    StartModePref::Normal
+                };
+            }
             SettingId::MatchBrackets => self.match_brackets = token != "off",
             SettingId::ColorizeBrackets => self.colorize_brackets = token != "off",
             SettingId::LineEnding => {
@@ -1925,6 +2000,9 @@ impl EditorPrefs {
             SettingId::DoubleEscCommandBar => {
                 self.double_esc_command_bar = defaults.double_esc_command_bar
             }
+            SettingId::Modeless => self.modeless = defaults.modeless,
+            SettingId::ModeHints => self.mode_hints = defaults.mode_hints,
+            SettingId::StartMode => self.start_mode = defaults.start_mode,
             SettingId::MatchBrackets => self.match_brackets = defaults.match_brackets,
             SettingId::ColorizeBrackets => self.colorize_brackets = defaults.colorize_brackets,
             SettingId::LineEnding => self.line_ending = defaults.line_ending,
@@ -2349,6 +2427,21 @@ pub fn sections() -> &'static [Section] {
                             label: "Double Esc opens Command Bar",
                             detail: "Press Esc twice fast, with nothing to close, to open the Command Bar.",
                             id: SettingId::DoubleEscCommandBar,
+                        },
+                        Item {
+                            label: "Modeless",
+                            detail: "On: type anywhere, as always. Off: Normal, Insert, and Visual modes.",
+                            id: SettingId::Modeless,
+                        },
+                        Item {
+                            label: "Mode hints",
+                            detail: "With Modeless off, show the keys of the current mode above the status bar.",
+                            id: SettingId::ModeHints,
+                        },
+                        Item {
+                            label: "Start mode",
+                            detail: "With Modeless off, the mode after start or after turning Modeless off.",
+                            id: SettingId::StartMode,
                         },
                         Item {
                             label: "Match brackets",

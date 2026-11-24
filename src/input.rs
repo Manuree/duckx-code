@@ -627,7 +627,10 @@ fn route_editor(event: &Event, keys: &crate::keys::KeyMap) -> Option<SemanticAct
     }
 }
 
-fn route_editor_key(key: &KeyEvent, keys: &crate::keys::KeyMap) -> Option<SemanticAction> {
+pub(crate) fn route_editor_key(
+    key: &KeyEvent,
+    keys: &crate::keys::KeyMap,
+) -> Option<SemanticAction> {
     if key.kind == KeyEventKind::Release {
         return None;
     }

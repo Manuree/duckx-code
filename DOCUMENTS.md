@@ -15,7 +15,7 @@ cargo run -- path\to\file.rs # open a file (a missing path opens as a new file)
 
 Starting with no path opens the folder the command was started from. Files, cursors, split windows, and the sidebar (open or closed, its width, and which folders were expanded) come back from the last quit in that same folder. Another folder keeps its own session and is not opened in its place. Both live in `session.json`, next to `settings.json`. A file that was deleted is skipped. Text that was never saved is not restored. Passing a file path opens that file instead, in the folder the command was started from.
 
-There are no modes. Every printable key types text immediately. `Ctrl + S` saves the file. `Ctrl + Q` quits; if a file has unsaved changes, duckx-code asks first. `Ctrl + C` copies — it does not quit.
+There are no modes by default. Every printable key types text immediately. (Settings → Editor → **Modeless** Off adds Normal, Insert, and Visual modes; see [Modal editing](#modal-editing-modeless-off).) `Ctrl + S` saves the file. `Ctrl + Q` quits; if a file has unsaved changes, duckx-code asks first. `Ctrl + C` copies — it does not quit.
 
 The status bar uses Nerd Font icons, so set your terminal font to a [Nerd Font](https://www.nerdfonts.com/) (e.g. *JetBrainsMono Nerd Font*, *CaskaydiaCove Nerd Font*).
 
@@ -333,6 +333,110 @@ With no diagnostics in the file, both diagnostic keys say `No diagnostics in thi
 The completion list filters as you keep typing. `Up` and `Down` move the highlight, `Tab` or `Enter` inserts the highlighted item as one undo step, and `Esc` closes the list. Other keys still type into the file. A file that has not been saved yet says so instead of asking a server.
 
 ---
+
+## Modal editing (Modeless off)
+
+Settings → Editor → **Modeless** is On by default, and then nothing in this section applies: keys work exactly as described everywhere else in this file. Turn it Off (or run `modeless`) for three modes in the editor. The mode is shown in three places at once, so it is never a guess:
+
+* **The status bar badge:** `NORMAL` (blue), `INSERT` (green), `VISUAL` or `V-LINE` (orange in Tokyo Night). A started key sequence or count shows right after it, such as `3d` or `g`.
+* **The hint row** just above the status bar lists the keys that do something in this mode, with a short word each (`i insert  v select  dd del line … ? keys`). While a sequence is started it lists only the keys that can finish it, plus `Esc cancel`. Turn it off with Settings → Editor → **Mode hints** or `mode-hints`.
+* **The cursor:** a block in Normal, a green underline in Insert, and an orange block in Visual. The cursor line number takes the mode color too.
+
+**Start mode** (Settings → Editor) picks the mode when Modeless turns off and when duckx-code starts: Normal (the default) or Insert. There is one mode for the whole app; switching windows or tabs keeps it, except that Visual becomes Normal when another window gets the focus.
+
+Every key below either does the same as a key duckx-code already has (shown in brackets) or runs a Command Bar command, so there is nothing new to learn behind it. `Ctrl`, `Alt`, and F-key shortcuts, the arrows, `Home`, `End`, `PgUp`, `PgDn`, and the mouse work in every mode exactly as in Modeless. Mode keys cannot be rebound yet; the shortcuts in Settings → Keybindings still can.
+
+### Insert
+
+Typing works exactly like Modeless: every key does what it does with Modeless On. Only `Esc` differs: it closes a completion list, hover, code action list, reference list, or snippet first; with nothing open it goes back to Normal. Each visit to Insert is its own undo step.
+
+### Normal
+
+Printable keys never type in Normal. A key with no command shows *No command on q. Press i to type, ? for keys* in the hint row.
+
+| Keys | Does |
+| :--- | :--- |
+| `i` `a` `I` `A` | Insert at the cursor, after it, at the start of the line, at the end of the line |
+| `o` `O` | Open a new line below or above, and Insert |
+| `v` `V` | Visual (characters) or Visual Line |
+| `h` `j` `k` `l` | Left, Down, Up, Right (the arrows) |
+| `w` `b` | Next / previous word (`Ctrl + Right` / `Ctrl + Left`) |
+| `0` `$` | Start / end of the line (`Home` / `End`) |
+| `gg` `G` | Top / end of the file (`Ctrl + Home` / `Ctrl + End`); `5gg` or `5G` goes to line 5 |
+| `{` `}` | Previous / next blank line (`Ctrl + Up` / `Ctrl + Down`) |
+| `Enter` `Backspace` | Down / Left |
+| `x` | Delete the character (`Delete`) |
+| `dd` | Delete the line (`delete-line`; the clipboard is untouched) |
+| `yy` | Copy the line (`copy` with nothing selected) |
+| `p` | Paste at the cursor |
+| `u` `U` | Undo / redo |
+| `>>` `<<` | Indent / outdent the line |
+| `gc` | Comment or uncomment the line |
+| `%` | Jump to the matching bracket |
+| `/` `n` `N` | Find, next match, previous match. Leaving Find puts the cursor at the start of the match and stays in Normal |
+| `gd` `K` | Go to definition, hover |
+| `]d` `[d` | Next / previous diagnostic |
+| `:` | Open the Command Bar (`F1`) |
+| `?` | The key list |
+| `Esc` | Close popups. With nothing to close, a second quick `Esc` opens the Command Bar (Double Esc) |
+
+**Counts:** digits before a motion or a command repeat it: `5j`, `3w`, `3dd`, `2>>`, `4u`. `0` is a count only after another digit. A count before `G` or `gg` is a line number. A count is capped at 9999, and `Esc` drops a started count or sequence without doing anything else.
+
+### Visual and Visual Line
+
+`v` starts a selection at the cursor and motions grow it. Like the rest of duckx-code, the cursor sits between characters, so `vll` selects two characters. `V` selects whole lines from the line it started on to the cursor line. A selection made in Normal with `Shift` + arrows, `Ctrl + A`, or the mouse switches to Visual by itself; a click that drops the selection goes back to Normal.
+
+| Keys | Does |
+| :--- | :--- |
+| motions above | Grow or shrink the selection (counts too) |
+| `d` `x` | Cut the selection |
+| `y` | Copy it; the cursor goes to its start |
+| `c` | Delete it and Insert |
+| `p` | Paste over it |
+| `>` `<` | Indent / outdent every selected line (stays in Visual) |
+| `gc` | Comment or uncomment the lines |
+| `o` | Move the cursor to the other end |
+| `i"` `i'` `i(` `i{` `i[` (or the closing bracket) | Select inside quotes or brackets |
+| `%` | Select to the matching bracket |
+| `v` `V` | Switch between Visual and Visual Line, or leave |
+| `Esc` | Back to Normal, dropping the selection |
+
+In Visual Line, `y` and `d` take the line break after the last line, so `p` brings back whole lines.
+
+### The key list
+
+`?` in Normal or Visual (or the `keys` command) opens a list of every key of the mode with what it does and the command or key it mirrors. Type to filter, `Up` / `Down` to move, `Enter` to run the highlighted key, `Esc` to close.
+
+### Esc and Double Esc
+
+An `Esc` that leaves Insert or Visual, or cancels a count or sequence, is not the first press of a double `Esc`. In Normal, `Esc` works as in Modeless: it closes popups, and two quick presses with nothing to close open the Command Bar when **Double Esc opens Command Bar** is On.
+
+### Commands
+
+| Command | Description | Mode key |
+| :--- | :--- | :--- |
+| `modeless` | Turn Modeless on or off. Flips and saves **Modeless** (Settings → Editor) | — |
+| `mode-hints` | Show or hide the hint row. Flips and saves **Mode hints** | — |
+| `mode-normal` | Back to Normal | `Esc` |
+| `mode-insert` | Insert at the cursor | `i` |
+| `mode-visual` | Visual, or back to Normal from it | `v` |
+| `mode-visual-line` | Visual Line, or back to Normal from it | `V` |
+| `insert-after` | Insert after the cursor | `a` |
+| `insert-line-start` | Insert at the start of the line | `I` |
+| `insert-line-end` | Insert at the end of the line | `A` |
+| `open-line-below` | Open a line below and Insert | `o` |
+| `open-line-above` | Open a line above and Insert | `O` |
+| `swap-selection-ends` | Move the cursor to the other end of the selection | `o` in Visual |
+| `change-selection` | Delete the selection and Insert | `c` in Visual |
+| `keys` | Open the key list | `?` |
+
+The mode commands are listed in the Command Bar only while Modeless is Off. Every other mode key runs a command that is already in the [Command List](#64-command-list) (`dd` is `delete-line`, `gd` is `goto-definition`, and so on) or does what an existing key does.
+
+### Known limits
+
+* `p` pastes at the cursor, not on a new line below.
+* `3dd` is three undo steps.
+* A paste from a terminal that sends it as typed keys (no bracketed paste) can reach Normal as keys. Press `i` before pasting, or use `Ctrl + V`.
 
 ## 6. Command Bar
 
@@ -676,6 +780,9 @@ Editor, Files, and Keybindings are saved in the same `settings.json` as the them
 | Auto indent | On, Off | On indents after `{ ( [` and block openers on `Enter`, splits a pair such as `{}` around the cursor, and moves a typed closer back to its opener's indent. Off only keeps the current line's indent. The default is On. See [Auto indent](#auto-indent). |
 | Mouse | On, Off | On lets clicks, drags, and the wheel work inside duckx-code (see [Mouse](#mouse)); `Shift` + drag still uses the terminal's own selection. Off leaves the mouse to the terminal, so dragging selects screen text as usual. The default is On. |
 | Double Esc opens Command Bar | On, Off | On opens the Command Bar when `Esc` is pressed twice quickly (within 0.4 s) in the editor and the first `Esc` had nothing to close (no hover, completion, code action or reference list, and no snippet). A single `Esc` works as before, and `Alt` chords never count. Off leaves `Esc` as it was. The default is On. The `double-esc` command flips it. |
+| Modeless | On, Off | On (the default) keeps the editor modeless: every printable key types. Off adds Normal, Insert, and Visual modes (see [Modal editing](#modal-editing-modeless-off)). The `modeless` command flips it. |
+| Mode hints | On, Off | With Modeless Off, On shows the keys of the current mode in a row above the status bar. The default is On. The `mode-hints` command flips it. |
+| Start mode | Normal, Insert | With Modeless Off, the mode after start and after turning Modeless off. The default is Normal. |
 | Match brackets | On, Off | On draws the bracket at the cursor (or just before it) and its pair bold on a soft background, in the focused window, when both are on screen. A bracket with no pair is drawn in the error color. Brackets in strings and comments are skipped. The default is On. The `bracket-match` command flips it. |
 | Colorize bracket pairs | On, Off | On colors `()` `[]` `{}` by how deep they are nested, cycling through the syntax theme's bracket colors. Unmatched ones use the error color. The default is On. The `bracket-colors` command flips it. |
 | Trim trailing space | On, Off | On removes spaces and tabs at the end of a line when the file is saved. The default is Off. |
@@ -873,7 +980,7 @@ A line is a slash command only when `/` is the first character of the prompt (po
 
 ### Modes
 
-The editor has no modes. Only the assistant panel does, and a mode changes only what the assistant may do; keys in the editor stay the same.
+With **Modeless** On (the default) the editor has no modes. Only the assistant panel does, and a mode changes only what the assistant may do; keys in the editor stay the same.
 
 | Mode | Title | Border | Tools |
 | :--- | :--- | :--- | :--- |
