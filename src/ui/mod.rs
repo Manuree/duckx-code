@@ -783,21 +783,21 @@ mod tests {
         app.handle(SemanticAction::Deselect);
         assert!(app.mode_hints_shown());
         let (text, marked) = hint_row(&app, 120, 12);
-        assert!(text.contains("Insert"), "{text}");
-        assert!(text.contains("dd Cut line"), "{text}");
+        assert!(text.contains("insert"), "{text}");
+        assert!(text.contains("dd cut line"), "{text}");
         let marked: String = marked.split_whitespace().collect();
-        assert!(marked.starts_with("IVVdd"), "{marked}");
+        assert!(marked.starts_with("ivVdd"), "{marked}");
 
         app.editor_prefs.key_style = crate::modal::KeyStyle::Mnemonic;
         app.handle(SemanticAction::Deselect);
         let (text, marked) = hint_row(&app, 120, 12);
         assert!(
-            text.contains("Insert  Select  Copy  x Cut  Paste"),
+            text.contains("insert  select  copy  x cut  paste"),
             "{text}"
         );
         let marked: String = marked.split_whitespace().collect();
-        // I(nsert) S(elect) C(opy), the fallback key x, P(aste) U(ndo) R(edo) F(ind) : ?
-        assert_eq!(marked, "ISCxPURF:?", "{text}");
+        // i(nsert) s(elect) c(opy), the fallback key x, p(aste) u(ndo) r(edo) f(ind) : ?
+        assert_eq!(marked, "iscxpurf:?", "{text}");
     }
 
     #[cfg(not(windows))]

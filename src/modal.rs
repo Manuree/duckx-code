@@ -1882,7 +1882,7 @@ impl Hint {
         !self.marks.is_empty()
     }
 
-    /// `C̲opy L̲ine` as plain text: `[C]opy [L]ine`, or `key word` when not marked.
+    /// `c̲opy l̲ine` as plain text: `[c]opy [l]ine`, or `key word` when not marked.
     /// For tests and messages.
     pub fn plain(&self) -> String {
         if !self.marked() {
@@ -1912,11 +1912,14 @@ fn hint(key: impl Into<String>, word: impl Into<String>) -> Hint {
 }
 
 /// A hint for `keys` named `name`: the letters highlighted when `name` holds them
-/// all, else `keys` shown before it. `typed` letters are already pressed (a started
+/// all, else `keys` shown before it. The name is lowercase; each highlighted letter
+/// is the exact case of its key, so a Shift key stands out (`v` → `[v]isual`,
+/// `V` → `[V]isual line`). `typed` letters are already pressed (a started
 /// sequence): they are not highlighted and show in lower case.
 fn named_hint(keys: &str, name: &str, typed: usize) -> Hint {
     let shown_key: String = keys.chars().skip(typed).collect();
-    match marks(name, keys) {
+    let name = name.to_lowercase();
+    match marks(&name, keys) {
         Some(found) => {
             let mut word: Vec<char> = name.chars().collect();
             for (n, &(index, c)) in found.iter().enumerate() {
@@ -1928,14 +1931,7 @@ fn named_hint(keys: &str, name: &str, typed: usize) -> Hint {
                 marks: found.iter().skip(typed).map(|&(index, _)| index).collect(),
             }
         }
-        None => {
-            let word = if typed > 0 {
-                name.to_lowercase()
-            } else {
-                name.to_string()
-            };
-            hint(shown_key, word)
-        }
+        None => hint(shown_key, name),
     }
 }
 
@@ -1946,9 +1942,10 @@ fn word_start(name: &[char], index: usize) -> bool {
 
 /// Where the letters of `keys` sit in `name`, in order, and how each is shown: for each
 /// letter the first word start that has it, else its first place anywhere, always after
-/// the letter before. A shifted key shows upper case (`P` → `P`aste B`e`fore keeps `P`);
-/// a lower-case key keeps the name's own case. `None` when a letter is missing or the
-/// key is not only letters (`Tab`, `Ctrl+D`, `>>`, `]d`), so the key is shown instead.
+/// the letter before. The shown character is the key itself, so its case is the case
+/// of the key (`p` → `[p]aste`, `P` → `[P]aste before`, `fP` → `[f]ind [P]revious`).
+/// `None` when a letter is missing or the key is not only letters (`Tab`, `Ctrl+D`,
+/// `>>`, `]d`), so the key is shown instead.
 pub fn marks(name: &str, keys: &str) -> Option<Vec<(usize, char)>> {
     if keys.is_empty() || is_named(keys) || !keys.chars().all(|c| c.is_ascii_alphabetic()) {
         return None;
@@ -1962,12 +1959,7 @@ pub fn marks(name: &str, keys: &str) -> Option<Vec<(usize, char)>> {
         let index = (from..chars.len())
             .find(|i| word_start(&chars, *i) && hit(i))
             .or_else(|| (from..chars.len()).find(hit))?;
-        let shown = if key.is_ascii_uppercase() {
-            key
-        } else {
-            chars[index]
-        };
-        found.push((index, shown));
+        found.push((index, key));
         from = index + 1;
     }
     Some(found)
@@ -2527,24 +2519,24 @@ mod tests {
         assert_eq!(
             normal_hints,
             [
-                "[I]nsert",
-                "[V]isual",
-                "[V]isual Line",
-                "dd Cut line",
-                "yy Copy line",
-                "[P]aste",
-                "[U]ndo",
-                "/ Find",
-                ": Commands",
-                "? Keys"
+                "[i]nsert",
+                "[v]isual",
+                "[V]isual line",
+                "dd cut line",
+                "yy copy line",
+                "[p]aste",
+                "[u]ndo",
+                "/ find",
+                ": commands",
+                "? keys"
             ]
         );
         let visual_hints = words(&state(EditMode::Visual { line: true }));
         assert_eq!(
             visual_hints.first().map(String::as_str),
-            Some("[D]elete (cut)")
+            Some("[d]elete (cut)")
         );
-        assert_eq!(visual_hints.last().map(String::as_str), Some("Esc Normal"));
+        assert_eq!(visual_hints.last().map(String::as_str), Some("Esc normal"));
         let insert_hints = words(&state(EditMode::Insert));
         assert_eq!(
             insert_hints.first().map(String::as_str),
@@ -2559,10 +2551,10 @@ mod tests {
             words(&g),
             [
                 "goto be[g]inning",
-                "toggle [C]omment",
-                "goto [D]efinition",
-                "goto [R]eferences",
-                "goto [A]ctions",
+                "toggle [c]omment",
+                "goto [d]efinition",
+                "goto [r]eferences",
+                "goto [a]ctions",
                 "goto [R]ename",
                 "goto next [t]ab",
                 "goto previous [T]ab",
@@ -2604,33 +2596,29 @@ mod tests {
     // --- The hint matcher ---
 
     fn shown(name: &str, keys: &str) -> Option<String> {
-        let found = marks(name, keys)?;
-        let mut out: Vec<String> = name.chars().map(String::from).collect();
-        for (index, c) in found {
-            out[index] = format!("[{c}]");
-        }
-        Some(out.concat())
+        marks(name, keys)?;
+        Some(named_hint(keys, name, 0).plain())
     }
 
     #[test]
     fn the_matcher_prefers_word_starts_then_any_letter_in_order() {
-        assert_eq!(shown("Copy Line", "cl").as_deref(), Some("[C]opy [L]ine"));
-        assert_eq!(shown("Copy Word", "cw").as_deref(), Some("[C]opy [W]ord"));
+        assert_eq!(shown("Copy Line", "cl").as_deref(), Some("[c]opy [l]ine"));
+        assert_eq!(shown("Copy Word", "cw").as_deref(), Some("[c]opy [w]ord"));
         // A letter that starts no word is found inside one.
         assert_eq!(
             shown("Goto beginning", "gg").as_deref(),
-            Some("[G]oto be[g]inning")
+            Some("[g]oto be[g]inning")
         );
         assert_eq!(
             shown("toggle Comment", "gc").as_deref(),
-            Some("to[g]gle [C]omment")
+            Some("to[g]gle [c]omment")
         );
         // Letters keep their order: the second never sits before the first.
         assert_eq!(shown("Line Copy", "cl"), None);
         // Case-insensitive; `-` and `_` start words too.
         assert_eq!(
             shown("close or Quit", "q").as_deref(),
-            Some("close or [Q]uit")
+            Some("close or [q]uit")
         );
         assert_eq!(shown("copy-line", "cl").as_deref(), Some("[c]opy-[l]ine"));
         // The same letter is never used twice.
@@ -2638,25 +2626,29 @@ mod tests {
     }
 
     #[test]
-    fn shifted_keys_show_upper_case_and_lower_case_keys_keep_the_name() {
+    fn hint_letters_match_the_key_case_and_the_rest_is_lowercase() {
+        // Names are lowercase; a highlighted letter is uppercase only when the key is.
         assert_eq!(
             shown("Paste Before", "P").as_deref(),
-            Some("[P]aste Before")
+            Some("[P]aste before")
         );
-        assert_eq!(shown("Paste", "p").as_deref(), Some("[P]aste"));
+        assert_eq!(shown("Paste", "p").as_deref(), Some("[p]aste"));
         assert_eq!(shown("example", "M").as_deref(), Some("exa[M]ple"));
         assert_eq!(
             shown("Goto Rename", "gR").as_deref(),
-            Some("[G]oto [R]ename")
+            Some("[g]oto [R]ename")
         );
         assert_eq!(
             shown("Goto previous Tab", "gT").as_deref(),
-            Some("[G]oto previous [T]ab")
+            Some("[g]oto previous [T]ab")
         );
         assert_eq!(
             shown("Find Previous", "fP").as_deref(),
-            Some("[F]ind [P]revious")
+            Some("[f]ind [P]revious")
         );
+        // `v` and `V` both start with "visual": the case of the mark is the key.
+        assert_eq!(shown("Visual", "v").as_deref(), Some("[v]isual"));
+        assert_eq!(shown("Visual Line", "V").as_deref(), Some("[V]isual line"));
     }
 
     #[test]
@@ -2678,7 +2670,11 @@ mod tests {
         }
         let fallback = named_hint("x", "Cut", 0);
         assert!(!fallback.marked());
-        assert_eq!(fallback.plain(), "x Cut");
+        assert_eq!(fallback.plain(), "x cut");
+        assert_eq!(
+            named_hint("Tab", "Jump forward", 0).plain(),
+            "Tab jump forward"
+        );
     }
 
     #[test]
@@ -2719,31 +2715,31 @@ mod tests {
         assert_eq!(
             words(&mnemonic(EditMode::Normal)),
             [
-                "[I]nsert",
-                "[S]elect",
-                "[C]opy",
-                "x Cut",
-                "[P]aste",
-                "[U]ndo",
-                "[R]edo",
-                "[F]ind",
-                ": Commands",
-                "? Keys"
+                "[i]nsert",
+                "[s]elect",
+                "[c]opy",
+                "x cut",
+                "[p]aste",
+                "[u]ndo",
+                "[r]edo",
+                "[f]ind",
+                ": commands",
+                "? keys"
             ]
         );
         assert_eq!(
             words(&mnemonic(EditMode::Visual { line: false })),
             [
-                "[C]opy",
-                "x Cut",
-                "[E]dit",
-                "[P]aste",
-                "> Indent",
-                "< Outdent",
-                "to[g]gle [C]omment",
-                "[O]ther end",
-                "? Keys",
-                "Esc Normal"
+                "[c]opy",
+                "x cut",
+                "[e]dit",
+                "[p]aste",
+                "> indent",
+                "< outdent",
+                "to[g]gle [c]omment",
+                "[o]ther end",
+                "? keys",
+                "Esc normal"
             ]
         );
         let after = |first: char| ModalState {
@@ -2752,18 +2748,18 @@ mod tests {
         };
         assert_eq!(
             words(&after('c')),
-            ["copy [L]ine", "copy [W]ord", "copy [A]ll", "Esc cancel"]
+            ["copy [l]ine", "copy [w]ord", "copy [a]ll", "Esc cancel"]
         );
         assert_eq!(
             words(&after('s')),
             [
-                "select [C]haracters",
-                "select [L]ine",
-                "select [W]ord",
-                "select [A]ll",
-                "select [B]racket",
-                "select [Q]uotes",
-                "select [P]arens",
+                "select [c]haracters",
+                "select [l]ine",
+                "select [w]ord",
+                "select [a]ll",
+                "select [b]racket",
+                "select [q]uotes",
+                "select [p]arens",
                 "{ select inside { }",
                 "[ select inside [ ]",
                 "Esc cancel"
@@ -2777,10 +2773,10 @@ mod tests {
         assert_eq!(
             words(&after('f')),
             [
-                "find in [F]ile",
-                "find [N]ext",
+                "find in [f]ile",
+                "find [n]ext",
                 "find [P]revious",
-                "file [O]pen",
+                "file [o]pen",
                 "Esc cancel"
             ]
         );
@@ -2956,7 +2952,7 @@ mod tests {
         }
         // The `?` list shows the name with its letters marked.
         let entry = lookup(KeyStyle::Mnemonic, EditMode::Normal, "cw").unwrap();
-        assert_eq!(list_hint(entry).plain(), "[C]opy [W]ord");
+        assert_eq!(list_hint(entry).plain(), "[c]opy [w]ord");
     }
 
     // --- Shortcut fixes for Modeless off ---
