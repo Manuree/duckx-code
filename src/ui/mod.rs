@@ -869,11 +869,16 @@ mod tests {
         let (text, marked) = hint_row(&app, 120, 8);
         assert!(text.contains("VISUAL"), "{text}");
         assert!(!text.contains("NORMAL"), "{text}");
+        assert!(text.contains("insert"), "{text}");
         assert!(text.contains("delete (cut)"), "{text}");
         assert!(text.contains("yank (copy)"), "{text}");
         assert!(!text.contains("[No Name]"), "{text}");
         assert!(
-            text.find("VISUAL").unwrap() < text.find("delete (cut)").unwrap(),
+            text.find("VISUAL").unwrap() < text.find("insert").unwrap(),
+            "{text}"
+        );
+        assert!(
+            text.find("insert").unwrap() < text.find("delete (cut)").unwrap(),
             "{text}"
         );
         let marked: String = marked.split_whitespace().collect();

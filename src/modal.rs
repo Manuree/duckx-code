@@ -190,7 +190,7 @@ pub const KEYS: &[ModalKey] = &[
     // Changing mode.
     key(
         "i",
-        Modes::Normal,
+        Modes::Both,
         cmd(CommandId::ModeInsert),
         "Type at the cursor (Insert)",
         "Insert",
@@ -504,56 +504,56 @@ pub const KEYS: &[ModalKey] = &[
         "Other end",
     ),
     key(
-        "i\"",
+        "s\"",
         Modes::Visual,
         cmd(CommandId::SelectInsideQuotes),
         "Select inside quotes",
         "Inside quotes",
     ),
     key(
-        "i'",
+        "s'",
         Modes::Visual,
         cmd(CommandId::SelectInsideQuotes),
         "Select inside quotes",
         "Inside quotes",
     ),
     key(
-        "i(",
+        "s(",
         Modes::Visual,
         cmd(CommandId::SelectInsideParens),
         "Select inside ( )",
         "Inside ( )",
     ),
     key(
-        "i)",
+        "s)",
         Modes::Visual,
         cmd(CommandId::SelectInsideParens),
         "Select inside ( )",
         "Inside ( )",
     ),
     key(
-        "i{",
+        "s{",
         Modes::Visual,
         cmd(CommandId::SelectInsideBraces),
         "Select inside { }",
         "Inside { }",
     ),
     key(
-        "i}",
+        "s}",
         Modes::Visual,
         cmd(CommandId::SelectInsideBraces),
         "Select inside { }",
         "Inside { }",
     ),
     key(
-        "i[",
+        "s[",
         Modes::Visual,
         cmd(CommandId::SelectInsideBrackets),
         "Select inside [ ]",
         "Inside [ ]",
     ),
     key(
-        "i]",
+        "s]",
         Modes::Visual,
         cmd(CommandId::SelectInsideBrackets),
         "Select inside [ ]",
@@ -751,7 +751,7 @@ pub const MNEMONIC_KEYS: &[ModalKey] = &[
     // Changing mode: the same keys as Vim.
     key(
         "i",
-        Modes::Normal,
+        Modes::Both,
         cmd(CommandId::ModeInsert),
         "Type at the cursor (Insert)",
         "Insert",
@@ -1422,11 +1422,11 @@ pub const MNEMONIC_KEYS: &[ModalKey] = &[
 /// Hint row order in Normal (Vim keys). The last one always stays when the row is narrow.
 const NORMAL_HINTS: &[&str] = &["i", "v", "V", "dd", "yy", "p", "u", "/", ":", "?"];
 /// Hint row order in Visual (Vim keys). The last one always stays when the row is narrow.
-const VISUAL_HINTS: &[&str] = &["d", "y", "c", ">", "<", "gc", "o", "p", "?", "Esc"];
+const VISUAL_HINTS: &[&str] = &["i", "d", "y", "c", ">", "<", "gc", "o", "p", "?", "Esc"];
 /// Hint row order in Normal (Mnemonic keys). `s`, `c`, `x`, and `f` start a sequence.
 const MNEMONIC_NORMAL_HINTS: &[&str] = &["i", "s", "c", "x", "p", "u", "r", "f", ":", "?"];
 /// Hint row order in Visual (Mnemonic keys).
-const MNEMONIC_VISUAL_HINTS: &[&str] = &["c", "x", "e", "p", ">", "<", "gc", "o", "?", "Esc"];
+const MNEMONIC_VISUAL_HINTS: &[&str] = &["i", "c", "x", "e", "p", ">", "<", "gc", "o", "?", "Esc"];
 
 /// The first key of a Mnemonic sequence and the verb it stands for, for the hint row.
 const MNEMONIC_PREFIXES: &[(char, &str)] = &[
@@ -2458,7 +2458,15 @@ mod tests {
         );
         assert_eq!(key_list(KeyStyle::Vim, EditMode::Normal, "dd").len(), 1);
         assert!(key_list(KeyStyle::Vim, EditMode::Normal, "").len() > 30);
-        assert!(key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "i(").len() == 1);
+        assert!(key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "s(").len() == 1);
+        assert!(key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "i(").is_empty());
+        assert_eq!(
+            key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "i")
+                .iter()
+                .filter(|entry| entry.keys == "i")
+                .count(),
+            1
+        );
     }
 
     /// Every key does something reachable without modes: a Command Bar command that
@@ -2560,11 +2568,23 @@ mod tests {
             ]
         );
         let visual_hints = words(&state(EditMode::Visual { line: true }));
-        assert_eq!(
-            visual_hints.first().map(String::as_str),
-            Some("[d]elete (cut)")
-        );
+        assert_eq!(visual_hints.first().map(String::as_str), Some("[i]nsert"));
+        assert!(visual_hints.iter().any(|h| h == "[d]elete (cut)"));
         assert_eq!(visual_hints.last().map(String::as_str), Some("Esc normal"));
+        let pending_s = ModalState {
+            pending: Some('s'),
+            ..state(EditMode::Visual { line: false })
+        };
+        assert_eq!(
+            words(&pending_s),
+            [
+                "\" inside quotes",
+                "( inside ( )",
+                "{ inside { }",
+                "[ inside [ ]",
+                "Esc cancel"
+            ]
+        );
         let insert_hints = words(&state(EditMode::Insert));
         assert_eq!(
             insert_hints.first().map(String::as_str),
@@ -2793,6 +2813,7 @@ mod tests {
         assert_eq!(
             words(&mnemonic(EditMode::Visual { line: false })),
             [
+                "[i]nsert",
                 "[c]opy",
                 "x cut",
                 "[e]dit",
@@ -2949,6 +2970,54 @@ mod tests {
         assert_eq!(type_keys(&v, "o"), run(CommandId::SwapSelectionEnds));
         assert_eq!(type_keys(&v, "sw"), run(CommandId::SelectWord));
         assert_eq!(type_keys(&v, "j"), mv(Movement::Down, true));
+        assert_eq!(type_keys(&v, "i"), run(CommandId::ModeInsert));
+        assert_eq!(type_keys(&v, "sq"), run(CommandId::SelectInsideQuotes));
+        assert_eq!(type_keys(&v, "sp"), run(CommandId::SelectInsideParens));
+        assert_eq!(type_keys(&v, "s{"), run(CommandId::SelectInsideBraces));
+        assert_eq!(type_keys(&v, "s["), run(CommandId::SelectInsideBrackets));
+    }
+
+    #[test]
+    fn visual_i_enters_insert_and_vim_inside_objects_move_to_s() {
+        let keys = KeyMap::defaults();
+        let visual = state(EditMode::Visual { line: false });
+        assert_eq!(route(&ch('i'), &visual, &keys), run(CommandId::ModeInsert));
+        assert_eq!(
+            type_keys(&visual, "s\""),
+            run(CommandId::SelectInsideQuotes)
+        );
+        assert_eq!(type_keys(&visual, "s'"), run(CommandId::SelectInsideQuotes));
+        assert_eq!(type_keys(&visual, "s("), run(CommandId::SelectInsideParens));
+        assert_eq!(type_keys(&visual, "s)"), run(CommandId::SelectInsideParens));
+        assert_eq!(type_keys(&visual, "s{"), run(CommandId::SelectInsideBraces));
+        assert_eq!(type_keys(&visual, "s}"), run(CommandId::SelectInsideBraces));
+        assert_eq!(
+            type_keys(&visual, "s["),
+            run(CommandId::SelectInsideBrackets)
+        );
+        assert_eq!(
+            type_keys(&visual, "s]"),
+            run(CommandId::SelectInsideBrackets)
+        );
+        // `i` is Insert immediately, not a prefix, so i( is not an inside-object.
+        assert_eq!(route(&ch('i'), &visual, &keys), run(CommandId::ModeInsert));
+        let pending_i = ModalState {
+            pending: Some('i'),
+            ..visual.clone()
+        };
+        assert_ne!(
+            route(&ch('('), &pending_i, &keys),
+            run(CommandId::SelectInsideParens)
+        );
+        // In Normal, `s` is still unbound in the Vim style (Visual-only prefix).
+        assert!(matches!(
+            type_keys(&state(EditMode::Normal), "s"),
+            Some(SemanticAction::Modal(ModalAction::Unbound(_)))
+        ));
+        assert_eq!(
+            type_keys(&state(EditMode::Normal), "i"),
+            run(CommandId::ModeInsert)
+        );
     }
 
     #[test]

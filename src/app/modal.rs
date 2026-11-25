@@ -359,6 +359,12 @@ impl App {
 
     fn enter_insert(&mut self) {
         if self.modal_state.mode.is_visual() {
+            if let Some(line) = self.modal_state.line {
+                // Visual Line snaps the head to a line end; put the cursor back
+                // on the column it was on, the same way Esc does.
+                let len = self.buffer().rope().len_chars();
+                self.buffer_mut().move_to(line.cursor.min(len), false);
+            }
             self.buffer_mut().deselect();
         }
         self.modal_state.line = None;
@@ -1788,5 +1794,47 @@ mod tests {
         let mut app = modal_app("one\n");
         press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(text(&app), "one\n");
+    }
+
+    #[test]
+    fn i_in_visual_enters_insert_at_the_cursor_and_keeps_the_text() {
+        let mut app = modal_app("abcdef\n");
+        keys(&mut app, "vllll");
+        let at = head(&app);
+        let before = text(&app);
+        assert_eq!(app.buffer().selected_text(), "abcd");
+        keys(&mut app, "i");
+        assert_eq!(mode(&app), EditMode::Insert);
+        assert!(app.buffer().selected_text().is_empty());
+        assert_eq!(head(&app), at);
+        keys(&mut app, "X");
+        assert_eq!(text(&app), "abcdXef\n");
+        assert_eq!(before, "abcdef\n");
+    }
+
+    #[test]
+    fn i_in_visual_line_inserts_at_the_remembered_column() {
+        let mut app = modal_app("abcdef\nxyz\n");
+        keys(&mut app, "ll");
+        assert_eq!(app.buffer().cursor_line_col(), (0, 2));
+        keys(&mut app, "V");
+        assert_eq!(mode(&app), EditMode::Visual { line: true });
+        keys(&mut app, "i");
+        assert_eq!(mode(&app), EditMode::Insert);
+        assert!(app.buffer().selected_text().is_empty());
+        assert_eq!(app.buffer().cursor_line_col(), (0, 2));
+        keys(&mut app, "X");
+        assert_eq!(text(&app), "abXcdef\nxyz\n");
+    }
+
+    #[test]
+    fn visual_s_paren_still_selects_inside_parens() {
+        let mut app = modal_app("fn f(x: i32) {}\n");
+        let open = app.buffer().rope().chars().position(|c| c == '(').unwrap();
+        app.buffer_mut().move_to(open + 1, false);
+        keys(&mut app, "v");
+        keys(&mut app, "s(");
+        assert_eq!(mode(&app), EditMode::Visual { line: false });
+        assert_eq!(app.buffer().selected_text(), "x: i32");
     }
 }
