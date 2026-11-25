@@ -605,8 +605,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_pane_candidate(frame, app, &layout, &theme);
     if (app.find_mode.is_some() || app.replace_mode.is_some()) && layout.command.height > 0 {
         command_bar::render_mode_hint(frame, app, layout.command);
-    } else if app.command_bar.is_none() && app.mode_hints_shown() && layout.command.height > 0 {
-        command_bar::render_modal_hint(frame, app, layout.command);
     } else if layout.command.height > 0 {
         command_bar::render(frame, app, layout.command);
     }
@@ -758,12 +756,13 @@ mod tests {
             .join("\n")
     }
 
-    /// The hint row of a modal app: its text and the cells drawn bold and underlined.
+    /// The status-bar hints of a modal app: the last line's text and the cells
+    /// drawn bold and underlined (the letters to press).
     fn hint_row(app: &App, width: u16, height: u16) -> (String, String) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         let buffer = terminal.backend().buffer();
-        let y = height - 2;
+        let y = height - 1;
         let text: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
         let marked: String = (0..width)
             .map(|x| {
@@ -787,6 +786,11 @@ mod tests {
         assert!(text.contains("dd cut line"), "{text}");
         let marked: String = marked.split_whitespace().collect();
         assert!(marked.starts_with("ivVdd"), "{marked}");
+        // Hints sit in the status bar after the mode badge, not on a row above it.
+        let normal = text.find("NORMAL").expect(text.as_str());
+        let insert = text.find("insert").expect(text.as_str());
+        assert!(normal < insert, "{text}");
+        assert!(text.contains("[No Name]"), "{text}");
 
         app.editor_prefs.key_style = crate::modal::KeyStyle::Mnemonic;
         app.handle(SemanticAction::Deselect);
@@ -798,6 +802,163 @@ mod tests {
         let marked: String = marked.split_whitespace().collect();
         // i(nsert) s(elect) c(opy), the fallback key x, p(aste) u(ndo) r(edo) f(ind) : ?
         assert_eq!(marked, "iscxpurf:?", "{text}");
+    }
+
+    #[test]
+    fn mode_hints_sit_in_the_status_bar_and_give_the_editor_its_row_back() {
+        let mut app = App::new(Buffer::from_text("one two\n"), None);
+        app.editor_prefs.modeless = false;
+        app.handle(SemanticAction::Deselect);
+        app.branch = Some("master".into());
+        let screen = draw(&app, 120, 8);
+        let lines: Vec<&str> = screen.lines().collect();
+        let status = lines.last().unwrap();
+        let above = lines[lines.len() - 2];
+        assert!(status.contains("NORMAL"), "{screen}");
+        assert!(status.contains("insert"), "{screen}");
+        assert!(status.contains("[No Name]"), "{screen}");
+        assert!(status.contains("master"), "{screen}");
+        assert!(
+            status.find("NORMAL").unwrap() < status.find("insert").unwrap(),
+            "{status}"
+        );
+        assert!(
+            status.find("insert").unwrap() < status.find("[No Name]").unwrap(),
+            "{status}"
+        );
+        assert!(
+            status.find("[No Name]").unwrap() < status.find("master").unwrap(),
+            "{status}"
+        );
+        assert!(!status.contains("4 LF"), "{status}");
+        assert!(
+            !above.contains("insert"),
+            "hints must not take a row of their own: {screen}"
+        );
+    }
+
+    #[test]
+    fn pending_prefix_hints_replace_the_mode_hints_in_the_status_bar() {
+        let mut app = App::new(Buffer::from_text("one two\n"), None);
+        app.editor_prefs.modeless = false;
+        app.editor_prefs.key_style = crate::modal::KeyStyle::Mnemonic;
+        app.handle(SemanticAction::Deselect);
+        app.modal_state.pending = Some('c');
+        let (text, marked) = hint_row(&app, 120, 8);
+        assert!(text.contains("NORMAL"), "{text}");
+        assert!(text.contains("c "), "{text}");
+        assert!(text.contains("copy line"), "{text}");
+        assert!(text.contains("copy word"), "{text}");
+        assert!(!text.contains("insert"), "{text}");
+        let marked: String = marked.split_whitespace().collect();
+        assert!(marked.contains("l"), "{marked} {text}");
+    }
+
+    #[test]
+    fn visual_mode_hints_sit_after_the_visual_badge() {
+        let mut app = App::new(Buffer::from_text("one two\n"), None);
+        app.editor_prefs.modeless = false;
+        app.handle(SemanticAction::Deselect);
+        app.modal_state.mode = crate::modal::EditMode::Visual { line: false };
+        let (text, marked) = hint_row(&app, 120, 8);
+        assert!(text.contains("VISUAL"), "{text}");
+        assert!(!text.contains("NORMAL"), "{text}");
+        assert!(text.contains("delete (cut)"), "{text}");
+        assert!(text.contains("yank (copy)"), "{text}");
+        assert!(text.contains("[No Name]"), "{text}");
+        assert!(
+            text.find("VISUAL").unwrap() < text.find("delete (cut)").unwrap(),
+            "{text}"
+        );
+        assert!(
+            text.find("delete (cut)").unwrap() < text.find("[No Name]").unwrap(),
+            "{text}"
+        );
+        let marked: String = marked.split_whitespace().collect();
+        assert!(!marked.is_empty(), "{marked} {text}");
+    }
+
+    #[test]
+    fn mode_hints_off_keeps_the_status_bar_without_hints() {
+        let mut app = App::new(Buffer::from_text("one two\n"), None);
+        app.editor_prefs.modeless = false;
+        app.editor_prefs.mode_hints = false;
+        app.handle(SemanticAction::Deselect);
+        app.branch = Some("master".into());
+        let screen = draw(&app, 80, 8);
+        let lines: Vec<&str> = screen.lines().collect();
+        let status = lines.last().unwrap();
+        let above = lines[lines.len() - 2];
+        assert!(status.contains("NORMAL"), "{status}");
+        assert!(status.contains("[No Name]"), "{status}");
+        assert!(status.contains("master"), "{status}");
+        assert!(!status.contains("insert"), "{status}");
+        assert!(!status.contains("4 LF"), "{status}");
+        assert!(!above.contains("insert"), "{screen}");
+        assert!(
+            status.find("[No Name]").unwrap() < status.find("master").unwrap(),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn modeless_on_moves_the_branch_right_and_drops_encoding() {
+        let mut app = App::new(Buffer::from_text("one two\n"), None);
+        assert!(app.editor_prefs.modeless);
+        app.branch = Some("master".into());
+        let status = draw(&app, 80, 8).lines().last().unwrap().to_string();
+        assert!(status.contains("NORMAL"), "{status}");
+        assert!(status.contains("[No Name]"), "{status}");
+        assert!(status.contains("master"), "{status}");
+        assert!(!status.contains("insert"), "{status}");
+        assert!(!status.contains("4 LF"), "{status}");
+        assert!(
+            status.find("[No Name]").unwrap() < status.find("master").unwrap(),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn narrow_status_bar_drops_trailing_hints_and_keeps_the_file() {
+        let mut app = App::new(Buffer::from_text("one two\n"), None);
+        app.editor_prefs.modeless = false;
+        app.handle(SemanticAction::Deselect);
+        let (wide, _) = hint_row(&app, 120, 8);
+        assert!(wide.contains("insert"), "{wide}");
+        assert!(wide.contains("? keys"), "{wide}");
+        let (narrow, _) = hint_row(&app, 48, 8);
+        assert!(narrow.contains("NORMAL"), "{narrow}");
+        assert!(narrow.contains("[No Name]"), "{narrow}");
+        assert!(!narrow.contains("4 LF"), "{narrow}");
+        // The file is reserved first, so trailing hints drop before the name does.
+        assert!(
+            !narrow.contains("? keys") || narrow.contains("[No Name]"),
+            "{narrow}"
+        );
+        assert!(
+            narrow.find("NORMAL").unwrap() < narrow.find("[No Name]").unwrap(),
+            "{narrow}"
+        );
+        // At this width the full hint list cannot fit.
+        assert!(
+            !narrow.contains("yy copy line") || !narrow.contains("? keys"),
+            "{narrow}"
+        );
+    }
+
+    #[test]
+    fn dirty_file_keeps_its_modified_marker_beside_mode_hints() {
+        let mut app = App::new(Buffer::from_text("hi"), Some("src/main.rs".into()));
+        app.editor_prefs.modeless = false;
+        app.handle(SemanticAction::Deselect);
+        app.handle(SemanticAction::InsertChar('!'));
+        let screen = draw(&app, 80, 8);
+        let lines: Vec<&str> = screen.lines().collect();
+        let status = lines.last().unwrap();
+        assert!(status.contains("NORMAL"), "{screen}");
+        assert!(status.contains("main.rs"), "{screen}");
+        assert!(status.contains("[+]"), "{screen}");
+        assert!(!status.contains("4 LF"), "{status}");
     }
 
     #[cfg(not(windows))]
@@ -2221,7 +2382,6 @@ mod tests {
             "\u{e73e}",
             "DESIGN.md",
             " 8%   8:1 ",
-            "4 LF UTF-8",
         ] {
             assert!(
                 status.contains(expected),
@@ -2230,9 +2390,10 @@ mod tests {
         }
         assert!(!status.contains("DUCKX"), "{status}");
         assert!(!status.contains("COMMAND"), "{status}");
-        assert!(status.find("NORMAL") < status.find("master"));
-        assert!(status.find("master") < status.find("DESIGN.md"));
-        assert!(status.find("8%") < status.find("4 LF"));
+        assert!(!status.contains("4 LF"), "{status}");
+        assert!(status.find("NORMAL") < status.find("DESIGN.md"));
+        assert!(status.find("DESIGN.md") < status.find("8%"));
+        assert!(status.find("8%") < status.find("master"));
         assert!(!status.contains("[+]"));
     }
 

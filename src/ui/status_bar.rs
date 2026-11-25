@@ -11,16 +11,15 @@ use unicode_width::UnicodeWidthStr;
 
 use super::icons::{self, BRANCH, SEPARATOR_LEFT, SEPARATOR_RIGHT};
 use crate::app::{App, LspLabel};
-use crate::buffer::{Buffer, IndentStyle, LineEnding};
 use crate::lsp::{ServerStatus, Severity};
 
-/// `[NORMAL|FILE|COMMAND|FIND|OPEN|SETTINGS|ABOUT][branch][icon file | ❯ input]  ...  [selection][progress line:col][indent ending]`.
+/// `[NORMAL|FILE|COMMAND|FIND|OPEN|SETTINGS|ABOUT][hints][icon file | ❯ input]  ...  [selection][progress line:col][branch]`.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let mut right = Line::from(right_spans(app));
     if let Some(bar) = app.command_bar.as_ref()
         && app.pane_select.is_none()
     {
-        // The input comes first: the position and encoding labels step aside
+        // The input comes first: the position and branch labels step aside
         // rather than squeeze it, so the cursor is never clamped onto the text.
         let ghost = app.argument_ghost().map_or(0, |ghost| ghost.width());
         let needed = COMMAND_HEAD + bar.input.width() + ghost + 1;
@@ -113,7 +112,7 @@ fn left_line(app: &App, width: usize) -> (Vec<Span<'static>>, usize) {
             0,
         )
     } else if let Some(state) = app.modal() {
-        (mode_line(app, state), 0)
+        (mode_line(app, state, width), 0)
     } else {
         (
             file_line(app, " NORMAL ", theme.status_a, theme.status_a_bg),
@@ -122,9 +121,11 @@ fn left_line(app: &App, width: usize) -> (Vec<Span<'static>>, usize) {
     }
 }
 
-/// Modeless off: the mode badge in its own color, and a started sequence or
-/// count (`3d`) right after it.
-fn mode_line(app: &App, state: &crate::modal::ModalState) -> Vec<Span<'static>> {
+/// Modeless off: the mode badge in its own color, a started sequence or count
+/// (`3d`) right after it, then the mode's keys when Mode hints is on, then the
+/// file. Hints that do not fit are dropped from the end so the file name and
+/// the dirty marker stay visible.
+fn mode_line(app: &App, state: &crate::modal::ModalState, width: usize) -> Vec<Span<'static>> {
     use crate::modal::EditMode;
     let theme = *app.styles();
     let (badge, badge_bg) = match state.mode {
@@ -132,7 +133,7 @@ fn mode_line(app: &App, state: &crate::modal::ModalState) -> Vec<Span<'static>> 
         EditMode::Insert => (theme.status_insert, theme.status_insert_bg),
         EditMode::Visual { .. } => (theme.status_visual, theme.status_visual_bg),
     };
-    let mut spans = file_line(app, state.mode.badge(), badge, badge_bg);
+    let mut spans = vec![Span::styled(state.mode.badge(), badge)];
     let mut typed = state
         .count
         .map(|count| count.to_string())
@@ -141,12 +142,28 @@ fn mode_line(app: &App, state: &crate::modal::ModalState) -> Vec<Span<'static>> 
         typed.push(first);
     }
     if !typed.is_empty() {
-        spans.insert(
-            1,
-            Span::styled(format!("{typed} "), badge.add_modifier(Modifier::BOLD)),
-        );
+        spans.push(Span::styled(
+            format!("{typed} "),
+            badge.add_modifier(Modifier::BOLD),
+        ));
     }
+    spans.push(separator(SEPARATOR_LEFT, badge_bg, theme.status_c_bg));
+    let head = spans_width(&spans);
+    let file_full = file_info_spans(app, usize::MAX);
+    let hint_room = width.saturating_sub(head + spans_width(&file_full));
+    let hints = if app.mode_hints_shown() {
+        super::command_bar::status_hint_spans(app, state, hint_room)
+    } else {
+        Vec::new()
+    };
+    let file = file_info_spans(app, width.saturating_sub(head + spans_width(&hints)));
+    spans.extend(hints);
+    spans.extend(file);
     spans
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| s.content.width()).sum()
 }
 
 /// PANE mode: an amber `PANE` badge and the keys.
@@ -244,57 +261,82 @@ fn find_line(app: &App) -> (Vec<Span<'static>>, usize) {
 
 fn file_line(app: &App, label: &'static str, badge: Style, badge_bg: Color) -> Vec<Span<'static>> {
     let theme = *app.styles();
-    let mut spans = vec![Span::styled(label, badge)];
-    if let Some(branch) = app.branch.as_deref() {
-        spans.push(separator(SEPARATOR_LEFT, badge_bg, theme.status_b_bg));
-        spans.push(Span::styled(format!(" {BRANCH} {branch} "), theme.status_b));
-        spans.push(separator(
-            SEPARATOR_LEFT,
-            theme.status_b_bg,
-            theme.status_c_bg,
-        ));
-    } else {
-        spans.push(separator(SEPARATOR_LEFT, badge_bg, theme.status_c_bg));
-    }
+    let mut spans = vec![
+        Span::styled(label, badge),
+        separator(SEPARATOR_LEFT, badge_bg, theme.status_c_bg),
+    ];
+    spans.extend(file_info_spans(app, usize::MAX));
+    spans
+}
 
+/// Icon, path, dirty marker, and a one-shot message. When `max_width` is tight,
+/// the parent path and the message drop first so the file name and `[+]` stay.
+fn file_info_spans(app: &App, max_width: usize) -> Vec<Span<'static>> {
+    let theme = *app.styles();
     let (icon, icon_color) = icons::file_icon(app.path());
-    spans.push(Span::styled(
-        format!(" {icon} "),
-        theme.status_c.fg(icon_color),
-    ));
-    match app.path() {
+    let icon_span = Span::styled(format!(" {icon} "), theme.status_c.fg(icon_color));
+    let (parent, name) = match app.path() {
         Some(path) => {
             let path = crate::agent::strip_verbatim(path);
-            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                spans.push(Span::styled(
-                    format!("{}{MAIN_SEPARATOR}", parent.display()),
-                    theme.status_c_dim,
-                ));
-            }
-            let name = path.file_name().unwrap_or(path.as_os_str());
-            spans.push(Span::styled(
-                name.to_string_lossy().into_owned(),
-                theme.status_c_bold,
-            ));
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| format!("{}{MAIN_SEPARATOR}", p.display()));
+            let name = path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned();
+            (parent, name)
         }
         None => match app.preview_source(app.active_id()) {
-            Some((_, title)) => {
-                spans.push(Span::styled(title.trim().to_string(), theme.status_c_bold))
-            }
-            None => spans.push(Span::styled("[No Name]", theme.status_c_bold)),
+            Some((_, title)) => (None, title.trim().to_string()),
+            None => (None, "[No Name]".to_string()),
         },
-    }
-    if app.show_diff() {
-        spans.push(Span::styled("  diff", theme.status_c_dim));
-    }
-    if app.is_dirty() {
-        spans.push(Span::styled(" [+]", theme.status_message));
+    };
+    let parent_span = parent.map(|text| Span::styled(text, theme.status_c_dim));
+    let name_span = |text: String| Span::styled(text, theme.status_c_bold);
+    let diff = app
+        .show_diff()
+        .then(|| Span::styled("  diff", theme.status_c_dim));
+    let dirty = app
+        .is_dirty()
+        .then(|| Span::styled(" [+]", theme.status_message));
+    let message = app
+        .status_message()
+        .map(|text| Span::styled(format!("  {text}"), theme.status_message));
+
+    let assemble = |parent: bool, with_diff: bool, with_message: bool, name: &str| {
+        let mut spans = vec![icon_span.clone()];
+        if parent {
+            spans.extend(parent_span.clone());
+        }
+        spans.push(name_span(name.to_string()));
+        if with_diff {
+            spans.extend(diff.clone());
+        }
+        spans.extend(dirty.clone());
+        if with_message {
+            spans.extend(message.clone());
+        }
+        spans
+    };
+
+    for (parent, with_diff, with_message) in [
+        (true, true, true),
+        (false, true, true),
+        (false, true, false),
+        (false, false, false),
+    ] {
+        let spans = assemble(parent, with_diff, with_message, &name);
+        if spans_width(&spans) <= max_width {
+            return spans;
+        }
     }
 
-    if let Some(message) = app.status_message() {
-        spans.push(Span::styled(format!("  {message}"), theme.status_message));
-    }
-    spans
+    let reserved = icon_span.content.width() + dirty.as_ref().map_or(0, |s| s.content.width());
+    let clipped = fit_width(&name, max_width.saturating_sub(reserved));
+    assemble(false, false, false, &clipped)
 }
 
 /// The diagnostic on the cursor line, on its own row above the status bar.
@@ -435,30 +477,15 @@ fn right_spans(app: &App) -> Vec<Span<'static>> {
         theme.status_b,
     ));
 
-    spans.push(separator(
-        SEPARATOR_RIGHT,
-        theme.status_a_bg,
-        theme.status_b_bg,
-    ));
-    spans.push(Span::styled(
-        format!(" {} ", style_label(buffer, app.encoding_label())),
-        theme.status_a,
-    ));
+    if let Some(branch) = app.branch.as_deref() {
+        spans.push(separator(
+            SEPARATOR_RIGHT,
+            theme.status_a_bg,
+            theme.status_b_bg,
+        ));
+        spans.push(Span::styled(format!(" {BRANCH} {branch} "), theme.status_a));
+    }
     spans
-}
-
-/// Indent the next Tab inserts, the line ending new breaks use, then the file encoding.
-/// `4 LF UTF-8` is four spaces. `Tab 4 CRLF UTF-16 LE` inserts a tab drawn four columns wide.
-fn style_label(buffer: &Buffer, encoding: &str) -> String {
-    let indent = match buffer.indent_style() {
-        IndentStyle::Spaces(width) => width.to_string(),
-        IndentStyle::Tabs => format!("Tab {}", buffer.tab_width()),
-    };
-    let ending = match buffer.line_ending() {
-        LineEnding::Lf => "LF",
-        LineEnding::Crlf => "CRLF",
-    };
-    format!("{indent} {ending} {encoding}")
 }
 
 /// Same rule as lualine's `progress`: `Top` on the first line, `Bot` on the last, else a percentage.
@@ -475,8 +502,7 @@ fn progress(line: usize, total_lines: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{progress, style_label};
-    use crate::buffer::Buffer;
+    use super::progress;
 
     #[test]
     fn progress_matches_lualine() {
@@ -484,17 +510,5 @@ mod tests {
         assert_eq!(progress(0, 100), "Top");
         assert_eq!(progress(7, 100), "8%");
         assert_eq!(progress(99, 100), "Bot");
-    }
-
-    #[test]
-    fn style_label_names_the_indent_and_the_ending_the_buffer_will_write() {
-        let spaces = Buffer::from_text("a\nb");
-        assert_eq!(style_label(&spaces, "UTF-8"), "4 LF UTF-8");
-
-        let mut crlf = Buffer::from_text("a\r\nb");
-        assert_eq!(style_label(&crlf, "UTF-8"), "4 CRLF UTF-8");
-
-        crlf.apply_editor_style(false, 8, None);
-        assert_eq!(style_label(&crlf, "UTF-16 LE"), "Tab 8 CRLF UTF-16 LE");
     }
 }

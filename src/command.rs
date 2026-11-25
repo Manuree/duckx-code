@@ -368,7 +368,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::ModeHints,
         name: "mode-hints",
-        description: "Show the keys of the current mode above the status bar, or stop",
+        description: "Show the keys of the current mode after the mode badge, or stop",
         shortcut: "",
         arg: None,
         editor: true,

@@ -25,7 +25,7 @@ pub enum SettingId {
     DoubleEscCommandBar,
     /// On: type anywhere, as before. Off: Normal, Insert, and Visual modes.
     Modeless,
-    /// While Modeless is off, show the keys of the current mode above the status bar.
+    /// While Modeless is off, show the keys of the current mode after the mode badge.
     ModeHints,
     /// The mode after start or after turning Modeless off.
     StartMode,
@@ -2450,7 +2450,7 @@ pub fn sections() -> &'static [Section] {
                         },
                         Item {
                             label: "Mode hints",
-                            detail: "With Modeless off, show the keys of the current mode above the status bar.",
+                            detail: "With Modeless off, show the keys of the current mode after the mode badge in the status bar.",
                             id: SettingId::ModeHints,
                         },
                         Item {

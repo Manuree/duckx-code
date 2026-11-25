@@ -45,10 +45,10 @@ pub fn reserved_height(app: &App, width: u16, height: u16) -> u16 {
 }
 
 /// One row above the status line while FIND or REPLACE mode is open.
-/// Modeless off: one row for the mode's keys (Settings → Editor → Mode hints).
+/// Mode keys no longer take a row: they sit in the status bar after the mode badge.
 pub fn mode_hint_rows(app: &App, width: u16, height: u16) -> u16 {
     let searching = app.find_mode.is_some() || app.replace_mode.is_some();
-    if (searching || app.mode_hints_shown()) && width >= 20 && height >= 3 {
+    if searching && width >= 20 && height >= 3 {
         1
     } else {
         0
@@ -89,76 +89,82 @@ pub fn render_mode_hint(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// The keys of the current mode, one row: a strip in the mode color, then `key word`
-/// pairs. A notice (an unbound key) comes first. Pairs that do not fit are left out
-/// from the end, but the last one (`? keys` or `Esc normal`) always stays.
-pub fn render_modal_hint(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(state) = app.modal_input() else {
-        return;
-    };
-    if area.width == 0 || area.height == 0 {
-        return;
+/// Columns one hint takes, including the spaces around it.
+pub(crate) fn hint_width(hint: &crate::modal::Hint) -> usize {
+    if hint.marked() {
+        1 + hint.word.width() + 1
+    } else {
+        1 + hint.key.width() + 1 + hint.word.width() + 1
     }
+}
+
+/// The hints that fit in `room`. Pairs that do not fit are left out from the
+/// end, but the last one (`? keys` or `Esc normal`) always stays when it fits.
+pub(crate) fn fit_hints(pairs: &[crate::modal::Hint], room: usize) -> Vec<&crate::modal::Hint> {
+    let mut shown = Vec::new();
+    let Some((last, rest)) = pairs.split_last() else {
+        return shown;
+    };
+    let mut rest_room = room.saturating_sub(hint_width(last));
+    for hint in rest {
+        let need = hint_width(hint);
+        if need > rest_room {
+            break;
+        }
+        rest_room -= need;
+        shown.push(hint);
+    }
+    if hint_width(last) <= room {
+        shown.push(last);
+    }
+    shown
+}
+
+/// Spans for one fitted hint: the letters to press in `mark` (mode color, bold,
+/// underline), the rest in `base`.
+pub(crate) fn hint_spans(
+    hint: &crate::modal::Hint,
+    base: Style,
+    mark: Style,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(" ", base)];
+    if hint.marked() {
+        spans.extend(marked_spans(&hint.word, &hint.marks, base, mark));
+        spans.push(Span::styled(" ", base));
+    } else {
+        spans.push(Span::styled(hint.key.clone(), mark));
+        spans.push(Span::styled(format!(" {} ", hint.word), base));
+    }
+    spans
+}
+
+/// Mode-key hints (and a notice) that fit in `room` columns, for the status bar.
+pub(crate) fn status_hint_spans(
+    app: &App,
+    state: &crate::modal::ModalState,
+    room: usize,
+) -> Vec<Span<'static>> {
     let theme = *app.styles();
     let color = app.mode_color().unwrap_or(theme.status_a_bg);
-    let width = area.width as usize;
-    let mut spans = vec![Span::styled("▌", theme.hint.fg(color))];
-    let mut used = 1;
-    if let Some(notice) = state.notice.as_deref() {
-        let text = format!(" {notice} ");
-        used += text.width();
-        spans.push(Span::styled(
-            text,
-            theme.status_message.bg(theme.hint.bg.unwrap_or_default()),
-        ));
-    }
-    let pairs = crate::modal::hints(state, app.keys());
-    let pair_width = |hint: &crate::modal::Hint| {
-        if hint.marked() {
-            1 + hint.word.width() + 1
-        } else {
-            1 + hint.key.width() + 1 + hint.word.width() + 1
-        }
-    };
-    // The letters to press: the mode color, bold, and underlined, so they read
-    // without color too.
+    let base = theme.status_c;
     let mark = theme
-        .hint_keys
+        .status_c
         .fg(color)
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-    let mut shown: Vec<&crate::modal::Hint> = Vec::new();
-    if let Some((last, rest)) = pairs.split_last() {
-        let mut room = width.saturating_sub(used + pair_width(last));
-        for hint in rest {
-            let need = pair_width(hint);
-            if need > room {
-                break;
-            }
-            room -= need;
-            shown.push(hint);
-        }
-        if pair_width(last) <= width.saturating_sub(used) {
-            shown.push(last);
+    let mut spans = Vec::new();
+    let mut used = 0;
+    if let Some(notice) = state.notice.as_deref() {
+        let text = format!(" {notice} ");
+        if text.width() <= room {
+            used += text.width();
+            spans.push(Span::styled(text, theme.status_message));
         }
     }
-    for hint in shown {
-        if hint.marked() {
-            spans.push(Span::styled(" ", theme.hint));
-            spans.extend(marked_spans(&hint.word, &hint.marks, theme.hint, mark));
-            spans.push(Span::styled(" ", theme.hint));
-        } else {
-            spans.push(Span::styled(" ", theme.hint));
-            spans.push(Span::styled(hint.key.clone(), mark));
-            spans.push(Span::styled(format!(" {} ", hint.word), theme.hint));
-        }
-        used += pair_width(hint);
+    let pairs = crate::modal::hints(state, app.keys());
+    for hint in fit_hints(&pairs, room.saturating_sub(used)) {
+        spans.extend(hint_spans(hint, base, mark));
     }
-    spans.push(Span::styled(
-        " ".repeat(width.saturating_sub(used)),
-        theme.hint,
-    ));
-    let rect = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(theme.hint), rect);
+    spans
 }
 
 /// `word` as spans: the chars at `marks` in `mark`, the rest in `base`.
@@ -186,7 +192,8 @@ pub(crate) fn marked_spans(
     spans
 }
 
-/// The `?` key list, a dropdown standing on `floor` (the hint row or status line).
+/// The `?` key list, a dropdown standing on `floor` (the status line, or the
+/// FIND/REPLACE hint row when that is open).
 pub fn render_key_list(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
     let Some(state) = app.modal_input() else {
         return;
