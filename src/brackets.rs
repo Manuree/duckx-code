@@ -12,6 +12,7 @@
 //! search is bounded (Neovim: visible lines and a 300 ms timeout; here
 //! [`MATCH_SCAN_CHARS`]); and nothing is shown when the partner is off screen.
 
+use crate::quotes::QuoteSpan;
 use ropey::Rope;
 
 /// Most characters the matching search reads from the cursor bracket.
@@ -247,6 +248,104 @@ fn closer_from(
         }
     }
     None
+}
+
+/// Inner and outer char ranges of one enclosing pair for `select-inside`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InsideSpan {
+    pub inner: (usize, usize),
+    pub outer: (usize, usize),
+}
+
+impl InsideSpan {
+    fn from_pair(open: usize, close: usize) -> Self {
+        Self {
+            inner: (open + 1, close),
+            outer: (open, close + 1),
+        }
+    }
+
+    fn from_quote(span: QuoteSpan) -> Self {
+        Self {
+            inner: span.inner,
+            outer: span.outer,
+        }
+    }
+}
+
+/// Every enclosing `""` `''` `` ` ` `` `()` `{}` `[]` pair around char `at`,
+/// innermost first, in the order they nest in the text. `<>` is left out: a
+/// text scan would treat comparisons as pairs, and this module never pairs them.
+///
+/// `quotes` are quote spans that already contain `at` (the syntax tree's string
+/// node, or every unescaped pair on the current line). `literal_of` is the
+/// string or comment range holding a char, when the caller has a syntax tree.
+pub fn enclosing_inside(
+    rope: &Rope,
+    at: usize,
+    quotes: &[QuoteSpan],
+    literal_of: &dyn Fn(usize) -> Option<(usize, usize)>,
+) -> Vec<InsideSpan> {
+    let mut pairs: Vec<InsideSpan> = quotes.iter().copied().map(InsideSpan::from_quote).collect();
+    for (open, close) in [('(', ')'), ('{', '}'), ('[', ']')] {
+        pairs.extend(pairs_of_kind(rope, at, open, close, literal_of));
+    }
+    pairs.sort_by_key(|span| {
+        let (start, end) = span.outer;
+        (end - start, start)
+    });
+    pairs.dedup();
+    pairs
+}
+
+/// The next inner range `select-inside` should take. An empty or unmatched
+/// `current` selection starts at the innermost pair; a selection that is
+/// already the inside (or the delimiters) of a pair expands to the inside of
+/// the next outer pair in the actual nest, and wraps back to the innermost
+/// after the outermost.
+pub fn next_inside(pairs: &[InsideSpan], current: (usize, usize)) -> Option<(usize, usize)> {
+    if pairs.is_empty() {
+        return None;
+    }
+    // The last match wins: the inside of `[]` around `(x)` is the same range as
+    // the delimiters of `()`, and expand should leave that shared range outward.
+    // An empty current still matches an empty inner (`()`), so a caret between
+    // empty parens expands to the next outer pair instead of staying put.
+    if let Some(i) = pairs
+        .iter()
+        .rposition(|span| span.inner == current || span.outer == current)
+    {
+        return Some(pairs.get(i + 1).unwrap_or(&pairs[0]).inner);
+    }
+    Some(pairs[0].inner)
+}
+
+fn pairs_of_kind(
+    rope: &Rope,
+    at: usize,
+    open: char,
+    close: char,
+    literal_of: &dyn Fn(usize) -> Option<(usize, usize)>,
+) -> Vec<InsideSpan> {
+    let home = literal_of(at);
+    let mut out = Vec::new();
+    let mut walk = |home: Option<(usize, usize)>| {
+        let counts = |i: usize| literal_of(i) == home;
+        let mut found = enclosing_pair(rope, at, at, open, close, &counts);
+        while let Some((o, c)) = found {
+            let span = InsideSpan::from_pair(o, c);
+            if out.last() == Some(&span) {
+                break;
+            }
+            out.push(span);
+            found = opener_before(rope, o, open, close, &counts, &|mate| mate > c);
+        }
+    };
+    walk(home);
+    if home.is_some() {
+        walk(None);
+    }
+    out
 }
 
 /// Color of one bracket in the color pass.
@@ -644,5 +743,70 @@ mod tests {
         assert_eq!(enclosing_pair(&rope, 1, 4, '(', ')', &any), Some((1, 3)));
         assert_eq!(enclosing_pair(&rope, 2, 3, '(', ')', &any), Some((1, 3)));
         assert_eq!(enclosing_pair(&rope, 2, 5, '(', ')', &any), Some((0, 6)));
+    }
+
+    #[test]
+    fn select_inside_follows_actual_nesting_not_delimiter_order() {
+        let none = |_: usize| None;
+        let nest = |text: &str| -> Vec<String> {
+            let at = text.find('|').unwrap();
+            let rope = Rope::from_str(&text.replacen('|', "", 1));
+            let at = rope.byte_to_char(at);
+            let quotes = crate::quotes::enclosing_on_line(&rope, at);
+            enclosing_inside(&rope, at, &quotes, &none)
+                .into_iter()
+                .map(|span| rope.slice(span.inner.0..span.inner.1).to_string())
+                .collect()
+        };
+        let walk = |text: &str| -> Vec<String> {
+            let at = text.find('|').unwrap();
+            let rope = Rope::from_str(&text.replacen('|', "", 1));
+            let at = rope.byte_to_char(at);
+            let quotes = crate::quotes::enclosing_on_line(&rope, at);
+            let pairs = enclosing_inside(&rope, at, &quotes, &none);
+            let mut current = (at, at);
+            let mut got = Vec::new();
+            for _ in 0..pairs.len() {
+                let range = next_inside(&pairs, current).unwrap();
+                got.push(rope.slice(range.0..range.1).to_string());
+                current = range;
+            }
+            got
+        };
+
+        // `{[()]}` nests as () then [] then {}, not a fixed delimiter order.
+        assert_eq!(nest("{[(|)]}"), ["", "()", "[()]"]);
+        assert_eq!(nest("{[(x|)]}"), ["x", "(x)", "[(x)]"]);
+        // A caret inside empty `()` is already that inner, so the first `si` expands out.
+        assert_eq!(walk("{[(|)]}"), ["()", "[()]", ""]);
+        assert_eq!(walk("{[(x|)]}"), ["x", "(x)", "[(x)]"]);
+        // Quotes inside brackets, and brackets inside quotes, in either order.
+        assert_eq!(nest(r#"{["(a|)"]}"#), ["a", "(a)", "\"(a)\"", "[\"(a)\"]"]);
+        assert_eq!(walk(r#"{["(a|)"]}"#), ["a", "(a)", "\"(a)\"", "[\"(a)\"]"]);
+        assert_eq!(nest(r#"("a [|b] c")"#), ["b", "a [b] c", "\"a [b] c\""]);
+        assert_eq!(walk(r#"("a [|b] c")"#), ["b", "a [b] c", "\"a [b] c\""]);
+        // Same kind can nest; backticks count as quotes; `<>` is ignored.
+        assert_eq!(nest("f((x|))"), ["x", "(x)"]);
+        assert_eq!(walk("f((x|))"), ["x", "(x)"]);
+        assert_eq!(nest("run `cargo |test` now"), ["cargo test"]);
+        assert_eq!(walk("if a < b && c > |d { }"), Vec::<String>::new());
+        // Cursor on a delimiter uses that pair. On `]` the innermost pair is `[]`.
+        assert_eq!(nest("{[()|]}"), ["()", "[()]"]);
+        assert_eq!(walk("{[()|]}"), ["()", "[()]"]);
+        // No enclosing pair.
+        let rope = Rope::from_str("let x = 1;");
+        assert!(enclosing_inside(&rope, 4, &[], &none).is_empty());
+        assert_eq!(next_inside(&[], (4, 4)), None);
+    }
+
+    #[test]
+    fn next_inside_from_an_outer_selection_still_follows_the_nest() {
+        let rope = Rope::from_str("{[(x)]}");
+        // Cursor on x (index 3).
+        let quotes = crate::quotes::enclosing_on_line(&rope, 3);
+        let pairs = enclosing_inside(&rope, 3, &quotes, &|_| None);
+        // Already selected the delimiters of `()` (the characters `(x)`).
+        assert_eq!(next_inside(&pairs, (2, 5)), Some((1, 6))); // inside []
+        assert_eq!(rope.slice(1..6).to_string(), "[(x)]");
     }
 }

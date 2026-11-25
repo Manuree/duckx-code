@@ -138,6 +138,20 @@ pub(crate) fn hint_spans(
     spans
 }
 
+/// Hints shown while Left/Right walk the nest `si` selected, even if Mode hints is off.
+pub(crate) fn inside_nest_hint_spans(app: &App, room: usize) -> Vec<Span<'static>> {
+    let theme = *app.styles();
+    let color = app.mode_color().unwrap_or(theme.status_a_bg);
+    let base = theme.status_c;
+    let mark = theme.status_c.fg(color).add_modifier(Modifier::BOLD);
+    let pairs = crate::modal::inside_nest_hints();
+    let mut spans = Vec::new();
+    for hint in fit_hints(&pairs, room) {
+        spans.extend(hint_spans(hint, base, mark));
+    }
+    spans
+}
+
 /// Mode-key hints (and a notice) that fit in `room` columns, for the status bar.
 pub(crate) fn status_hint_spans(
     app: &App,

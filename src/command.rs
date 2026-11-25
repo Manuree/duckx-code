@@ -140,6 +140,13 @@ pub enum CommandId {
     FindPrevious,
     /// Extend the selection to the bracket paired with the one under the cursor.
     SelectBracket,
+    /// Select the text inside the nearest enclosing quotes or brackets around the cursor;
+    /// again expands to the next outer pair. Then Left/Right walk the nest.
+    SelectInside,
+    /// Expand the `select-inside` selection to the next outer enclosing pair.
+    SelectInsideOuter,
+    /// Shrink the `select-inside` selection to the next inner enclosing pair.
+    SelectInsideInner,
     /// Select the text inside the quotes around the cursor; again to take in the quotes too.
     SelectInsideQuotes,
     /// Select the text inside the `()` around the cursor; again to take in the parentheses.
@@ -793,6 +800,33 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: false,
     },
     CommandSpec {
+        id: CommandId::SelectInside,
+        name: "select-inside",
+        description: "Select inside the nearest quotes or brackets; then → / ← walk the nest",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::SelectInsideOuter,
+        name: "select-inside-outer",
+        description: "Expand select-inside to the next outer pair (→ after si)",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::SelectInsideInner,
+        name: "select-inside-inner",
+        description: "Shrink select-inside to the next inner pair (← after si)",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
         id: CommandId::SelectInsideQuotes,
         name: "select-inside-quotes",
         description: "\"\" or '': select inside quotes; again adds them",
@@ -1229,10 +1263,13 @@ fn importance(id: CommandId) -> u16 {
         CommandId::NextBracket => 116,
         CommandId::PrevBracket => 117,
         CommandId::SelectBracket => 274,
+        CommandId::SelectInside => 275,
         CommandId::SelectInsideQuotes => 276,
         CommandId::SelectInsideParens => 277,
         CommandId::SelectInsideBraces => 278,
         CommandId::SelectInsideBrackets => 279,
+        CommandId::SelectInsideOuter => 318,
+        CommandId::SelectInsideInner => 319,
         CommandId::Complete => 120,
         CommandId::Hover => 130,
         CommandId::Format => 140,
@@ -1851,6 +1888,7 @@ mod tests {
                 "select-all",
                 "deselect",
                 "select-bracket",
+                "select-inside",
                 "select-inside-quotes",
                 "select-inside-parens",
                 "select-inside-braces",
@@ -1862,6 +1900,8 @@ mod tests {
                 "delete-line",
                 "duplicate-line-up",
                 "duplicate-line-down",
+                "select-inside-outer",
+                "select-inside-inner",
                 "tab-prev",
                 "tab-next",
                 "pane",

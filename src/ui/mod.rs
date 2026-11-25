@@ -886,6 +886,30 @@ mod tests {
     }
 
     #[test]
+    fn inside_nest_hints_replace_the_visual_row_after_si() {
+        let mut app = App::new(Buffer::from_text("{[(x)]}\n"), None);
+        app.editor_prefs.modeless = false;
+        app.handle(SemanticAction::Deselect);
+        let at = app.buffer().rope().chars().position(|c| c == 'x').unwrap();
+        app.buffer_mut().move_to(at, false);
+        app.modal_state.mode = crate::modal::EditMode::Visual { line: false };
+        app.handle(SemanticAction::Modal(crate::modal::ModalAction::Run(
+            crate::command::CommandId::SelectInside,
+        )));
+        assert!(app.inside_nest_active());
+        let (text, _) = hint_row(&app, 120, 8);
+        assert!(text.contains("VISUAL"), "{text}");
+        assert!(text.contains("→ outer"), "{text}");
+        assert!(text.contains("← inner"), "{text}");
+        assert!(!text.contains("insert over"), "{text}");
+        // The nest hint is shown even when Mode hints is off.
+        app.editor_prefs.mode_hints = false;
+        let (text, _) = hint_row(&app, 120, 8);
+        assert!(text.contains("→ outer"), "{text}");
+        assert!(text.contains("← inner"), "{text}");
+    }
+
+    #[test]
     fn mode_hints_off_keeps_the_status_bar_without_hints() {
         let mut app = App::new(Buffer::from_text("one two\n"), None);
         app.editor_prefs.modeless = false;

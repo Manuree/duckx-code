@@ -567,60 +567,11 @@ pub const KEYS: &[ModalKey] = &[
         "Inside [ ]",
     ),
     key(
-        "si\"",
+        "si",
         Modes::Visual,
-        cmd(CommandId::SelectInsideQuotes),
-        "Select inside quotes",
-        "Inside quotes",
-    ),
-    key(
-        "si'",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideQuotes),
-        "Select inside quotes",
-        "Inside quotes",
-    ),
-    key(
-        "si(",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideParens),
-        "Select inside ( )",
-        "Inside ( )",
-    ),
-    key(
-        "si)",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideParens),
-        "Select inside ( )",
-        "Inside ( )",
-    ),
-    key(
-        "si{",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideBraces),
-        "Select inside { }",
-        "Inside { }",
-    ),
-    key(
-        "si}",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideBraces),
-        "Select inside { }",
-        "Inside { }",
-    ),
-    key(
-        "si[",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideBrackets),
-        "Select inside [ ]",
-        "Inside [ ]",
-    ),
-    key(
-        "si]",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideBrackets),
-        "Select inside [ ]",
-        "Inside [ ]",
+        cmd(CommandId::SelectInside),
+        "Select inside the nearest quotes or brackets; then → outer, ← inner",
+        "Select inside",
     ),
     key(
         "%",
@@ -1111,62 +1062,12 @@ pub const MNEMONIC_KEYS: &[ModalKey] = &[
         "Select inside [ ]",
     ),
     key(
-        "si\"",
+        "si",
         Modes::Both,
-        cmd(CommandId::SelectInsideQuotes),
-        "Select inside quotes; again takes the quotes",
-        "Select inside quotes",
+        cmd(CommandId::SelectInside),
+        "Select inside the nearest quotes or brackets; then → outer, ← inner",
+        "Select inside",
     ),
-    key(
-        "si'",
-        Modes::Both,
-        cmd(CommandId::SelectInsideQuotes),
-        "Select inside quotes; again takes the quotes",
-        "Select inside quotes",
-    ),
-    key(
-        "si(",
-        Modes::Both,
-        cmd(CommandId::SelectInsideParens),
-        "Select inside ( ); again takes the parentheses",
-        "Select inside ( )",
-    ),
-    key(
-        "si)",
-        Modes::Both,
-        cmd(CommandId::SelectInsideParens),
-        "Select inside ( ); again takes the parentheses",
-        "Select inside ( )",
-    ),
-    key(
-        "si{",
-        Modes::Both,
-        cmd(CommandId::SelectInsideBraces),
-        "Select inside { }; again takes the braces",
-        "Select inside { }",
-    ),
-    key(
-        "si}",
-        Modes::Both,
-        cmd(CommandId::SelectInsideBraces),
-        "Select inside { }; again takes the braces",
-        "Select inside { }",
-    ),
-    key(
-        "si[",
-        Modes::Both,
-        cmd(CommandId::SelectInsideBrackets),
-        "Select inside [ ]; again takes the brackets",
-        "Select inside [ ]",
-    ),
-    key(
-        "si]",
-        Modes::Both,
-        cmd(CommandId::SelectInsideBrackets),
-        "Select inside [ ]; again takes the brackets",
-        "Select inside [ ]",
-    ),
-    // d: delete without the clipboard. u / r: undo / redo.
     key(
         "dc",
         Modes::Normal,
@@ -1598,6 +1499,15 @@ pub struct ModalState {
     pub line: Option<LineSelect>,
     /// The key table Normal and Visual use.
     pub style: KeyStyle,
+    /// After `si` / `select-inside`: Left/Right walk the nest until another key.
+    pub nest: Option<InsideNest>,
+}
+
+/// The enclosing-pair nest `si` left selected, innermost first, for Left/Right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsideNest {
+    pub inners: Vec<(usize, usize)>,
+    pub index: usize,
 }
 
 /// Actions only modal editing produces.
@@ -1729,6 +1639,19 @@ fn route_key(key: &KeyEvent, state: &ModalState, keys: &KeyMap) -> Option<Semant
         } else {
             Some(SemanticAction::Dismiss)
         };
+    }
+    // After `si`, bare Left/Right walk the nest; any other key is routed as usual
+    // and the app drops the nest after that action.
+    if state.nest.is_some() && key.modifiers.is_empty() {
+        match key.code {
+            KeyCode::Right => {
+                return modal(ModalAction::Run(CommandId::SelectInsideOuter));
+            }
+            KeyCode::Left => {
+                return modal(ModalAction::Run(CommandId::SelectInsideInner));
+            }
+            _ => {}
+        }
     }
     // `Shift+Space` opens the Command Bar; it is not a space to look up.
     if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -2122,6 +2045,15 @@ pub fn marks(name: &str, keys: &str) -> Option<Vec<(usize, char)>> {
     Some(found)
 }
 
+/// Status-bar hints while Left/Right walk the nest `si` selected.
+pub fn inside_nest_hints() -> Vec<Hint> {
+    vec![
+        hint("→", "outer"),
+        hint("←", "inner"),
+        hint("Esc", "normal"),
+    ]
+}
+
 /// The hint row for `state`: what the next key can do. The last entry is the one to
 /// keep when the row is too narrow for all of them.
 pub fn hints(state: &ModalState, keys: &KeyMap) -> Vec<Hint> {
@@ -2141,9 +2073,9 @@ pub fn hints(state: &ModalState, keys: &KeyMap) -> Vec<Hint> {
             }
             let next_c = rest.chars().next().expect("rest");
             let mid = format!("{prefix}{next_c}");
-            // `si"` after `s`: one "inside" hint for the next letter, not `i"`.
+            // A longer key after a shorter prefix: one hint for the next letter, not `i"`.
             if rest.chars().count() > 1 && continues_prefix(state.style, state.mode, &mid) {
-                // Next letter only (`i` of `si`), so the hint is `[i]nside`, not `ins[i]de`.
+                // Next letter only, so a group named "Inside" is `[i]nside`, not `ins[i]de`.
                 let group = named_hint(&next_c.to_string(), "Inside", 0);
                 if !out.iter().any(|shown| {
                     shown.key == group.key && shown.word.eq_ignore_ascii_case(&group.word)
@@ -2732,7 +2664,7 @@ mod tests {
                 "( inside ( )",
                 "{ inside { }",
                 "[ inside [ ]",
-                "[i]nside",
+                "select [i]nside",
                 "Esc cancel"
             ]
         );
@@ -2997,7 +2929,7 @@ mod tests {
                 "select [p]arens",
                 "{ select inside { }",
                 "[ select inside [ ]",
-                "[i]nside",
+                "select [i]nside",
                 "Esc cancel"
             ]
         );
@@ -3173,27 +3105,14 @@ mod tests {
     }
 
     #[test]
-    fn si_prefix_selects_inside_and_keeps_the_shorter_s_keys() {
+    fn si_selects_inside_automatically_and_keeps_the_shorter_s_keys() {
         let visual = state(EditMode::Visual { line: false });
         let mnemonic_n = mnemonic(EditMode::Normal);
         let mnemonic_v = mnemonic(EditMode::Visual { line: false });
         for state in [&visual, &mnemonic_v, &mnemonic_n] {
-            assert_eq!(type_keys(state, "si\""), run(CommandId::SelectInsideQuotes));
-            assert_eq!(type_keys(state, "si'"), run(CommandId::SelectInsideQuotes));
-            assert_eq!(type_keys(state, "si("), run(CommandId::SelectInsideParens));
-            assert_eq!(type_keys(state, "si)"), run(CommandId::SelectInsideParens));
-            assert_eq!(type_keys(state, "si{"), run(CommandId::SelectInsideBraces));
-            assert_eq!(type_keys(state, "si}"), run(CommandId::SelectInsideBraces));
-            assert_eq!(
-                type_keys(state, "si["),
-                run(CommandId::SelectInsideBrackets)
-            );
-            assert_eq!(
-                type_keys(state, "si]"),
-                run(CommandId::SelectInsideBrackets)
-            );
+            assert_eq!(type_keys(state, "si"), run(CommandId::SelectInside));
         }
-        // Existing shorter keys stay.
+        // Existing shorter keys stay for an explicit pair.
         assert_eq!(type_keys(&visual, "s("), run(CommandId::SelectInsideParens));
         assert_eq!(
             type_keys(&visual, "s\""),
@@ -3209,59 +3128,72 @@ mod tests {
         );
         assert_eq!(type_keys(&mnemonic_n, "ss"), run(CommandId::ModeVisualLine));
         assert_eq!(type_keys(&mnemonic_n, "sw"), run(CommandId::SelectWord));
-        // Vim Normal has no `s` prefix, so `s` / `si(` stay unbound.
+        // Vim Normal has no `s` prefix: `s` is unbound, and `si` is not a key.
         assert!(matches!(
             type_keys(&state(EditMode::Normal), "s"),
             Some(SemanticAction::Modal(ModalAction::Unbound(_)))
         ));
+        assert!(lookup(KeyStyle::Vim, EditMode::Normal, "si").is_none());
+        // After `s`, `i` runs Select inside; it does not wait and does not run Insert.
+        assert_eq!(keys_for(KeyStyle::Vim, CommandId::SelectInside), ["si"]);
+        assert_eq!(
+            keys_for(KeyStyle::Mnemonic, CommandId::SelectInside),
+            ["si"]
+        );
+        assert!(key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "si(").is_empty());
+        let entry = lookup(KeyStyle::Vim, EditMode::Visual { line: false }, "si").unwrap();
+        assert_eq!(list_hint(entry).plain(), "[s]elect [i]nside");
+        assert!(
+            entry.label.contains("then → outer, ← inner"),
+            "{}",
+            entry.label
+        );
+    }
+
+    #[test]
+    fn left_and_right_walk_the_si_nest_only_while_it_is_active() {
+        let visual = state(EditMode::Visual { line: false });
+        let keys = KeyMap::defaults();
+        let left = press(KeyCode::Left, KeyModifiers::NONE);
+        let right = press(KeyCode::Right, KeyModifiers::NONE);
+        // Without a nest, arrows are ordinary (Visual) movement.
         assert!(matches!(
-            type_keys(&state(EditMode::Normal), "si("),
-            Some(SemanticAction::Modal(ModalAction::Unbound(_)))
+            route(&right, &visual, &keys),
+            Some(SemanticAction::Move { .. })
         ));
-        // After `s`, `i` waits for the bracket; it does not run Insert.
-        assert_eq!(
-            type_keys(&visual, "si"),
-            Some(SemanticAction::Modal(ModalAction::Pend("si".into())))
-        );
-        assert_eq!(
-            type_keys(&mnemonic_n, "si"),
-            Some(SemanticAction::Modal(ModalAction::Pend("si".into())))
-        );
-        let keys_map = KeyMap::defaults();
-        let words = |state: &ModalState| -> Vec<String> {
-            hints(state, &keys_map).iter().map(Hint::plain).collect()
-        };
-        let pending_si = ModalState {
-            pending: Some("si".into()),
-            ..visual
+        let nest = ModalState {
+            nest: Some(InsideNest {
+                inners: vec![(1, 2), (0, 3)],
+                index: 0,
+            }),
+            ..visual.clone()
         };
         assert_eq!(
-            words(&pending_si),
-            [
-                "\" inside quotes",
-                "( inside ( )",
-                "{ inside { }",
-                "[ inside [ ]",
-                "Esc cancel"
-            ]
-        );
-        let mnemonic_si = ModalState {
-            pending: Some("si".into()),
-            ..mnemonic_n
-        };
-        assert_eq!(
-            words(&mnemonic_si),
-            [
-                "\" select inside quotes",
-                "( select inside ( )",
-                "{ select inside { }",
-                "[ select inside [ ]",
-                "Esc cancel"
-            ]
+            route(&right, &nest, &keys),
+            run(CommandId::SelectInsideOuter)
         );
         assert_eq!(
-            key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "si(").len(),
-            1
+            route(&left, &nest, &keys),
+            run(CommandId::SelectInsideInner)
+        );
+        // A shifted arrow is still movement, and `h` is still a key.
+        assert!(matches!(
+            route(&press(KeyCode::Right, KeyModifiers::SHIFT), &nest, &keys),
+            Some(SemanticAction::Move { .. })
+        ));
+        assert_eq!(
+            route(&ch('h'), &nest, &keys),
+            Some(SemanticAction::Move {
+                movement: crate::buffer::Movement::Left,
+                extend: true,
+            })
+        );
+        assert_eq!(
+            inside_nest_hints()
+                .iter()
+                .map(Hint::plain)
+                .collect::<Vec<_>>(),
+            ["→ outer", "← inner", "Esc normal"]
         );
     }
 
