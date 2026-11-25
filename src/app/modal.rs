@@ -1052,7 +1052,7 @@ mod tests {
         assert_eq!(app.modal().unwrap().style, KeyStyle::Mnemonic);
         // A started sequence ends when the keys change.
         keys(&mut app, "c");
-        assert_eq!(app.modal().unwrap().pending, Some('c'));
+        assert_eq!(app.modal().unwrap().pending, Some("c".into()));
         app.run_command(CommandId::KeyStyle, Some("vim")).unwrap();
         assert_eq!(app.modal().unwrap().pending, None);
     }
@@ -1897,6 +1897,16 @@ mod tests {
         app.buffer_mut().move_to(open + 1, false);
         keys(&mut app, "v");
         keys(&mut app, "s(");
+        assert_eq!(mode(&app), EditMode::Visual { line: false });
+        assert_eq!(app.buffer().selected_text(), "x: i32");
+    }
+
+    #[test]
+    fn mnemonic_si_from_normal_selects_inside_and_enters_visual() {
+        let mut app = mnemonic_app("fn f(x: i32) {}\n");
+        let open = app.buffer().rope().chars().position(|c| c == '(').unwrap();
+        app.buffer_mut().move_to(open + 1, false);
+        keys(&mut app, "si(");
         assert_eq!(mode(&app), EditMode::Visual { line: false });
         assert_eq!(app.buffer().selected_text(), "x: i32");
     }

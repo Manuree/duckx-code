@@ -407,6 +407,7 @@ Printable keys never type in Normal. A key with no command shows *No command on 
 | `o` | Move the cursor to the other end |
 | `i` | Insert, keeping the selection highlighted. The first typed character or paste replaces it (one undo restores it); Backspace or Delete deletes it; a move or `Esc` clears it without deleting. The replaced text is not copied to the clipboard — `c` cuts, then Insert. The same in Visual Line, over the selected lines. |
 | `s"` `s'` `s(` `s{` `s[` (or the closing bracket) | Select inside quotes or brackets (`select-inside-quotes`, `select-inside-parens`, `select-inside-braces`, `select-inside-brackets`) |
+| `si"` `si'` `si(` `si{` `si[` (or the closing bracket) | The same select-inside commands (`si` is "select inside") |
 | `%` | Select to the matching bracket |
 | `v` `V` | Switch between Visual and Visual Line, or leave |
 | `Esc` | Back to Normal, dropping the selection |
@@ -429,6 +430,7 @@ With **Key style** set to Mnemonic, a key names its command: a verb letter, then
 | `sl` `ss` | Select lines: Visual Line (`mode-visual-line`) |
 | `sw` `sa` `sb` | Select the word (`select-word`), all (`select-all`), to the matching bracket (`select-bracket`) |
 | `sq` `sp` `s{` `s[` | Select inside quotes, `( )`, `{ }`, `[ ]`; again takes the brackets too |
+| `si"` `si'` `si(` `si{` `si[` (or the closing bracket) | The same select-inside commands, also from Normal (`si` is "select inside") |
 | `dc` | Delete the character (`Delete`) |
 | `dl` `dd` | Delete the line; the clipboard is untouched (`delete-line`) |
 | `u` `r` | Undo / redo |
@@ -451,7 +453,7 @@ With **Key style** set to Mnemonic, a key names its command: a verb letter, then
 | `e` | Edit: delete it and Insert (`change-selection`) |
 | `p` | Paste over it |
 | `>` `<` `Tab` `Shift + Tab` `gc` `o` | Indent, outdent, comment, other end, as in Vim style |
-| `s…` | The select keys above change the selection (`sq` `sp` `s{` `s[` still select inside) |
+| `s…` | The select keys above change the selection (`sq` `sp` `s{` `s[` and `si…` still select inside) |
 
 The hints after the mode badge name each verb (`insert  select  copy  x cut  paste  undo  redo  find  : commands  ? keys`) and, after `c`, shows `copy line  copy word  copy all`. `x` is not a letter of "cut", so it is shown before the name.
 
@@ -629,10 +631,10 @@ If no OS clipboard is available (e.g. a headless session), `copy`, `cut`, and `p
 | Command | Argument | Description | Shortcut |
 | :--- | :--- | :--- | :--- |
 | `select-all` | — | Select the entire document | `Ctrl + A` |
-| `select-inside-quotes` | — | Select the text inside the `"`, `'` or `` ` `` quotes around the cursor, like `vi"` in Neovim. Run it again to take in the quote marks too. `""` and `''` are other names for it. In Visual, `s"` / `s'` (Vim) or `sq` (Mnemonic). | `Ctrl + Shift + '` |
-| `select-inside-parens` | — | Select the text inside the `()` around the cursor, like `vi(`. Again takes in the parentheses. `()` is another name for it. In Visual, `s(` (Vim) or `sp` (Mnemonic). | — |
-| `select-inside-braces` | — | Select the text inside the `{}` around the cursor, like `vi{`. Again takes in the braces. `{}` is another name for it. In Visual, `s{` in both key styles. | — |
-| `select-inside-brackets` | — | Select the text inside the `[]` around the cursor, like `vi[`. Again takes in the brackets. `[]` is another name for it. In Visual, `s[` in both key styles. | — |
+| `select-inside-quotes` | — | Select the text inside the `"`, `'` or `` ` `` quotes around the cursor, like `vi"` in Neovim. Run it again to take in the quote marks too. `""` and `''` are other names for it. In Visual, `s"` / `s'` (Vim) or `sq` (Mnemonic); `si"` / `si'` work too (Mnemonic also from Normal). | `Ctrl + Shift + '` |
+| `select-inside-parens` | — | Select the text inside the `()` around the cursor, like `vi(`. Again takes in the parentheses. `()` is another name for it. In Visual, `s(` (Vim) or `sp` (Mnemonic); `si(` works too (Mnemonic also from Normal). | — |
+| `select-inside-braces` | — | Select the text inside the `{}` around the cursor, like `vi{`. Again takes in the braces. `{}` is another name for it. In Visual, `s{` in both key styles; `si{` works too (Mnemonic also from Normal). | — |
+| `select-inside-brackets` | — | Select the text inside the `[]` around the cursor, like `vi[`. Again takes in the brackets. `[]` is another name for it. In Visual, `s[` in both key styles; `si[` works too (Mnemonic also from Normal). | — |
 
 #### View
 | Command | Argument | Description | Shortcut |

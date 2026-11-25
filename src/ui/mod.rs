@@ -849,7 +849,7 @@ mod tests {
         app.editor_prefs.modeless = false;
         app.editor_prefs.key_style = crate::modal::KeyStyle::Mnemonic;
         app.handle(SemanticAction::Deselect);
-        app.modal_state.pending = Some('c');
+        app.modal_state.pending = Some("c".into());
         let (text, marked) = hint_row(&app, 120, 8);
         assert!(text.contains("NORMAL"), "{text}");
         assert!(text.contains("c "), "{text}");

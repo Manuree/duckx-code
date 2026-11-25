@@ -136,8 +136,8 @@ fn mode_line(app: &App, state: &crate::modal::ModalState, width: usize) -> Vec<S
         .count
         .map(|count| count.to_string())
         .unwrap_or_default();
-    if let Some(first) = state.pending {
-        typed.push(first);
+    if let Some(prefix) = &state.pending {
+        typed.push_str(prefix);
     }
     if !typed.is_empty() {
         spans.push(Span::styled(
