@@ -320,6 +320,90 @@ pub fn next_inside(pairs: &[InsideSpan], current: (usize, usize)) -> Option<(usi
     Some(pairs[0].inner)
 }
 
+/// Every `""` `''` `` ` ` `` `()` `{}` `[]` pair whose marks sit inside chars
+/// `start..end`. Direct children of a `select-inside` range are the pairs not
+/// contained in another pair in this list.
+pub fn pairs_in_range(
+    rope: &Rope,
+    start: usize,
+    end: usize,
+    quotes: &[QuoteSpan],
+    literal_of: &dyn Fn(usize) -> Option<(usize, usize)>,
+) -> Vec<InsideSpan> {
+    let start = start.min(rope.len_chars());
+    let end = end.min(rope.len_chars());
+    let mut pairs: Vec<InsideSpan> = quotes
+        .iter()
+        .copied()
+        .filter(|span| span.outer.0 >= start && span.outer.1 <= end)
+        .map(InsideSpan::from_quote)
+        .collect();
+    for (open, close) in [('(', ')'), ('{', '}'), ('[', ']')] {
+        pairs.extend(kind_in_range(rope, start, end, open, close, literal_of));
+    }
+    pairs.sort_by_key(|span| {
+        let (from, to) = span.outer;
+        (to - from, from)
+    });
+    pairs.dedup();
+    pairs
+}
+
+/// The direct child to descend into from a parent inner range: the child that
+/// contains `origin` when there is one, otherwise the first child by position.
+/// `pairs` are the pairs whose marks already sit inside that parent range.
+pub fn descend_child(pairs: &[InsideSpan], origin: usize) -> Option<InsideSpan> {
+    let mut children: Vec<InsideSpan> = pairs
+        .iter()
+        .copied()
+        .filter(|child| {
+            !pairs.iter().any(|other| {
+                other.outer != child.outer
+                    && other.outer.0 <= child.outer.0
+                    && child.outer.1 <= other.outer.1
+            })
+        })
+        .collect();
+    children.sort_by_key(|span| span.outer.0);
+    children
+        .iter()
+        .copied()
+        .find(|span| span.outer.0 <= origin && origin < span.outer.1)
+        .or_else(|| children.into_iter().next())
+}
+
+fn kind_in_range(
+    rope: &Rope,
+    start: usize,
+    end: usize,
+    open: char,
+    close: char,
+    literal_of: &dyn Fn(usize) -> Option<(usize, usize)>,
+) -> Vec<InsideSpan> {
+    let mut out = Vec::new();
+    for (offset, ch) in rope.chars_at(start).enumerate() {
+        let at = start + offset;
+        if at >= end {
+            break;
+        }
+        if ch != open {
+            continue;
+        }
+        let home = literal_of(at);
+        let counts = |i: usize| literal_of(i) == home;
+        if !counts(at) {
+            continue;
+        }
+        let Some(mate) = closer_from(rope, at, open, close, &counts) else {
+            continue;
+        };
+        if mate < end {
+            out.push(InsideSpan::from_pair(at, mate));
+        }
+    }
+    out
+}
+
 fn pairs_of_kind(
     rope: &Rope,
     at: usize,
@@ -808,5 +892,45 @@ mod tests {
         // Already selected the delimiters of `()` (the characters `(x)`).
         assert_eq!(next_inside(&pairs, (2, 5)), Some((1, 6))); // inside []
         assert_eq!(rope.slice(1..6).to_string(), "[(x)]");
+    }
+
+    #[test]
+    fn descend_child_picks_the_first_direct_child_or_the_one_under_the_cursor() {
+        let none = |_: usize| None;
+        let inner_of = |text: &str, origin_at: Option<&str>| -> Option<String> {
+            let open = text.find('{').unwrap();
+            let close = text.rfind('}').unwrap();
+            let rope = Rope::from_str(text);
+            let parent = (open + 1, close);
+            let quotes = crate::quotes::spans_in_range(&rope, parent.0, parent.1);
+            let pairs = pairs_in_range(&rope, parent.0, parent.1, &quotes, &none);
+            let origin = origin_at
+                .and_then(|needle| text.find(needle))
+                .unwrap_or(open);
+            descend_child(&pairs, origin)
+                .map(|span| rope.slice(span.inner.0..span.inner.1).to_string())
+        };
+        let main = concat!(
+            "fn main() {\n",
+            "    let items = [1, 2, 3];\n",
+            "    if items.len() > 0 {\n",
+            "        println!(\"{}\", items[0]);\n",
+            "    }\n",
+            "}",
+        );
+        // Cursor on the main `{`: first top-level child is the array.
+        assert_eq!(inner_of(main, None).as_deref(), Some("1, 2, 3"));
+        // Cursor inside the `if` body: that child wins over the earlier array.
+        assert_eq!(
+            inner_of(main, Some("println!")).as_deref(),
+            Some("\n        println!(\"{}\", items[0]);\n    ")
+        );
+        // Quotes count as pairs and can be the first child.
+        assert_eq!(
+            inner_of(r#"{ let s = "hello"; let a = [1]; }"#, None).as_deref(),
+            Some("hello")
+        );
+        // No child pair: nothing to descend into.
+        assert_eq!(inner_of("{ x }", None), None);
     }
 }

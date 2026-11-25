@@ -6008,6 +6008,7 @@ impl App {
     fn select_inside(&mut self) {
         self.dismiss_lsp_popups();
         self.clear_snippet();
+        let origin = self.buffer().selection().head;
         let (pairs, current) = self.inside_nest_pairs();
         let Some(range) = crate::brackets::next_inside(&pairs, current) else {
             self.message = Some("No enclosing pair".to_string());
@@ -6016,15 +6017,36 @@ impl App {
         };
         self.buffer_mut().select_span(range.0, range.1);
         self.scroll_to_cursor();
-        self.set_inside_nest(pairs, range);
+        self.set_inside_nest(pairs, range, origin);
     }
 
     /// Expand (`dir > 0`) or shrink (`dir < 0`) the `select-inside` nest by one
-    /// level. At the outermost or innermost pair this is a no-op; the nest stays
-    /// active so the other arrow still works.
+    /// level. Right is a no-op at the outermost pair. Left at the innermost
+    /// descends into a child pair inside the selection when there is one,
+    /// otherwise it is a no-op. The nest stays active so the other arrow works.
     fn step_inside_nest(&mut self, dir: i32) {
         self.dismiss_lsp_popups();
         self.clear_snippet();
+        let current = {
+            let selection = self.buffer().selection();
+            (
+                selection.anchor.min(selection.head),
+                selection.anchor.max(selection.head),
+            )
+        };
+        let origin = self
+            .modal_state
+            .nest
+            .as_ref()
+            .map(|nest| nest.origin)
+            .unwrap_or(self.buffer().selection().head);
+        if let Some(nest) = self.modal_state.nest.clone()
+            && nest.index < nest.inners.len()
+            && nest.inners[nest.index] == current
+        {
+            self.step_stored_nest(nest, dir);
+            return;
+        }
         let (pairs, current) = self.inside_nest_pairs();
         let inners: Vec<(usize, usize)> = pairs.iter().map(|span| span.inner).collect();
         if inners.is_empty() {
@@ -6032,30 +6054,110 @@ impl App {
             self.modal_state.nest = None;
             return;
         }
-        let index = self
-            .modal_state
-            .nest
-            .as_ref()
-            .filter(|nest| nest.inners == inners)
-            .and_then(|nest| {
-                (nest.index < inners.len() && inners[nest.index] == current).then_some(nest.index)
-            })
-            .or_else(|| inners.iter().rposition(|&span| span == current));
-        let next = match index {
-            // No current inside-selection: start at the innermost pair.
-            None => 0,
-            Some(index) if dir > 0 && index + 1 < inners.len() => index + 1,
-            Some(index) if dir < 0 && index > 0 => index - 1,
-            Some(index) => {
-                // Already at the outermost or innermost: no-op, keep the nest.
-                self.set_inside_nest(pairs, inners[index]);
-                return;
+        let index = inners.iter().rposition(|&span| span == current);
+        match index {
+            None => {
+                self.buffer_mut().select_span(inners[0].0, inners[0].1);
+                self.scroll_to_cursor();
+                self.set_inside_nest(pairs, inners[0], origin);
             }
+            Some(index) if dir > 0 && index + 1 < inners.len() => {
+                let range = inners[index + 1];
+                self.buffer_mut().select_span(range.0, range.1);
+                self.scroll_to_cursor();
+                self.set_inside_nest(pairs, range, origin);
+            }
+            Some(index) if dir < 0 && index > 0 => {
+                let range = inners[index - 1];
+                self.buffer_mut().select_span(range.0, range.1);
+                self.scroll_to_cursor();
+                self.set_inside_nest(pairs, range, origin);
+            }
+            Some(index) if dir < 0 => {
+                self.set_inside_nest(pairs, inners[index], origin);
+                if let Some(nest) = self.modal_state.nest.clone() {
+                    self.step_stored_nest(nest, dir);
+                }
+            }
+            Some(index) => {
+                // Outermost Right: no-op, keep the nest.
+                self.set_inside_nest(pairs, inners[index], origin);
+            }
+        }
+    }
+
+    fn step_stored_nest(&mut self, mut nest: crate::modal::InsideNest, dir: i32) {
+        if dir > 0 {
+            if nest.index + 1 < nest.inners.len() {
+                nest.index += 1;
+                let range = nest.inners[nest.index];
+                self.buffer_mut().select_span(range.0, range.1);
+                self.scroll_to_cursor();
+                self.modal_state.nest = Some(nest);
+            }
+            return;
+        }
+        if nest.index > 0 {
+            nest.index -= 1;
+            let range = nest.inners[nest.index];
+            self.buffer_mut().select_span(range.0, range.1);
+            self.scroll_to_cursor();
+            self.modal_state.nest = Some(nest);
+            return;
+        }
+        let Some(child) = self.child_inside(nest.inners[0], nest.origin) else {
+            return;
         };
-        let range = inners[next];
-        self.buffer_mut().select_span(range.0, range.1);
+        nest.inners.insert(0, child);
+        nest.index = 0;
+        self.buffer_mut().select_span(child.0, child.1);
         self.scroll_to_cursor();
-        self.set_inside_nest(pairs, range);
+        self.modal_state.nest = Some(nest);
+    }
+
+    /// The inner range of the direct child pair to shrink into, if any.
+    fn child_inside(&self, parent: (usize, usize), origin: usize) -> Option<(usize, usize)> {
+        let tab = self.active_editor().tab();
+        let rope = tab.buffer.rope();
+        let quotes = self.quotes_in_range(parent.0, parent.1);
+        let literals = tab
+            .syntax
+            .as_ref()
+            .filter(|state| state.has_tree())
+            .map(|state| state.literal_ranges(rope, parent.0, parent.1))
+            .unwrap_or_default();
+        let literal_of = |at: usize| {
+            let after = literals.partition_point(|(from, _)| *from <= at);
+            (after > 0 && at < literals[after - 1].1).then(|| literals[after - 1])
+        };
+        let pairs = crate::brackets::pairs_in_range(rope, parent.0, parent.1, &quotes, &literal_of);
+        crate::brackets::descend_child(&pairs, origin).map(|span| span.inner)
+    }
+
+    fn quotes_in_range(&self, start: usize, end: usize) -> Vec<crate::quotes::QuoteSpan> {
+        let tab = self.active_editor().tab();
+        let rope = tab.buffer.rope();
+        let scanned = crate::quotes::spans_in_range(rope, start, end);
+        let Some(syntax) = tab.syntax.as_ref().filter(|state| state.has_tree()) else {
+            return scanned;
+        };
+        scanned
+            .into_iter()
+            .filter(|span| {
+                let at = if span.inner.0 < span.inner.1 {
+                    span.inner.0
+                } else {
+                    span.outer.0
+                };
+                match syntax.string_span(rope, at) {
+                    Some(Some(found)) => {
+                        found.outer.0 <= span.outer.0 && span.outer.1 <= found.outer.1
+                    }
+                    Some(None) => false,
+                    None => true,
+                }
+            })
+            .collect()
     }
 
     /// Enclosing inside-spans around the caret or the mid-point of the selection,
@@ -6103,13 +6205,18 @@ impl App {
         &mut self,
         pairs: Vec<crate::brackets::InsideSpan>,
         current: (usize, usize),
+        origin: usize,
     ) {
         let inners: Vec<(usize, usize)> = pairs.iter().map(|span| span.inner).collect();
         let index = inners
             .iter()
             .rposition(|&span| span == current)
             .unwrap_or(0);
-        self.modal_state.nest = Some(crate::modal::InsideNest { inners, index });
+        self.modal_state.nest = Some(crate::modal::InsideNest {
+            inners,
+            index,
+            origin,
+        });
     }
 
     /// Selects the text inside the quotes around the cursor, like `vi"`. When that is already the
@@ -7908,6 +8015,52 @@ mod tests {
         assert_eq!(select_pair(&mut app, SelectInsideOuter), "");
         assert_eq!(app.message.as_deref(), Some("No enclosing pair"));
         assert!(app.modal_state.nest.is_none());
+    }
+
+    #[test]
+    fn select_inside_left_descends_into_a_child_inside_the_selection() {
+        use crate::command::CommandId::{SelectInside, SelectInsideInner, SelectInsideOuter};
+        let on_brace = concat!(
+            "fn main() |{\n",
+            "    let items = [1, 2, 3];\n",
+            "    if items.len() > 0 {\n",
+            "        println!(\"{}\", items[0]);\n",
+            "    }\n",
+            "}",
+        );
+        for parse in [false, true] {
+            let mut app = quotes_app(on_brace, Some("src/main.rs"), parse);
+            let body = select_pair(&mut app, SelectInside);
+            assert!(
+                body.contains("let items = [1, 2, 3];"),
+                "{body:?} parse={parse}"
+            );
+            assert!(body.contains("if items.len()"), "{body:?}");
+            // First top-level child is the array, not the later `if`.
+            assert_eq!(select_pair(&mut app, SelectInsideInner), "1, 2, 3");
+            // No pair inside the numbers: Left stays put.
+            assert_eq!(select_pair(&mut app, SelectInsideInner), "1, 2, 3");
+            // Right climbs back to the main body, then Left descends again.
+            assert_eq!(select_pair(&mut app, SelectInsideOuter), body);
+            assert_eq!(select_pair(&mut app, SelectInsideInner), "1, 2, 3");
+        }
+
+        // After expanding out of the `if`, Left prefers the child that held the cursor.
+        let in_if = concat!(
+            "fn main() {\n",
+            "    let items = [1, 2, 3];\n",
+            "    if items.len() > 0 {\n",
+            "        |println!(\"{}\", items[0]);\n",
+            "    }\n",
+            "}",
+        );
+        let mut app = quotes_app(in_if, Some("src/main.rs"), false);
+        let if_body = select_pair(&mut app, SelectInside);
+        assert!(if_body.contains("println!"), "{if_body:?}");
+        assert!(!if_body.contains("let items"), "{if_body:?}");
+        let main = select_pair(&mut app, SelectInsideOuter);
+        assert!(main.contains("let items"), "{main:?}");
+        assert_eq!(select_pair(&mut app, SelectInsideInner), if_body);
     }
 
     #[test]

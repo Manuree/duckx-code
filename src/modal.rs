@@ -1508,6 +1508,8 @@ pub struct ModalState {
 pub struct InsideNest {
     pub inners: Vec<(usize, usize)>,
     pub index: usize,
+    /// Cursor when `si` started; a Left descent prefers a child under this point.
+    pub origin: usize,
 }
 
 /// Actions only modal editing produces.
@@ -3165,6 +3167,7 @@ mod tests {
             nest: Some(InsideNest {
                 inners: vec![(1, 2), (0, 3)],
                 index: 0,
+                origin: 1,
             }),
             ..visual.clone()
         };
