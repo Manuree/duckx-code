@@ -790,7 +790,6 @@ mod tests {
         let normal = text.find("NORMAL").expect(text.as_str());
         let insert = text.find("insert").expect(text.as_str());
         assert!(normal < insert, "{text}");
-        assert!(text.contains("[No Name]"), "{text}");
 
         app.editor_prefs.key_style = crate::modal::KeyStyle::Mnemonic;
         app.handle(SemanticAction::Deselect);
@@ -816,18 +815,15 @@ mod tests {
         let above = lines[lines.len() - 2];
         assert!(status.contains("NORMAL"), "{screen}");
         assert!(status.contains("insert"), "{screen}");
-        assert!(status.contains("[No Name]"), "{screen}");
         assert!(status.contains("master"), "{screen}");
+        assert!(lines[0].contains("[No Name]"), "{screen}");
+        assert!(!status.contains("[No Name]"), "{status}");
         assert!(
             status.find("NORMAL").unwrap() < status.find("insert").unwrap(),
             "{status}"
         );
         assert!(
-            status.find("insert").unwrap() < status.find("[No Name]").unwrap(),
-            "{status}"
-        );
-        assert!(
-            status.find("[No Name]").unwrap() < status.find("master").unwrap(),
+            status.find("insert").unwrap() < status.find("master").unwrap(),
             "{status}"
         );
         assert!(!status.contains("4 LF"), "{status}");
@@ -865,13 +861,9 @@ mod tests {
         assert!(!text.contains("NORMAL"), "{text}");
         assert!(text.contains("delete (cut)"), "{text}");
         assert!(text.contains("yank (copy)"), "{text}");
-        assert!(text.contains("[No Name]"), "{text}");
+        assert!(!text.contains("[No Name]"), "{text}");
         assert!(
             text.find("VISUAL").unwrap() < text.find("delete (cut)").unwrap(),
-            "{text}"
-        );
-        assert!(
-            text.find("delete (cut)").unwrap() < text.find("[No Name]").unwrap(),
             "{text}"
         );
         let marked: String = marked.split_whitespace().collect();
@@ -890,13 +882,14 @@ mod tests {
         let status = lines.last().unwrap();
         let above = lines[lines.len() - 2];
         assert!(status.contains("NORMAL"), "{status}");
-        assert!(status.contains("[No Name]"), "{status}");
         assert!(status.contains("master"), "{status}");
+        assert!(lines[0].contains("[No Name]"), "{screen}");
+        assert!(!status.contains("[No Name]"), "{status}");
         assert!(!status.contains("insert"), "{status}");
         assert!(!status.contains("4 LF"), "{status}");
         assert!(!above.contains("insert"), "{screen}");
         assert!(
-            status.find("[No Name]").unwrap() < status.find("master").unwrap(),
+            status.find("NORMAL").unwrap() < status.find("master").unwrap(),
             "{status}"
         );
     }
@@ -906,40 +899,37 @@ mod tests {
         let mut app = App::new(Buffer::from_text("one two\n"), None);
         assert!(app.editor_prefs.modeless);
         app.branch = Some("master".into());
-        let status = draw(&app, 80, 8).lines().last().unwrap().to_string();
+        let screen = draw(&app, 80, 8);
+        let lines: Vec<&str> = screen.lines().collect();
+        let status = lines.last().unwrap();
         assert!(status.contains("NORMAL"), "{status}");
-        assert!(status.contains("[No Name]"), "{status}");
         assert!(status.contains("master"), "{status}");
+        assert!(lines[0].contains("[No Name]"), "{screen}");
+        assert!(!status.contains("[No Name]"), "{status}");
         assert!(!status.contains("insert"), "{status}");
         assert!(!status.contains("4 LF"), "{status}");
         assert!(
-            status.find("[No Name]").unwrap() < status.find("master").unwrap(),
+            status.find("NORMAL").unwrap() < status.find("master").unwrap(),
             "{status}"
         );
     }
 
     #[test]
-    fn narrow_status_bar_drops_trailing_hints_and_keeps_the_file() {
+    fn narrow_status_bar_drops_trailing_hints() {
         let mut app = App::new(Buffer::from_text("one two\n"), None);
         app.editor_prefs.modeless = false;
         app.handle(SemanticAction::Deselect);
+        let screen = draw(&app, 48, 8);
+        let lines: Vec<&str> = screen.lines().collect();
         let (wide, _) = hint_row(&app, 120, 8);
         assert!(wide.contains("insert"), "{wide}");
         assert!(wide.contains("? keys"), "{wide}");
         let (narrow, _) = hint_row(&app, 48, 8);
         assert!(narrow.contains("NORMAL"), "{narrow}");
-        assert!(narrow.contains("[No Name]"), "{narrow}");
+        assert!(!narrow.contains("[No Name]"), "{narrow}");
         assert!(!narrow.contains("4 LF"), "{narrow}");
-        // The file is reserved first, so trailing hints drop before the name does.
-        assert!(
-            !narrow.contains("? keys") || narrow.contains("[No Name]"),
-            "{narrow}"
-        );
-        assert!(
-            narrow.find("NORMAL").unwrap() < narrow.find("[No Name]").unwrap(),
-            "{narrow}"
-        );
-        // At this width the full hint list cannot fit.
+        assert!(lines[0].contains("[No Name]"), "{screen}");
+        // At this width the full hint list cannot fit; trailing items drop.
         assert!(
             !narrow.contains("yy copy line") || !narrow.contains("? keys"),
             "{narrow}"
@@ -947,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn dirty_file_keeps_its_modified_marker_beside_mode_hints() {
+    fn dirty_file_keeps_its_modified_marker_on_the_tab_title() {
         let mut app = App::new(Buffer::from_text("hi"), Some("src/main.rs".into()));
         app.editor_prefs.modeless = false;
         app.handle(SemanticAction::Deselect);
@@ -955,9 +945,11 @@ mod tests {
         let screen = draw(&app, 80, 8);
         let lines: Vec<&str> = screen.lines().collect();
         let status = lines.last().unwrap();
+        assert!(lines[0].contains("main.rs [+]"), "{screen}");
         assert!(status.contains("NORMAL"), "{screen}");
-        assert!(status.contains("main.rs"), "{screen}");
-        assert!(status.contains("[+]"), "{screen}");
+        assert!(status.contains("insert"), "{screen}");
+        assert!(!status.contains("main.rs"), "{status}");
+        assert!(!status.contains("[+]"), "{status}");
         assert!(!status.contains("4 LF"), "{status}");
     }
 
@@ -2376,25 +2368,24 @@ mod tests {
 
         let screen = draw(&app, 100, 10);
         let status = screen.lines().last().unwrap();
-        for expected in [
-            " NORMAL ",
-            "\u{e0a0} master",
-            "\u{e73e}",
-            "DESIGN.md",
-            " 8%   8:1 ",
-        ] {
+        let lines: Vec<&str> = screen.lines().collect();
+        let title = lines[0];
+        for expected in [" NORMAL ", "\u{e0a0} master", " 8%   8:1 "] {
             assert!(
                 status.contains(expected),
                 "missing {expected:?} in {status:?}"
             );
         }
+        assert!(title.contains("DESIGN.md"), "{title}");
+        assert!(!status.contains("DESIGN.md"), "{status}");
+        assert!(!status.contains("\u{e73e}"), "{status}");
         assert!(!status.contains("DUCKX"), "{status}");
         assert!(!status.contains("COMMAND"), "{status}");
         assert!(!status.contains("4 LF"), "{status}");
-        assert!(status.find("NORMAL") < status.find("DESIGN.md"));
-        assert!(status.find("DESIGN.md") < status.find("8%"));
+        assert!(status.find("NORMAL") < status.find("8%"));
         assert!(status.find("8%") < status.find("master"));
         assert!(!status.contains("[+]"));
+        assert!(!title.contains("[+]"));
     }
 
     /// The assistant panel open with `used` tokens reported; the screen as rows.
@@ -2523,9 +2514,12 @@ mod tests {
     #[test]
     fn status_line_without_repo_or_file() {
         let app = App::new(Buffer::new(), None);
-        let status = draw(&app, 60, 3).lines().last().unwrap().to_string();
-        assert!(status.contains("[No Name]"));
-        assert!(status.contains("Top   1:1"));
+        let screen = draw(&app, 60, 3);
+        let lines: Vec<&str> = screen.lines().collect();
+        let status = lines.last().unwrap();
+        assert!(lines[0].contains("[No Name]"), "{screen}");
+        assert!(!status.contains("[No Name]"), "{status}");
+        assert!(status.contains("Top   1:1"), "{status}");
         assert!(!status.contains("\u{e0a0}"));
         assert!(!status.contains("\u{f017}"));
     }
@@ -2589,14 +2583,24 @@ mod tests {
     }
 
     #[test]
-    fn dirty_file_shows_modified_marker_on_the_title_and_status_bar() {
+    fn dirty_file_shows_modified_marker_on_the_title() {
         let mut app = App::new(Buffer::from_text("hi"), Some("src/main.rs".into()));
         app.handle(SemanticAction::InsertChar('!'));
         let screen = draw(&app, 80, 8);
         let lines: Vec<&str> = screen.lines().collect();
         assert!(lines[0].contains("\u{e7a8} main.rs [+]"), "{screen}");
-        assert!(lines.last().unwrap().contains("main.rs"), "{screen}");
-        assert!(lines.last().unwrap().contains("[+]"), "{screen}");
+        assert!(!lines.last().unwrap().contains("main.rs"), "{screen}");
+        assert!(!lines.last().unwrap().contains("[+]"), "{screen}");
+    }
+
+    #[test]
+    fn a_single_untitled_tab_shows_no_name_on_the_title_not_the_status_bar() {
+        let app = App::new(Buffer::from_text("hello\n"), None);
+        let screen = draw(&app, 80, 8);
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(lines[0].contains("[No Name]"), "{screen}");
+        assert!(!lines.last().unwrap().contains("[No Name]"), "{screen}");
+        assert!(lines.last().unwrap().contains("NORMAL"), "{screen}");
     }
 
     #[test]
