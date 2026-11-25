@@ -567,6 +567,62 @@ pub const KEYS: &[ModalKey] = &[
         "Inside [ ]",
     ),
     key(
+        "si\"",
+        Modes::Visual,
+        cmd(CommandId::SelectInsideQuotes),
+        "Select inside quotes",
+        "Inside quotes",
+    ),
+    key(
+        "si'",
+        Modes::Visual,
+        cmd(CommandId::SelectInsideQuotes),
+        "Select inside quotes",
+        "Inside quotes",
+    ),
+    key(
+        "si(",
+        Modes::Visual,
+        cmd(CommandId::SelectInsideParens),
+        "Select inside ( )",
+        "Inside ( )",
+    ),
+    key(
+        "si)",
+        Modes::Visual,
+        cmd(CommandId::SelectInsideParens),
+        "Select inside ( )",
+        "Inside ( )",
+    ),
+    key(
+        "si{",
+        Modes::Visual,
+        cmd(CommandId::SelectInsideBraces),
+        "Select inside { }",
+        "Inside { }",
+    ),
+    key(
+        "si}",
+        Modes::Visual,
+        cmd(CommandId::SelectInsideBraces),
+        "Select inside { }",
+        "Inside { }",
+    ),
+    key(
+        "si[",
+        Modes::Visual,
+        cmd(CommandId::SelectInsideBrackets),
+        "Select inside [ ]",
+        "Inside [ ]",
+    ),
+    key(
+        "si]",
+        Modes::Visual,
+        cmd(CommandId::SelectInsideBrackets),
+        "Select inside [ ]",
+        "Inside [ ]",
+    ),
+    key(
         "%",
         Modes::Normal,
         cmd(CommandId::MatchBracket),
@@ -1054,6 +1110,62 @@ pub const MNEMONIC_KEYS: &[ModalKey] = &[
         "Select inside [ ]; again takes the brackets",
         "Select inside [ ]",
     ),
+    key(
+        "si\"",
+        Modes::Both,
+        cmd(CommandId::SelectInsideQuotes),
+        "Select inside quotes; again takes the quotes",
+        "Select inside quotes",
+    ),
+    key(
+        "si'",
+        Modes::Both,
+        cmd(CommandId::SelectInsideQuotes),
+        "Select inside quotes; again takes the quotes",
+        "Select inside quotes",
+    ),
+    key(
+        "si(",
+        Modes::Both,
+        cmd(CommandId::SelectInsideParens),
+        "Select inside ( ); again takes the parentheses",
+        "Select inside ( )",
+    ),
+    key(
+        "si)",
+        Modes::Both,
+        cmd(CommandId::SelectInsideParens),
+        "Select inside ( ); again takes the parentheses",
+        "Select inside ( )",
+    ),
+    key(
+        "si{",
+        Modes::Both,
+        cmd(CommandId::SelectInsideBraces),
+        "Select inside { }; again takes the braces",
+        "Select inside { }",
+    ),
+    key(
+        "si}",
+        Modes::Both,
+        cmd(CommandId::SelectInsideBraces),
+        "Select inside { }; again takes the braces",
+        "Select inside { }",
+    ),
+    key(
+        "si[",
+        Modes::Both,
+        cmd(CommandId::SelectInsideBrackets),
+        "Select inside [ ]; again takes the brackets",
+        "Select inside [ ]",
+    ),
+    key(
+        "si]",
+        Modes::Both,
+        cmd(CommandId::SelectInsideBrackets),
+        "Select inside [ ]; again takes the brackets",
+        "Select inside [ ]",
+    ),
     // d: delete without the clipboard. u / r: undo / redo.
     key(
         "dc",
@@ -1474,8 +1586,8 @@ pub struct KeyList {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModalState {
     pub mode: EditMode,
-    /// The first key of a two-key sequence (`g`, `d`, `y`, `>`, `<`, `]`, `[`, `i`).
-    pub pending: Option<char>,
+    /// Keys already typed of a sequence (`g`, `s`, `si`, `]`, …).
+    pub pending: Option<String>,
     /// Digits typed before a motion or command (`5j`, `3dd`).
     pub count: Option<u32>,
     /// The `?` key list, while it is open.
@@ -1495,8 +1607,8 @@ pub enum ModalAction {
     Run(CommandId),
     /// A count before a motion or command: do it this many times.
     Repeat(u32, Box<SemanticAction>),
-    /// The first key of a two-key sequence.
-    Pend(char),
+    /// Keys already typed of a sequence (`g`, `s`, `si`).
+    Pend(String),
     /// One digit of a count.
     Count(u8),
     /// `Esc` with a count or sequence started: forget it.
@@ -1639,19 +1751,16 @@ fn route_key(key: &KeyEvent, state: &ModalState, keys: &KeyMap) -> Option<Semant
     {
         return modal(ModalAction::Count(digit));
     }
-    let seq = match state.pending {
-        Some(first) => format!("{first}{token}"),
+    let seq = match &state.pending {
+        Some(prefix) => format!("{prefix}{token}"),
         None => token.clone(),
     };
     if let Some(entry) = lookup(state.style, state.mode, &seq) {
         let action = action_for(entry, state.mode, keys)?;
         return Some(with_count(action, entry, state.count));
     }
-    if state.pending.is_none()
-        && let Some(first) = single_char(&token)
-        && starts_sequence(state.style, state.mode, first)
-    {
-        return modal(ModalAction::Pend(first));
+    if continues_prefix(state.style, state.mode, &seq) {
+        return modal(ModalAction::Pend(seq));
     }
     modal(ModalAction::Unbound(seq))
 }
@@ -1697,14 +1806,20 @@ pub fn lookup(style: KeyStyle, mode: EditMode, keys: &str) -> Option<&'static Mo
         .find(|entry| entry.keys == keys && entry.modes.has(mode))
 }
 
-/// True when some two-key sequence in `mode` starts with `first`.
+/// True when some sequence in `mode` starts with `first`.
 fn starts_sequence(style: KeyStyle, mode: EditMode, first: char) -> bool {
-    style.keys().iter().any(|entry| {
-        entry.modes.has(mode)
-            && !is_named(entry.keys)
-            && entry.keys.chars().count() > 1
-            && entry.keys.starts_with(first)
-    })
+    continues_prefix(style, mode, &first.to_string())
+}
+
+/// True when some key in `mode` is longer than `prefix` and starts with it.
+fn continues_prefix(style: KeyStyle, mode: EditMode, prefix: &str) -> bool {
+    !prefix.is_empty()
+        && style.keys().iter().any(|entry| {
+            entry.modes.has(mode)
+                && !is_named(entry.keys)
+                && entry.keys.starts_with(prefix)
+                && entry.keys.chars().count() > prefix.chars().count()
+        })
 }
 
 /// The action a table entry produces in `mode`. `None` only when its modeless key
@@ -2011,19 +2126,33 @@ pub fn marks(name: &str, keys: &str) -> Option<Vec<(usize, char)>> {
 /// keep when the row is too narrow for all of them.
 pub fn hints(state: &ModalState, keys: &KeyMap) -> Vec<Hint> {
     let table = state.style.keys();
-    if let Some(first) = state.pending {
+    if let Some(prefix) = state.pending.as_deref() {
+        let typed = prefix.chars().count();
         let mut out: Vec<Hint> = Vec::new();
         for entry in table
             .iter()
             .filter(|entry| entry.modes.has(state.mode) && !is_named(entry.keys))
         {
-            let Some(rest) = entry.keys.strip_prefix(first) else {
+            let Some(rest) = entry.keys.strip_prefix(prefix) else {
                 continue;
             };
             if rest.is_empty() {
                 continue;
             }
-            let next = named_hint(entry.keys, entry.name, 1);
+            let next_c = rest.chars().next().expect("rest");
+            let mid = format!("{prefix}{next_c}");
+            // `si"` after `s`: one "inside" hint for the next letter, not `i"`.
+            if rest.chars().count() > 1 && continues_prefix(state.style, state.mode, &mid) {
+                // Next letter only (`i` of `si`), so the hint is `[i]nside`, not `ins[i]de`.
+                let group = named_hint(&next_c.to_string(), "Inside", 0);
+                if !out.iter().any(|shown| {
+                    shown.key == group.key && shown.word.eq_ignore_ascii_case(&group.word)
+                }) {
+                    out.push(group);
+                }
+                continue;
+            }
+            let next = named_hint(entry.keys, entry.name, typed);
             // `cc` after `cl` (both Copy Line): one highlighted name is enough.
             let same_name = out
                 .iter()
@@ -2320,10 +2449,10 @@ mod tests {
     fn two_key_sequences_wait_for_their_second_key() {
         assert_eq!(
             normal(&ch('g')),
-            Some(SemanticAction::Modal(ModalAction::Pend('g')))
+            Some(SemanticAction::Modal(ModalAction::Pend("g".into())))
         );
         let pending = ModalState {
-            pending: Some('d'),
+            pending: Some("d".into()),
             ..state(EditMode::Normal)
         };
         let keys = KeyMap::defaults();
@@ -2337,7 +2466,7 @@ mod tests {
             Some(SemanticAction::Modal(ModalAction::Cancel))
         );
         let g = ModalState {
-            pending: Some('g'),
+            pending: Some("g".into()),
             ..state(EditMode::Normal)
         };
         assert_eq!(
@@ -2380,7 +2509,7 @@ mod tests {
         );
         let three_d = ModalState {
             count: Some(3),
-            pending: Some('d'),
+            pending: Some("d".into()),
             ..state(EditMode::Normal)
         };
         assert_eq!(
@@ -2473,7 +2602,11 @@ mod tests {
         assert_eq!(key_list(KeyStyle::Vim, EditMode::Normal, "dd").len(), 1);
         assert!(key_list(KeyStyle::Vim, EditMode::Normal, "").len() > 30);
         assert!(key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "s(").len() == 1);
-        assert!(key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "i(").is_empty());
+        assert!(
+            key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "i(")
+                .iter()
+                .all(|entry| entry.keys != "i(")
+        );
         assert_eq!(
             key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "i")
                 .iter()
@@ -2550,8 +2683,8 @@ mod tests {
                         );
                     }
                     assert!(
-                        a.keys.chars().count() <= 2 || is_named(a.keys),
-                        "{style:?}: {} is longer than two keys",
+                        is_named(a.keys) || !continues_prefix(style, mode, a.keys),
+                        "{style:?}: {} is a key and the start of a longer sequence in {mode:?}",
                         a.keys
                     );
                 }
@@ -2589,7 +2722,7 @@ mod tests {
         assert!(visual_hints.iter().any(|h| h == "[d]elete (cut)"));
         assert_eq!(visual_hints.last().map(String::as_str), Some("Esc normal"));
         let pending_s = ModalState {
-            pending: Some('s'),
+            pending: Some("s".into()),
             ..state(EditMode::Visual { line: false })
         };
         assert_eq!(
@@ -2599,6 +2732,7 @@ mod tests {
                 "( inside ( )",
                 "{ inside { }",
                 "[ inside [ ]",
+                "[i]nside",
                 "Esc cancel"
             ]
         );
@@ -2609,7 +2743,7 @@ mod tests {
         );
         assert_eq!(insert_hints.last().map(String::as_str), Some("Esc normal"));
         let g = ModalState {
-            pending: Some('g'),
+            pending: Some("g".into()),
             ..state(EditMode::Normal)
         };
         assert_eq!(
@@ -2627,7 +2761,7 @@ mod tests {
             ]
         );
         let close = ModalState {
-            pending: Some(']'),
+            pending: Some("]".into()),
             ..state(EditMode::Normal)
         };
         assert_eq!(
@@ -2640,7 +2774,7 @@ mod tests {
             ]
         );
         let open = ModalState {
-            pending: Some('['),
+            pending: Some("[".into()),
             ..state(EditMode::Normal)
         };
         assert_eq!(
@@ -2654,7 +2788,7 @@ mod tests {
         );
         let mnemonic_close = ModalState {
             style: crate::modal::KeyStyle::Mnemonic,
-            pending: Some(']'),
+            pending: Some("]".into()),
             ..state(EditMode::Normal)
         };
         assert_eq!(
@@ -2678,8 +2812,8 @@ mod tests {
         for c in text.chars() {
             last = route(&ch(c), &state, &keys);
             match &last {
-                Some(SemanticAction::Modal(ModalAction::Pend(first))) => {
-                    state.pending = Some(*first);
+                Some(SemanticAction::Modal(ModalAction::Pend(prefix))) => {
+                    state.pending = Some(prefix.clone());
                 }
                 Some(SemanticAction::Modal(ModalAction::Count(digit))) => {
                     state.count = Some(state.count.unwrap_or(0) * 10 + u32::from(*digit));
@@ -2844,7 +2978,7 @@ mod tests {
             ]
         );
         let after = |first: char| ModalState {
-            pending: Some(first),
+            pending: Some(first.to_string()),
             ..mnemonic(EditMode::Normal)
         };
         assert_eq!(
@@ -2863,6 +2997,7 @@ mod tests {
                 "select [p]arens",
                 "{ select inside { }",
                 "[ select inside [ ]",
+                "[i]nside",
                 "Esc cancel"
             ]
         );
@@ -2963,7 +3098,7 @@ mod tests {
         for first in ['c', 'x', 's', 'd', 'f', 'm', 'g'] {
             assert_eq!(
                 type_keys(&n, &first.to_string()),
-                Some(SemanticAction::Modal(ModalAction::Pend(first))),
+                Some(SemanticAction::Modal(ModalAction::Pend(first.to_string()))),
                 "{first}"
             );
         }
@@ -3019,7 +3154,7 @@ mod tests {
         // `i` is Insert immediately, not a prefix, so i( is not an inside-object.
         assert_eq!(route(&ch('i'), &visual, &keys), run(CommandId::ModeInsert));
         let pending_i = ModalState {
-            pending: Some('i'),
+            pending: Some("i".into()),
             ..visual.clone()
         };
         assert_ne!(
@@ -3034,6 +3169,99 @@ mod tests {
         assert_eq!(
             type_keys(&state(EditMode::Normal), "i"),
             run(CommandId::ModeInsert)
+        );
+    }
+
+    #[test]
+    fn si_prefix_selects_inside_and_keeps_the_shorter_s_keys() {
+        let visual = state(EditMode::Visual { line: false });
+        let mnemonic_n = mnemonic(EditMode::Normal);
+        let mnemonic_v = mnemonic(EditMode::Visual { line: false });
+        for state in [&visual, &mnemonic_v, &mnemonic_n] {
+            assert_eq!(type_keys(state, "si\""), run(CommandId::SelectInsideQuotes));
+            assert_eq!(type_keys(state, "si'"), run(CommandId::SelectInsideQuotes));
+            assert_eq!(type_keys(state, "si("), run(CommandId::SelectInsideParens));
+            assert_eq!(type_keys(state, "si)"), run(CommandId::SelectInsideParens));
+            assert_eq!(type_keys(state, "si{"), run(CommandId::SelectInsideBraces));
+            assert_eq!(type_keys(state, "si}"), run(CommandId::SelectInsideBraces));
+            assert_eq!(
+                type_keys(state, "si["),
+                run(CommandId::SelectInsideBrackets)
+            );
+            assert_eq!(
+                type_keys(state, "si]"),
+                run(CommandId::SelectInsideBrackets)
+            );
+        }
+        // Existing shorter keys stay.
+        assert_eq!(type_keys(&visual, "s("), run(CommandId::SelectInsideParens));
+        assert_eq!(
+            type_keys(&visual, "s\""),
+            run(CommandId::SelectInsideQuotes)
+        );
+        assert_eq!(
+            type_keys(&mnemonic_n, "sq"),
+            run(CommandId::SelectInsideQuotes)
+        );
+        assert_eq!(
+            type_keys(&mnemonic_n, "sp"),
+            run(CommandId::SelectInsideParens)
+        );
+        assert_eq!(type_keys(&mnemonic_n, "ss"), run(CommandId::ModeVisualLine));
+        assert_eq!(type_keys(&mnemonic_n, "sw"), run(CommandId::SelectWord));
+        // Vim Normal has no `s` prefix, so `s` / `si(` stay unbound.
+        assert!(matches!(
+            type_keys(&state(EditMode::Normal), "s"),
+            Some(SemanticAction::Modal(ModalAction::Unbound(_)))
+        ));
+        assert!(matches!(
+            type_keys(&state(EditMode::Normal), "si("),
+            Some(SemanticAction::Modal(ModalAction::Unbound(_)))
+        ));
+        // After `s`, `i` waits for the bracket; it does not run Insert.
+        assert_eq!(
+            type_keys(&visual, "si"),
+            Some(SemanticAction::Modal(ModalAction::Pend("si".into())))
+        );
+        assert_eq!(
+            type_keys(&mnemonic_n, "si"),
+            Some(SemanticAction::Modal(ModalAction::Pend("si".into())))
+        );
+        let keys_map = KeyMap::defaults();
+        let words = |state: &ModalState| -> Vec<String> {
+            hints(state, &keys_map).iter().map(Hint::plain).collect()
+        };
+        let pending_si = ModalState {
+            pending: Some("si".into()),
+            ..visual
+        };
+        assert_eq!(
+            words(&pending_si),
+            [
+                "\" inside quotes",
+                "( inside ( )",
+                "{ inside { }",
+                "[ inside [ ]",
+                "Esc cancel"
+            ]
+        );
+        let mnemonic_si = ModalState {
+            pending: Some("si".into()),
+            ..mnemonic_n
+        };
+        assert_eq!(
+            words(&mnemonic_si),
+            [
+                "\" select inside quotes",
+                "( select inside ( )",
+                "{ select inside { }",
+                "[ select inside [ ]",
+                "Esc cancel"
+            ]
+        );
+        assert_eq!(
+            key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "si(").len(),
+            1
         );
     }
 
@@ -3059,7 +3287,7 @@ mod tests {
             Some(SemanticAction::Modal(ModalAction::GotoLine(12)))
         );
         let pending = ModalState {
-            pending: Some('c'),
+            pending: Some("c".into()),
             ..n.clone()
         };
         assert_eq!(
@@ -3177,7 +3405,7 @@ mod tests {
             Some(SemanticAction::Modal(ModalAction::Escape))
         );
         let pending = ModalState {
-            pending: Some('g'),
+            pending: Some("g".into()),
             ..state(EditMode::Normal)
         };
         assert_eq!(
@@ -3191,7 +3419,7 @@ mod tests {
         let keys = KeyMap::defaults();
         let seq = |first: char, second: char| {
             let pending = ModalState {
-                pending: Some(first),
+                pending: Some(first.to_string()),
                 ..state(EditMode::Normal)
             };
             route(&ch(second), &pending, &keys)
@@ -3218,7 +3446,7 @@ mod tests {
         let keys = KeyMap::defaults();
         let pending = |first: char| ModalState {
             style: KeyStyle::Mnemonic,
-            pending: Some(first),
+            pending: Some(first.to_string()),
             ..state(EditMode::Normal)
         };
         let seq = |first: char, second: char| route(&ch(second), &pending(first), &keys);
@@ -3238,7 +3466,7 @@ mod tests {
         );
         let visual = ModalState {
             style: KeyStyle::Vim,
-            pending: Some(']'),
+            pending: Some("]".into()),
             ..state(EditMode::Visual { line: false })
         };
         assert_eq!(route(&ch(']'), &visual, &keys), run(CommandId::NextBracket));
@@ -3316,7 +3544,7 @@ mod tests {
         assert_eq!(normal(&ch('p')), run(CommandId::PasteAfter));
         assert_eq!(normal(&ch('P')), run(CommandId::PasteBefore));
         let y = ModalState {
-            pending: Some('y'),
+            pending: Some("y".into()),
             ..state(EditMode::Normal)
         };
         assert_eq!(
