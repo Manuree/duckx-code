@@ -366,17 +366,23 @@ Printable keys never type in Normal. A key with no command shows *No command on 
 | `{` `}` | Previous / next blank line (`Ctrl + Up` / `Ctrl + Down`) |
 | `Enter` `Backspace` | Down / Left |
 | `x` | Delete the character (`Delete`) |
-| `dd` | Delete the line (`delete-line`; the clipboard is untouched) |
-| `yy` | Copy the line (`copy` with nothing selected) |
-| `p` | Paste at the cursor |
+| `dd` | Cut the line (`cut-line`): it goes to the clipboard as a whole line |
+| `yy` | Copy the line (`copy-line`) |
+| `p` `P` | Paste below / above. A whole line from `yy`, `dd`, or Visual Line goes on a new line; other text goes in at the cursor (`paste-after`, `paste-before`) |
+| `Ctrl + D` `Ctrl + U` | Half a page down / up (`half-page-down`, `half-page-up`). Normal only |
 | `u` `U` | Undo / redo |
 | `>>` `<<` | Indent / outdent the line |
 | `gc` | Comment or uncomment the line |
 | `%` | Jump to the matching bracket |
 | `/` `n` `N` | Find, next match, previous match. Leaving Find puts the cursor at the start of the match and stays in Normal |
 | `gd` `K` | Go to definition, hover |
+| `gr` `ga` | References, code actions |
+| `gR` `=` | Rename the symbol (`Shift + F2`), format the file (`format`) |
+| `gt` `gT` | Next / previous tab |
+| `]e` `[e` | Move the line down / up |
+| `Tab` | Jump forward (`jump-forward`) |
 | `]d` `[d` | Next / previous diagnostic |
-| `:` | Open the Command Bar (`F1`) |
+| `:` `Shift + Space` | Open the Command Bar (`F1`) |
 | `?` | The key list |
 | `Esc` | Close popups. With nothing to close, a second quick `Esc` opens the Command Bar (Double Esc) |
 
@@ -393,7 +399,7 @@ Printable keys never type in Normal. A key with no command shows *No command on 
 | `y` | Copy it; the cursor goes to its start |
 | `c` | Delete it and Insert |
 | `p` | Paste over it |
-| `>` `<` | Indent / outdent every selected line (stays in Visual) |
+| `>` `<` `Tab` `Shift + Tab` | Indent / outdent every selected line (stays in Visual) |
 | `gc` | Comment or uncomment the lines |
 | `o` | Move the cursor to the other end |
 | `i"` `i'` `i(` `i{` `i[` (or the closing bracket) | Select inside quotes or brackets |
@@ -401,13 +407,28 @@ Printable keys never type in Normal. A key with no command shows *No command on 
 | `v` `V` | Switch between Visual and Visual Line, or leave |
 | `Esc` | Back to Normal, dropping the selection |
 
-In Visual Line, `y` and `d` take the line break after the last line, so `p` brings back whole lines.
+In Visual Line, `y` and `d` take the line break after the last line, so `p` / `P` in Normal bring back whole lines. Counts work: `3yy` copies three lines.
+
+### Keys that differ from vim
+
+These keep their duckx-code meaning in every mode; the `?` list shows them too (type `ctrl`).
+
+| Key | Here | In vim |
+| :--- | :--- | :--- |
+| `Ctrl + V` | Paste | Block selection |
+| `Ctrl + C` | Copy; it never quits | Cancel |
+| `Ctrl + W` | PANE mode: pick a window | Window prefix |
+| `Ctrl + R` | Not used (redo is `U` or `Ctrl + Y`) | Redo |
+| `Ctrl + D` `Ctrl + U` | Half page in Normal; in Insert and Visual they keep their usual meaning | Half page |
+| `Ctrl + H` | A terminal that sends Backspace as `^H` gets the same key: left in Normal | Backspace |
 
 ### The key list
 
 `?` in Normal or Visual (or the `keys` command) opens a list of every key of the mode with what it does and the command or key it mirrors. Type to filter, `Up` / `Down` to move, `Enter` to run the highlighted key, `Esc` to close.
 
 ### Esc and Double Esc
+
+`Ctrl + [` is `Esc` while Modeless is off. Some terminals send `Esc` followed at once by a letter as `Alt` + that letter: with Modeless off, an `Alt` + letter that no shortcut uses is read as `Esc`, then that letter (so `Esc` `j` in Insert leaves Insert and moves down, and no key is lost). With Modeless on, nothing changes and `Alt` shortcuts work as before.
 
 An `Esc` that leaves Insert or Visual, or cancels a count or sequence, is not the first press of a double `Esc`. In Normal, `Esc` works as in Modeless: it closes popups, and two quick presses with nothing to close open the Command Bar when **Double Esc opens Command Bar** is On.
 
@@ -429,12 +450,17 @@ An `Esc` that leaves Insert or Visual, or cancels a count or sequence, is not th
 | `swap-selection-ends` | Move the cursor to the other end of the selection | `o` in Visual |
 | `change-selection` | Delete the selection and Insert | `c` in Visual |
 | `keys` | Open the key list | `?` |
+| `copy-line` | Copy the line to the clipboard | `yy` |
+| `cut-line` | Cut the line to the clipboard (`3dd`: three lines) | `dd` |
+| `paste-after` | Paste below (a whole line) or at the cursor | `p` |
+| `paste-before` | Paste above (a whole line) or at the cursor | `P` |
+| `half-page-down` | Half a page down | `Ctrl + D` |
+| `half-page-up` | Half a page up | `Ctrl + U` |
 
-The mode commands are listed in the Command Bar only while Modeless is Off. Every other mode key runs a command that is already in the [Command List](#64-command-list) (`dd` is `delete-line`, `gd` is `goto-definition`, and so on) or does what an existing key does.
+The mode commands are listed in the Command Bar only while Modeless is Off. Every other mode key runs a command that is already in the [Command List](#64-command-list) (`gd` is `goto-definition`, `gr` is `goto-references`, and so on) or does what an existing key does.
 
 ### Known limits
 
-* `p` pastes at the cursor, not on a new line below.
 * `3dd` is three undo steps.
 * A paste from a terminal that sends it as typed keys (no bracketed paste) can reach Normal as keys. Press `i` before pasting, or use `Ctrl + V`.
 
@@ -530,7 +556,9 @@ If no OS clipboard is available (e.g. a headless session), `copy`, `cut`, and `p
 #### File
 | Command | Argument | Description | Shortcut |
 | :--- | :--- | :--- | :--- |
-| `save` | optional path | Save the focused editor. With no path yet, the bar stays on `save ` until you type one. Shows `Saved` and the full path. | `Ctrl + S` |
+| `save` | optional path | Save the focused editor. With no path yet, the bar stays on `save ` until you type one. Shows `Saved` and the full path. Alias: `w`. | `Ctrl + S` |
+| `save-close` | — | Save, then close the tab (or quit when it is the last one). An untitled buffer asks for a path first. Alias: `wq`. | — |
+| `close-or-quit` | — | Close the tab, or quit when it is the only tab of the only window. Asks before dropping unsaved changes. Alias: `q`. | — |
 | `reload` | optional encoding | Read the focused file from disk again. With an encoding, those bytes are decoded that way. A dirty file asks before the editor text is replaced. | — |
 | `encoding` | optional name | Show the encoding, or set the one the next save writes. | — |
 

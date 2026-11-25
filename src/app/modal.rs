@@ -339,6 +339,19 @@ impl App {
         }
         match action {
             ModalAction::Run(id) => self.run_modal_command(id),
+            ModalAction::Repeat(count, action)
+                if matches!(
+                    *action,
+                    SemanticAction::Modal(ModalAction::Run(
+                        CommandId::CopyLine | CommandId::CutLine
+                    ))
+                ) =>
+            {
+                let cut = *action == SemanticAction::Modal(ModalAction::Run(CommandId::CutLine));
+                if let Err(error) = self.line_clip(cut, count.min(crate::modal::MAX_COUNT)) {
+                    self.message = Some(error);
+                }
+            }
             ModalAction::Repeat(count, action) => {
                 for _ in 0..count.min(crate::modal::MAX_COUNT) {
                     self.modal_step((*action).clone());
@@ -394,6 +407,125 @@ impl App {
                 }
             }
             ModalAction::KeyList(action) => self.handle_key_list(action),
+            ModalAction::EscapeThen(letter) => self.escape_then(letter),
+        }
+    }
+
+    /// `Esc` and a letter that came as one `Alt+letter`: leave the mode the way `Esc`
+    /// does (popups and a started sequence included), then press the letter in Normal.
+    fn escape_then(&mut self, letter: char) {
+        self.modal_state.pending = None;
+        self.modal_state.count = None;
+        self.clear_snippet();
+        self.dismiss_lsp_popups();
+        self.enter_normal();
+        let modifiers = if letter.is_uppercase() {
+            crossterm::event::KeyModifiers::SHIFT
+        } else {
+            crossterm::event::KeyModifiers::NONE
+        };
+        let event = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(letter),
+            modifiers,
+        ));
+        if let Some(action) = crate::modal::route(&event, &self.modal_state, self.keys()) {
+            self.modal_step(action);
+        }
+    }
+
+    /// `yy` and `dd` (and `3yy`, `3dd`): copy or cut `count` whole lines from the cursor line.
+    fn line_clip(&mut self, cut: bool, count: u32) -> Result<(), String> {
+        let rope = self.buffer().rope();
+        let first = rope.char_to_line(self.buffer().selection().head);
+        let mut last = (first + count.max(1) as usize - 1).min(self.buffer().len_lines() - 1);
+        // The empty "line" after a final line break is not a line to take.
+        if last > first && self.buffer().line_bounds(last).0 == rope.len_chars() {
+            last -= 1;
+        }
+        self.clip_lines(first, last, cut)
+    }
+
+    /// Puts lines `first..=last` on the clipboard with a line break after each, and
+    /// deletes them when `cut`.
+    fn clip_lines(&mut self, first: usize, last: usize, cut: bool) -> Result<(), String> {
+        let (start, _, _) = self.buffer().line_bounds(first);
+        let (_, content_end, next) = self.buffer().line_bounds(last);
+        let mut text = self.buffer().rope().slice(start..next).to_string();
+        if !text.ends_with('\n') {
+            text.push_str(self.buffer().line_ending().as_str());
+        }
+        let lines = last - first + 1;
+        self.clipboard.set_text(text)?;
+        if cut {
+            self.buffer_mut().select_range(start, content_end);
+            self.edit(|buffer| buffer.delete_lines());
+            // After the last lines go, the cursor sits on the new last line, not on the
+            // empty one past the final break.
+            let len = self.buffer().rope().len_chars();
+            let head = self.buffer().selection().head;
+            if head == len && len > 0 && self.buffer().rope().char(len - 1) == '\n' {
+                let line = self.buffer().len_lines() - 2;
+                let (line_start, _, _) = self.buffer().line_bounds(line);
+                self.buffer_mut().select_range(line_start, line_start);
+            }
+        }
+        let verb = if cut { "Cut" } else { "Copied" };
+        self.message = Some(format!(
+            "{verb} {lines} {}",
+            if lines == 1 { "line" } else { "lines" }
+        ));
+        Ok(())
+    }
+
+    /// `p` and `P` in Normal: whole lines on the clipboard go on a new line below or
+    /// above; other text goes in at the cursor.
+    fn paste_lines(&mut self, after: bool) -> Result<(), String> {
+        let text = self.clipboard.get_text()?;
+        if text.is_empty() {
+            return Err("Clipboard is empty".to_string());
+        }
+        self.dismiss_lsp_popups();
+        if !text.ends_with('\n') && !text.ends_with('\r') {
+            self.edit(|buffer| buffer.insert_text(&text));
+            return Ok(());
+        }
+        let rope = self.buffer().rope();
+        let len = rope.len_chars();
+        let line = rope.char_to_line(self.buffer().selection().head);
+        let (start, _, next) = self.buffer().line_bounds(line);
+        let unterminated = len > 0 && rope.char(len - 1) != '\n';
+        let ending = self.buffer().line_ending().as_str();
+        let (at, payload, cursor) = if after && next == len && unterminated {
+            // The last line has no break of its own: add one before the new line.
+            let body = text.trim_end_matches(['\r', '\n']);
+            (len, format!("{ending}{body}"), len + ending.chars().count())
+        } else if after {
+            (next, text, next)
+        } else {
+            (start, text, start)
+        };
+        self.buffer_mut().select_range(at, at);
+        self.edit(|buffer| buffer.insert_text(&payload));
+        self.buffer_mut().select_range(cursor, cursor);
+        Ok(())
+    }
+
+    /// `Ctrl+D` and `Ctrl+U` in Normal: half a screen, scrolling with the cursor.
+    fn half_page(&mut self, down: bool) {
+        let lines = (self.view().height / 2).max(1);
+        self.dismiss_lsp_popups();
+        self.clear_snippet();
+        let last_line = self.buffer().len_lines() - 1;
+        if down {
+            self.buffer_mut()
+                .move_cursor(Movement::PageDown(lines), false);
+            let scroll = (self.view().scroll_y + lines).min(last_line);
+            self.view_mut().scroll_y = scroll;
+        } else {
+            self.buffer_mut()
+                .move_cursor(Movement::PageUp(lines), false);
+            let scroll = self.view().scroll_y.saturating_sub(lines);
+            self.view_mut().scroll_y = scroll;
         }
     }
 
@@ -495,6 +627,32 @@ impl App {
                 Ok(())
             }
             CommandId::SwapSelectionEnds => self.swap_selection_ends(),
+            CommandId::CopyLine => self.line_clip(false, 1),
+            CommandId::CutLine => self.line_clip(true, 1),
+            CommandId::PasteAfter => self.paste_lines(true),
+            CommandId::PasteBefore => self.paste_lines(false),
+            CommandId::HalfPageDown => {
+                self.half_page(true);
+                Ok(())
+            }
+            CommandId::HalfPageUp => {
+                self.half_page(false);
+                Ok(())
+            }
+            CommandId::Copy | CommandId::Cut if mode == (EditMode::Visual { line: true }) => {
+                // Whole lines, with a break after the last, so `p` brings back lines.
+                let selection = self.buffer().selection();
+                let rope = self.buffer().rope();
+                let first = rope.char_to_line(selection.from());
+                let last = rope.char_to_line(selection.to());
+                let cut = id == CommandId::Cut;
+                let result = self.clip_lines(first, last, cut);
+                if cut {
+                    self.modal_state.line = None;
+                }
+                self.leave_visual(!cut);
+                result
+            }
             CommandId::FindNext if mode == EditMode::Normal => {
                 // The cursor sits on the current match; look past it, as `n` does.
                 let head = self.buffer().selection().head;
@@ -862,7 +1020,7 @@ mod tests {
         assert_eq!(app.buffer().selected_text(), "two\nthree");
         keys(&mut app, "d");
         assert_eq!(text(&app), "one\nfour\n");
-        keys(&mut app, "p");
+        keys(&mut app, "P");
         assert_eq!(
             text(&app),
             "one\ntwo\nthree\nfour\n",
@@ -1015,5 +1173,294 @@ mod tests {
         assert_eq!(mode(&app), EditMode::Insert);
         keys(&mut app, "hi");
         assert_eq!(text(&app), "hi");
+    }
+
+    // --- Shortcut fixes for Modeless off ---
+
+    fn lines(count: usize) -> String {
+        (1..=count).map(|n| format!("line{n}\n")).collect()
+    }
+
+    #[test]
+    fn shift_space_opens_the_command_bar_in_normal_and_visual() {
+        let mut app = modal_app("abc\n");
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::SHIFT);
+        assert!(app.command_bar.is_some());
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.command_bar.is_none());
+        keys(&mut app, "v");
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::SHIFT);
+        assert!(app.command_bar.is_some());
+    }
+
+    #[test]
+    fn alt_letter_is_esc_then_that_letter_without_losing_either() {
+        let mut app = modal_app("one\ntwo\nthree\n");
+        keys(&mut app, "i");
+        assert_eq!(mode(&app), EditMode::Insert);
+        // Esc+j sent as one Alt+j: back to Normal, then j moves down.
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::ALT);
+        assert_eq!(mode(&app), EditMode::Normal);
+        assert_eq!(app.buffer().cursor_line_col(), (1, 0));
+        assert_eq!(text(&app), "one\ntwo\nthree\n", "nothing was typed");
+        // The letter can start a new command: Esc+i goes straight back to Insert.
+        keys(&mut app, "i");
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::ALT);
+        assert_eq!(mode(&app), EditMode::Normal);
+        assert_eq!(text(&app), "one\nwo\nthree\n", "Esc+x deleted a character");
+        // From Normal, too, and for capitals.
+        press(
+            &mut app,
+            KeyCode::Char('G'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        );
+        assert_eq!(app.buffer().cursor_line_col().0, 3);
+        // From Visual: leaves Visual, then the letter runs.
+        keys(&mut app, "ggv");
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::ALT);
+        assert_eq!(mode(&app), EditMode::Normal);
+        assert!(app.buffer().selected_text().is_empty());
+        assert_eq!(app.buffer().cursor_line_col().0, 1);
+    }
+
+    #[test]
+    fn alt_letter_clears_a_pending_count_and_sequence() {
+        let mut app = modal_app(&lines(6));
+        keys(&mut app, "3g");
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::ALT);
+        assert_eq!(
+            app.buffer().cursor_line_col().0,
+            1,
+            "the count and g were dropped"
+        );
+    }
+
+    #[test]
+    fn ctrl_left_bracket_acts_as_esc() {
+        let mut app = modal_app("abc\n");
+        keys(&mut app, "i");
+        press(&mut app, KeyCode::Char('['), KeyModifiers::CONTROL);
+        assert_eq!(mode(&app), EditMode::Normal);
+        keys(&mut app, "v");
+        press(&mut app, KeyCode::Char('['), KeyModifiers::CONTROL);
+        assert_eq!(mode(&app), EditMode::Normal);
+        assert!(app.buffer().selected_text().is_empty());
+    }
+
+    #[test]
+    fn ctrl_left_bracket_and_alt_letter_change_nothing_with_modeless_on() {
+        let mut app = App::new(Buffer::from_text("abc"), None);
+        assert!(app.modal().is_none());
+        press(&mut app, KeyCode::Char('['), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Char('j'), KeyModifiers::ALT);
+        assert_eq!(text(&app), "abc");
+        assert!(app.modal().is_none());
+    }
+
+    #[test]
+    fn normal_g_keys_and_others_run_their_commands() {
+        let mut app = modal_app("one\ntwo\nthree\n");
+        // ]e / [e move the line.
+        keys(&mut app, "]e");
+        assert_eq!(text(&app), "two\none\nthree\n");
+        keys(&mut app, "[e");
+        assert_eq!(text(&app), "one\ntwo\nthree\n");
+        // gt / gT walk the tabs.
+        app.push_tab(app.active_editor().id);
+        let tabs = app.active_editor().tabs.len();
+        assert_eq!(tabs, 2);
+        let before = app.active_editor().active;
+        keys(&mut app, "gt");
+        assert_eq!(app.active_editor().active, (before + 1) % tabs);
+        keys(&mut app, "gT");
+        assert_eq!(app.active_editor().active, before);
+        // gR opens the rename prompt, as Shift+F2 does.
+        let mut app = modal_app("fn main() {}\n");
+        keys(&mut app, "gR");
+        assert_eq!(app.command_bar.as_ref().unwrap().input, "rename-symbol ");
+    }
+
+    #[test]
+    fn tab_jumps_forward_and_gr_ga_equals_do_not_fall_through() {
+        let mut app = modal_app("one\ntwo\n");
+        for key in ["gr", "ga", "="] {
+            keys(&mut app, key);
+            assert_eq!(text(&app), "one\ntwo\n", "{key} must not edit");
+            assert_eq!(mode(&app), EditMode::Normal, "{key}");
+        }
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(text(&app), "one\ntwo\n", "Tab must not insert a tab");
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_move_half_a_page() {
+        let mut app = modal_app(&lines(100));
+        app.view_mut().height = 20;
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(app.buffer().cursor_line_col().0, 10);
+        assert_eq!(app.view().scroll_y, 10);
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(app.buffer().cursor_line_col().0, 20);
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(app.buffer().cursor_line_col().0, 10);
+        assert_eq!(app.view().scroll_y, 10);
+        assert!(app.buffer().selected_text().is_empty());
+        // Ctrl+U at the top stays at the top.
+        keys(&mut app, "gg");
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(app.buffer().cursor_line_col().0, 0);
+        assert_eq!(app.view().scroll_y, 0);
+    }
+
+    #[test]
+    fn ctrl_d_in_insert_still_deselects_and_modeless_is_untouched() {
+        let mut app = modal_app(&lines(50));
+        app.view_mut().height = 20;
+        keys(&mut app, "i");
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(app.buffer().cursor_line_col().0, 0);
+        let mut plain = App::new(Buffer::from_text(&lines(50)), None);
+        plain.view_mut().height = 20;
+        press(&mut plain, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(plain.buffer().cursor_line_col().0, 0);
+        assert!(plain.run_command(CommandId::HalfPageDown, None).is_err());
+    }
+
+    #[test]
+    fn half_page_commands_are_commands_with_the_vim_keys_as_shortcuts() {
+        let down = crate::command::spec(CommandId::HalfPageDown);
+        assert_eq!(down.name, "half-page-down");
+        assert_eq!(down.shortcut, "Ctrl+D");
+        let mut app = modal_app(&lines(100));
+        app.view_mut().height = 20;
+        app.run_command(CommandId::HalfPageDown, None).unwrap();
+        assert_eq!(app.buffer().cursor_line_col().0, 10);
+        app.run_command(CommandId::HalfPageUp, None).unwrap();
+        assert_eq!(app.buffer().cursor_line_col().0, 0);
+    }
+
+    #[test]
+    fn yy_then_p_puts_the_line_below_and_capital_p_above() {
+        let mut app = modal_app("one\ntwo\nthree\n");
+        keys(&mut app, "yyp");
+        assert_eq!(text(&app), "one\none\ntwo\nthree\n");
+        assert_eq!(app.buffer().cursor_line_col(), (1, 0), "on the new line");
+        keys(&mut app, "jP");
+        assert_eq!(text(&app), "one\none\none\ntwo\nthree\n");
+        assert_eq!(app.buffer().cursor_line_col(), (2, 0));
+    }
+
+    #[test]
+    fn dd_cuts_the_line_and_p_moves_it() {
+        let mut app = modal_app("one\ntwo\nthree\n");
+        keys(&mut app, "ddp");
+        assert_eq!(text(&app), "two\none\nthree\n");
+        keys(&mut app, "jddP");
+        assert_eq!(text(&app), "two\nthree\none\n");
+        // dd also copies to the clipboard.
+        assert_eq!(app.clipboard.get_text().unwrap(), "three\n");
+    }
+
+    #[test]
+    fn counted_yy_and_dd_take_that_many_lines() {
+        let mut app = modal_app("a\nb\nc\nd\n");
+        keys(&mut app, "2yy");
+        assert_eq!(app.clipboard.get_text().unwrap(), "a\nb\n");
+        keys(&mut app, "Gp");
+        // G lands on the last real line, so the lines go after it.
+        assert!(text(&app).ends_with("d\na\nb\n"), "{:?}", text(&app));
+        let mut app = modal_app("a\nb\nc\nd\n");
+        keys(&mut app, "2dd");
+        assert_eq!(text(&app), "c\nd\n");
+        assert_eq!(app.clipboard.get_text().unwrap(), "a\nb\n");
+        keys(&mut app, "p");
+        assert_eq!(text(&app), "c\na\nb\nd\n");
+    }
+
+    #[test]
+    fn linewise_paste_works_on_the_last_line_without_a_final_break() {
+        let mut app = modal_app("one\ntwo");
+        keys(&mut app, "jyyp");
+        assert_eq!(text(&app), "one\ntwo\ntwo");
+        assert_eq!(app.buffer().cursor_line_col(), (2, 0));
+        keys(&mut app, "P");
+        assert_eq!(text(&app), "one\ntwo\ntwo\ntwo");
+        // Cutting that unterminated last line gives it back with a break.
+        keys(&mut app, "Gdd");
+        assert_eq!(app.clipboard.get_text().unwrap(), "two\n");
+    }
+
+    #[test]
+    fn charwise_clipboard_still_pastes_inline_with_p() {
+        let mut app = modal_app("hello world\n");
+        keys(&mut app, "vwy");
+        assert_eq!(app.clipboard.get_text().unwrap(), "hello");
+        keys(&mut app, "$p");
+        assert_eq!(text(&app), "hello worldhello\n");
+    }
+
+    #[test]
+    fn visual_line_copy_and_cut_are_linewise_too() {
+        let mut app = modal_app("one\ntwo\nthree\n");
+        keys(&mut app, "Vjy");
+        assert_eq!(app.clipboard.get_text().unwrap(), "one\ntwo\n");
+        assert_eq!(mode(&app), EditMode::Normal);
+        keys(&mut app, "jjp");
+        assert_eq!(text(&app), "one\ntwo\nthree\none\ntwo\n");
+    }
+
+    #[test]
+    fn empty_buffer_linewise_paste_works() {
+        let mut app = modal_app("x\n");
+        keys(&mut app, "ddp");
+        assert_eq!(text(&app), "x\n");
+    }
+
+    #[test]
+    fn line_commands_run_from_the_command_bar_too() {
+        let mut app = modal_app("one\ntwo\n");
+        app.run_command(CommandId::CopyLine, None).unwrap();
+        app.run_command(CommandId::PasteAfter, None).unwrap();
+        assert_eq!(text(&app), "one\none\ntwo\n");
+        app.run_command(CommandId::PasteBefore, None).unwrap();
+        assert_eq!(text(&app), "one\none\none\ntwo\n");
+        app.run_command(CommandId::CutLine, None).unwrap();
+        assert_eq!(text(&app), "one\none\ntwo\n");
+        let mut plain = App::new(Buffer::from_text("a"), None);
+        for id in [
+            CommandId::CopyLine,
+            CommandId::CutLine,
+            CommandId::PasteAfter,
+            CommandId::PasteBefore,
+        ] {
+            assert!(plain.run_command(id, None).is_err(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn tab_and_shift_tab_indent_and_outdent_the_selection_in_visual() {
+        let mut app = modal_app("one\ntwo\nthree\n");
+        keys(&mut app, "Vj");
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(text(&app), "    one\n    two\nthree\n");
+        assert_eq!(
+            mode(&app),
+            EditMode::Visual { line: true },
+            "the selection stays"
+        );
+        press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(text(&app), "one\ntwo\nthree\n");
+        // Character-wise Visual indents the lines it touches as well.
+        esc(&mut app);
+        keys(&mut app, "ggvl");
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(text(&app), "    one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn tab_in_normal_does_not_indent() {
+        let mut app = modal_app("one\n");
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(text(&app), "one\n");
     }
 }

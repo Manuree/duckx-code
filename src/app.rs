@@ -5272,6 +5272,33 @@ impl App {
             CommandId::DoubleEsc => self.toggle_double_esc(),
             CommandId::Modeless => self.toggle_modeless(),
             CommandId::ModeHints => self.toggle_mode_hints(),
+            CommandId::SaveClose => {
+                let follow = if self.only_tab() {
+                    Pending::Quit
+                } else {
+                    Pending::Close
+                };
+                self.resume = None;
+                self.save_focused(None, Some(follow))?;
+            }
+            CommandId::CloseOrQuit => {
+                if self.only_tab() {
+                    self.request_quit();
+                } else {
+                    self.request_close()?;
+                }
+            }
+            CommandId::CopyLine
+            | CommandId::CutLine
+            | CommandId::PasteAfter
+            | CommandId::PasteBefore
+            | CommandId::HalfPageDown
+            | CommandId::HalfPageUp => {
+                if self.editor_prefs.modeless {
+                    return Err(format!("{} applies with Modeless off", spec(id).name));
+                }
+                self.run_modal_command(id);
+            }
             CommandId::ModeNormal
             | CommandId::ModeInsert
             | CommandId::ModeVisual
@@ -6535,6 +6562,11 @@ impl App {
                 .find(|tab| tab.dirty && !self.quit_skipped.contains(&tab.id))
                 .map(|tab| tab.id)
         })
+    }
+
+    /// True when one window holds one tab: closing it ends the session.
+    fn only_tab(&self) -> bool {
+        self.editors.len() == 1 && self.editors[0].tabs.len() == 1
     }
 
     fn request_close(&mut self) -> Result<(), String> {
@@ -9706,6 +9738,90 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a");
         assert!(!app.is_dirty());
         assert!(app.path().is_some_and(|open| open.ends_with("note.txt")));
+    }
+
+    #[test]
+    fn colon_w_saves_colon_q_quits_and_colon_wq_does_both() {
+        // `w`, `q` and `wq` are exact aliases, so nothing else gets picked.
+        for (typed, id) in [
+            ("w", CommandId::Save),
+            ("q", CommandId::CloseOrQuit),
+            ("wq", CommandId::SaveClose),
+        ] {
+            let ctx = crate::command::CommandContext::Editor;
+            assert_eq!(
+                crate::command::find_command(typed, ctx, false).map(|c| c.id),
+                Some(id),
+                "{typed}"
+            );
+            assert_eq!(
+                crate::command::suggestions(typed, None, ctx, false)
+                    .first()
+                    .map(|c| c.id),
+                Some(id),
+                "{typed} must be the top suggestion"
+            );
+        }
+
+        let (dir, _guard) = temp_dir();
+        let path = dir.join("main.rs");
+        std::fs::write(&path, "old\n").unwrap();
+        let mut app = App::new(Buffer::from_text("old\n"), Some(path.clone()));
+        app.handle(SemanticAction::InsertChar('!'));
+        run(&mut app, "w");
+        finish_jobs(&mut app);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "!old\n");
+        assert!(!app.should_quit);
+
+        app.handle(SemanticAction::InsertChar('?'));
+        run(&mut app, "wq");
+        finish_jobs(&mut app);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "!?old\n");
+        assert!(app.should_quit, "wq saves, then quits the last window");
+    }
+
+    #[test]
+    fn colon_q_quits_the_only_tab_and_closes_one_of_several() {
+        let mut app = App::new(Buffer::from_text("a"), None);
+        run(&mut app, "q");
+        assert!(app.should_quit);
+
+        let mut app = App::new(Buffer::from_text("a"), None);
+        app.push_tab(app.active_editor().id);
+        assert_eq!(app.active_editor().tabs.len(), 2);
+        run(&mut app, "q");
+        assert!(!app.should_quit);
+        assert_eq!(app.active_editor().tabs.len(), 1);
+
+        let mut app = App::new(Buffer::from_text("a"), None);
+        run(&mut app, "split-right");
+        run(&mut app, "q");
+        assert!(!app.should_quit, "another window is still open");
+        run(&mut app, "q");
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn colon_q_on_a_dirty_buffer_asks_first() {
+        let mut app = App::new(Buffer::from_text("a"), None);
+        app.handle(SemanticAction::InsertChar('!'));
+        run(&mut app, "q");
+        assert_eq!(app.focus(), Focus::Prompt);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn colon_wq_on_an_untitled_buffer_asks_for_a_path_then_quits() {
+        let (dir, _guard) = temp_dir();
+        let mut app = App::new(Buffer::new(), None);
+        app.handle(SemanticAction::InsertChar('a'));
+        run(&mut app, "wq");
+        assert_eq!(app.command_bar.as_ref().unwrap().input, "save ");
+        let path = dir.join("note.txt");
+        run(&mut app, &format!("save {}", path.display()));
+        finish_jobs(&mut app);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a");
+        assert!(app.should_quit);
     }
 
     #[test]

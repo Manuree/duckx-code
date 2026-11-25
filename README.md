@@ -46,10 +46,23 @@ duckx-code is modeless by default: every printable key types, and actions use sh
 
 **Turn it on:** open Settings (`setting` in the Command Bar) → Editor → **Modeless** → Off, or run the `modeless` command. **Start mode** picks Normal or Insert at startup. Turn **Modeless** back On for the usual editor; nothing else changes.
 
-* **Normal:** move with `h j k l`, `w b`, `0 $`, `gg G`; edit with `x`, `dd`, `yy`, `p`, `u` / `U`, `>>`, `gc`; counts like `5j` and `3dd`; `/` to find, `gd` for definition, `K` for hover, and `:` for the Command Bar, which runs every other action by name.
-* **Insert:** `i`, `a`, `o` and friends start typing; `Esc` goes back to Normal.
-* **Visual / Visual Line:** `v` or `V`, then `d` cut, `y` copy, `c` change, `>` / `<` indent, `gc` comment.
+* **Normal:** move with `h j k l`, `w b`, `0 $`, `gg G`; `Ctrl + D` / `Ctrl + U` move half a page. Edit with `x`, `u` / `U`, `>>`, `gc`, `=` (format), and whole lines with `yy` / `dd` then `p` (below) or `P` (above) on a new line; counts like `5j` and `3dd`. `/` finds, `gd` goes to the definition, `gr` lists references, `ga` shows code actions, `gR` renames, `K` shows hover, `]e` / `[e` move the line, `gt` / `gT` switch tabs, `Tab` jumps forward, and `:` or `Shift + Space` opens the Command Bar, which runs every other action by name.
+* **Insert:** `i`, `a`, `o` and friends start typing; `Esc` (or `Ctrl + [`) goes back to Normal. A terminal that sends `Esc` and the next letter together as `Alt` + letter is handled as `Esc`, then that letter, so no key is lost.
+* **Visual / Visual Line:** `v` or `V`, then `d` cut, `y` copy, `c` change, `>` / `<` or `Tab` / `Shift + Tab` indent and outdent, `gc` comment. `y` and `d` in Visual Line take whole lines, so `p` / `P` bring them back as lines.
 * **Always clear which mode you are in:** a colored badge (`NORMAL`, `INSERT`, `VISUAL`, `V-LINE`) in the status bar, a mode-colored cursor, a hint row above the status bar with the keys that work right now (Settings → Editor → **Mode hints**), and `?` for a searchable list of every key in the mode.
+
+**Command Bar aliases:** `:w` saves, `:q` closes the tab (or quits when it is the last one), and `:wq` saves and then does that. They match exactly, so `:q` never picks another command.
+
+**Keys that differ from vim** (they keep their duckx-code meaning in every mode):
+
+| Key | Here | In vim |
+| :--- | :--- | :--- |
+| `Ctrl + V` | Paste | Block selection |
+| `Ctrl + C` | Copy (it never quits) | Cancel |
+| `Ctrl + W` | PANE mode: pick a window | Window prefix |
+| `Ctrl + R` | Not used; redo is `U` or `Ctrl + Y` | Redo |
+| `Ctrl + D` / `Ctrl + U` | Half page down / up in Normal (in Insert they keep their usual meaning) | Same |
+| `Ctrl + H` | Many terminals send Backspace as `^H`; both mean left in Normal | Backspace |
 
 All keys and details: [DOCUMENTS.md → Modal editing](DOCUMENTS.md#modal-editing-modeless-off). Which shortcuts each terminal can send: [docs/TERMINAL-KEYS.md](docs/TERMINAL-KEYS.md).
 

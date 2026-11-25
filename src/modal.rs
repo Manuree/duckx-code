@@ -92,6 +92,7 @@ pub struct ModalKey {
 
 const NONE: KeyModifiers = KeyModifiers::NONE;
 const CTRL: KeyModifiers = KeyModifiers::CONTROL;
+const SHIFT: KeyModifiers = KeyModifiers::SHIFT;
 
 const fn key(
     keys: &'static str,
@@ -275,22 +276,36 @@ pub const KEYS: &[ModalKey] = &[
     key(
         "dd",
         Modes::Normal,
-        cmd(CommandId::DeleteLine),
-        "Delete the line",
-        "del line",
+        cmd(CommandId::CutLine),
+        "Cut the line (3dd: three lines)",
+        "cut line",
     ),
     key(
         "yy",
         Modes::Normal,
-        cmd(CommandId::Copy),
-        "Copy the line",
+        cmd(CommandId::CopyLine),
+        "Copy the line (3yy: three lines)",
         "copy line",
     ),
     key(
         "p",
-        Modes::Both,
+        Modes::Normal,
+        cmd(CommandId::PasteAfter),
+        "Paste: a copied line goes on a new line below",
+        "paste",
+    ),
+    key(
+        "P",
+        Modes::Normal,
+        cmd(CommandId::PasteBefore),
+        "Paste: a copied line goes on a new line above",
+        "",
+    ),
+    key(
+        "p",
+        Modes::Visual,
         cmd(CommandId::Paste),
-        "Paste (over the selection in Visual)",
+        "Paste over the selection",
         "paste",
     ),
     key("u", Modes::Normal, cmd(CommandId::Undo), "Undo", "undo"),
@@ -316,7 +331,49 @@ pub const KEYS: &[ModalKey] = &[
         "Comment or uncomment",
         "comment",
     ),
+    key(
+        "Ctrl+D",
+        Modes::Normal,
+        cmd(CommandId::HalfPageDown),
+        "Half a screen down",
+        "",
+    ),
+    key(
+        "Ctrl+U",
+        Modes::Normal,
+        cmd(CommandId::HalfPageUp),
+        "Half a screen up",
+        "",
+    ),
+    key(
+        "]e",
+        Modes::Normal,
+        cmd(CommandId::MoveLineDown),
+        "Move the line down (Alt+↓)",
+        "line down",
+    ),
+    key(
+        "[e",
+        Modes::Normal,
+        cmd(CommandId::MoveLineUp),
+        "Move the line up (Alt+↑)",
+        "line up",
+    ),
     // Editing the Visual selection.
+    key(
+        "Tab",
+        Modes::Visual,
+        cmd(CommandId::Indent),
+        "Indent the lines",
+        "indent",
+    ),
+    key(
+        "Shift+Tab",
+        Modes::Visual,
+        cmd(CommandId::Outdent),
+        "Outdent the lines",
+        "outdent",
+    ),
     key(
         "d",
         Modes::Visual,
@@ -473,6 +530,55 @@ pub const KEYS: &[ModalKey] = &[
         "",
     ),
     key(
+        "gr",
+        Modes::Normal,
+        cmd(CommandId::GotoReferences),
+        "Find references",
+        "references",
+    ),
+    key(
+        "ga",
+        Modes::Normal,
+        cmd(CommandId::CodeAction),
+        "Code actions",
+        "actions",
+    ),
+    key(
+        "gR",
+        Modes::Normal,
+        like(KeyCode::F(2), SHIFT),
+        "Rename the symbol (Shift+F2)",
+        "rename",
+    ),
+    key(
+        "gt",
+        Modes::Normal,
+        cmd(CommandId::TabNext),
+        "Next tab",
+        "next tab",
+    ),
+    key(
+        "gT",
+        Modes::Normal,
+        cmd(CommandId::TabPrev),
+        "Previous tab",
+        "previous tab",
+    ),
+    key(
+        "=",
+        Modes::Normal,
+        cmd(CommandId::Format),
+        "Format the file",
+        "format",
+    ),
+    key(
+        "Tab",
+        Modes::Normal,
+        cmd(CommandId::JumpForward),
+        "Jump forward (Ctrl+O goes back)",
+        "jump forward",
+    ),
+    key(
         "]d",
         Modes::Normal,
         cmd(CommandId::DiagnosticNext),
@@ -499,6 +605,49 @@ pub const KEYS: &[ModalKey] = &[
         cmd(CommandId::Keys),
         "This list of keys",
         "keys",
+    ),
+    // Ctrl keys that differ from vim. They keep their duckx-code meaning in every mode.
+    key(
+        "Shift+Space",
+        Modes::Both,
+        like(KeyCode::F(1), NONE),
+        "Command Bar (same as :)",
+        "",
+    ),
+    key(
+        "Ctrl+V",
+        Modes::Both,
+        like(KeyCode::Char('v'), CTRL),
+        "Pastes (in vim it starts a block selection)",
+        "",
+    ),
+    key(
+        "Ctrl+C",
+        Modes::Both,
+        like(KeyCode::Char('c'), CTRL),
+        "Copies (in vim it cancels; it never quits here)",
+        "",
+    ),
+    key(
+        "Ctrl+W",
+        Modes::Both,
+        like(KeyCode::Char('w'), CTRL),
+        "PANE: pick a window (in vim it is the window prefix)",
+        "",
+    ),
+    key(
+        "Ctrl+R",
+        Modes::Both,
+        like(KeyCode::Char('y'), CTRL),
+        "Not used; redo is U (or Ctrl+Y, shown here)",
+        "",
+    ),
+    key(
+        "Ctrl+H",
+        Modes::Both,
+        like(KeyCode::Left, NONE),
+        "Same as Backspace: left (many terminals send Backspace as ^H)",
+        "",
     ),
 ];
 
@@ -563,6 +712,9 @@ pub enum ModalAction {
     EnterInsertThen(Box<SemanticAction>),
     /// A chord in Visual that ends the selection (`Ctrl+C`, `Ctrl+X`, …): do it, then Normal.
     ThenNormal(Box<SemanticAction>),
+    /// `Esc` and a letter that arrived together as `Alt+letter` (a terminal that does not
+    /// tell them apart): leave the mode as `Esc` does, then press the letter in Normal.
+    EscapeThen(char),
     /// Keys while the `?` list is open.
     KeyList(KeyListAction),
 }
@@ -595,9 +747,59 @@ pub fn route(event: &Event, state: &ModalState, keys: &KeyMap) -> Option<Semanti
     }
 }
 
+/// `Ctrl+[` is `Esc` in every terminal that sends it as its own key, as vim users expect.
+/// A terminal that already sends `Esc` for it never gets here.
+fn ctrl_bracket_as_esc(key: &KeyEvent, keys: &KeyMap) -> Option<KeyEvent> {
+    let chord = crate::keys::Chord::from_key(key);
+    (key.code == KeyCode::Char('[')
+        && key.modifiers == KeyModifiers::CONTROL
+        && chord.is_none_or(|chord| keys.lookup(chord).is_none()))
+    .then(|| KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+}
+
+/// The letter of an `Alt+letter` that nothing is bound to: a terminal without the kitty
+/// keyboard protocol sends a quick `Esc` then letter this way.
+fn esc_then_letter(key: &KeyEvent, keys: &KeyMap) -> Option<char> {
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    let mods = key.modifiers;
+    (mods.contains(KeyModifiers::ALT)
+        && !mods.contains(KeyModifiers::CONTROL)
+        && !c.is_control()
+        && c != ' '
+        && crate::input::route_editor_key(key, keys).is_none())
+    .then_some(c)
+}
+
+/// `Ctrl+D` and `Ctrl+U` in Normal: half a page, as in vim. A chord the user bound to
+/// something else keeps that meaning.
+fn half_page_token(key: &KeyEvent, keys: &KeyMap) -> Option<&'static str> {
+    if key.modifiers != KeyModifiers::CONTROL {
+        return None;
+    }
+    let free = || {
+        crate::keys::Chord::from_key(key).is_none_or(|chord| {
+            keys.lookup(chord)
+                .is_none_or(|action| action == SemanticAction::Deselect)
+        })
+    };
+    match key.code {
+        KeyCode::Char('d') if free() => Some("Ctrl+D"),
+        KeyCode::Char('u') if free() => Some("Ctrl+U"),
+        _ => None,
+    }
+}
+
 fn route_key(key: &KeyEvent, state: &ModalState, keys: &KeyMap) -> Option<SemanticAction> {
+    if let Some(esc) = ctrl_bracket_as_esc(key, keys) {
+        return route_key(&esc, state, keys);
+    }
     if state.key_list.is_some() {
         return route_key_list(key);
+    }
+    if let Some(letter) = esc_then_letter(key, keys) {
+        return modal(ModalAction::EscapeThen(letter));
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -616,6 +818,18 @@ fn route_key(key: &KeyEvent, state: &ModalState, keys: &KeyMap) -> Option<Semant
         } else {
             Some(SemanticAction::Dismiss)
         };
+    }
+    // `Shift+Space` opens the Command Bar; it is not a space to look up.
+    if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::SHIFT) {
+        return passthrough(key, state, keys);
+    }
+    if state.mode == EditMode::Normal
+        && state.pending.is_none()
+        && let Some(token) = half_page_token(key, keys)
+        && let Some(entry) = lookup(state.mode, token)
+    {
+        let action = action_for(entry, state.mode, keys)?;
+        return Some(with_count(action, entry, state.count));
     }
     let Some(token) = plain_token(key) else {
         return passthrough(key, state, keys);
@@ -724,6 +938,13 @@ fn extend(action: SemanticAction) -> SemanticAction {
 /// True for the commands that only change the mode, so a count does not repeat them.
 fn changes_mode(id: CommandId) -> bool {
     crate::command::modal_only(id)
+        && !matches!(
+            id,
+            CommandId::CopyLine
+                | CommandId::CutLine
+                | CommandId::HalfPageDown
+                | CommandId::HalfPageUp
+        )
 }
 
 fn with_count(action: SemanticAction, entry: &ModalKey, count: Option<u32>) -> SemanticAction {
@@ -749,6 +970,13 @@ fn passthrough(key: &KeyEvent, state: &ModalState, keys: &KeyMap) -> Option<Sema
         modal(ModalAction::Unbound(name))
     };
     match action {
+        // Tab and Shift+Tab indent the selected lines in Visual.
+        SemanticAction::Indent if state.mode.is_visual() => {
+            modal(ModalAction::Run(CommandId::Indent))
+        }
+        SemanticAction::Outdent if state.mode.is_visual() => {
+            modal(ModalAction::Run(CommandId::Outdent))
+        }
         // Typing belongs to Insert.
         SemanticAction::InsertChar(_)
         | SemanticAction::InsertNewline
@@ -1037,9 +1265,39 @@ mod tests {
                 {
                     assert_eq!(modal, Some(SemanticAction::Modal(ModalAction::Escape)));
                 }
+                // Esc and a letter that arrive as one Alt+letter are both kept.
+                Event::Key(key) if modeless.is_none() && alt_letter(key).is_some() => {
+                    assert_eq!(
+                        modal,
+                        Some(SemanticAction::Modal(ModalAction::EscapeThen(
+                            alt_letter(key).unwrap()
+                        )))
+                    );
+                }
+                Event::Key(key) if is_ctrl_bracket(key) => {
+                    assert_eq!(modal, Some(SemanticAction::Modal(ModalAction::Escape)));
+                }
                 _ => assert_eq!(modal, modeless, "{event:?}"),
             }
         }
+    }
+
+    /// The letter of an unbound `Alt+letter` (Shift allowed), as the router reads it.
+    fn alt_letter(key: &KeyEvent) -> Option<char> {
+        match key.code {
+            KeyCode::Char(c)
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && c != ' ' =>
+            {
+                Some(c)
+            }
+            _ => None,
+        }
+    }
+
+    fn is_ctrl_bracket(key: &KeyEvent) -> bool {
+        key.code == KeyCode::Char('[') && key.modifiers == KeyModifiers::CONTROL
     }
 
     #[test]
@@ -1060,6 +1318,31 @@ mod tests {
             }
             let modeless = crate::input::route(&event, Focus::Editor, false);
             let modal = route(&event, &normal_state, &keys);
+            // These are the documented differences, each with its own test below.
+            if is_ctrl_bracket(key) {
+                assert_eq!(modal, Some(SemanticAction::Dismiss));
+                continue;
+            }
+            if key.modifiers == KeyModifiers::CONTROL
+                && matches!(key.code, KeyCode::Char('d' | 'u'))
+            {
+                assert!(matches!(
+                    modal,
+                    Some(SemanticAction::Modal(ModalAction::Run(
+                        CommandId::HalfPageDown | CommandId::HalfPageUp
+                    )))
+                ));
+                continue;
+            }
+            if modeless.is_none() && alt_letter(key).is_some() {
+                assert_eq!(
+                    modal,
+                    Some(SemanticAction::Modal(ModalAction::EscapeThen(
+                        alt_letter(key).unwrap()
+                    )))
+                );
+                continue;
+            }
             match modeless {
                 Some(SemanticAction::Complete) => assert_eq!(
                     modal,
@@ -1119,7 +1402,7 @@ mod tests {
             ..state(EditMode::Normal)
         };
         let keys = KeyMap::defaults();
-        assert_eq!(route(&ch('d'), &pending, &keys), run(CommandId::DeleteLine));
+        assert_eq!(route(&ch('d'), &pending, &keys), run(CommandId::CutLine));
         assert_eq!(
             route(&ch('q'), &pending, &keys),
             Some(SemanticAction::Modal(ModalAction::Unbound("dq".into())))
@@ -1179,9 +1462,7 @@ mod tests {
             route(&ch('d'), &three_d, &keys),
             Some(SemanticAction::Modal(ModalAction::Repeat(
                 3,
-                Box::new(SemanticAction::Modal(ModalAction::Run(
-                    CommandId::DeleteLine
-                )))
+                Box::new(SemanticAction::Modal(ModalAction::Run(CommandId::CutLine)))
             )))
         );
         // A count does not repeat a mode change.
@@ -1223,8 +1504,10 @@ mod tests {
             Some(SemanticAction::Modal(ModalAction::Unbound("q".into())))
         );
         assert_eq!(
-            normal(&press(KeyCode::Tab, KeyModifiers::NONE)),
-            Some(SemanticAction::Modal(ModalAction::Unbound("Tab".into())))
+            normal(&press(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Some(SemanticAction::Modal(ModalAction::Unbound(
+                "Shift+Tab".into()
+            )))
         );
     }
 
@@ -1360,7 +1643,241 @@ mod tests {
         };
         assert_eq!(
             words(&g),
-            ["g top", "c comment", "d definition", "Esc cancel"]
+            [
+                "g top",
+                "c comment",
+                "d definition",
+                "r references",
+                "a actions",
+                "R rename",
+                "t next tab",
+                "T previous tab",
+                "Esc cancel"
+            ]
+        );
+    }
+
+    // --- Shortcut fixes for Modeless off ---
+
+    #[test]
+    fn shift_space_opens_the_command_bar_in_normal_and_visual() {
+        let shift_space = press(KeyCode::Char(' '), KeyModifiers::SHIFT);
+        let open = Some(SemanticAction::OpenCommandBar);
+        assert_eq!(normal(&shift_space), open);
+        assert_eq!(visual(&shift_space), open);
+        // A plain space is still not a command.
+        assert!(matches!(
+            normal(&press(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Some(SemanticAction::Modal(ModalAction::Unbound(_)))
+        ));
+    }
+
+    #[test]
+    fn esc_and_a_letter_merged_into_alt_letter_keep_both_keys() {
+        let keys = KeyMap::defaults();
+        let alt_j = press(KeyCode::Char('j'), KeyModifiers::ALT);
+        for mode in [
+            EditMode::Insert,
+            EditMode::Normal,
+            EditMode::Visual { line: false },
+        ] {
+            assert_eq!(
+                route(&alt_j, &state(mode), &keys),
+                Some(SemanticAction::Modal(ModalAction::EscapeThen('j'))),
+                "{mode:?}"
+            );
+        }
+        // A capital arrives with Shift as well.
+        let alt_g = press(KeyCode::Char('G'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+        assert_eq!(
+            route(&alt_g, &state(EditMode::Insert), &keys),
+            Some(SemanticAction::Modal(ModalAction::EscapeThen('G')))
+        );
+        // Bound Alt chords keep their meaning, and AltGr (Ctrl+Alt) still types in Insert.
+        let convert = press(KeyCode::Char('`'), KeyModifiers::ALT);
+        assert_eq!(
+            route(&convert, &state(EditMode::Insert), &keys),
+            Some(SemanticAction::ConvertKeyboard)
+        );
+        let altgr = press(
+            KeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_eq!(
+            route(&altgr, &state(EditMode::Insert), &keys),
+            Some(SemanticAction::InsertChar('@'))
+        );
+    }
+
+    #[test]
+    fn ctrl_left_bracket_is_esc_in_every_mode() {
+        let keys = KeyMap::defaults();
+        let ctrl_bracket = press(KeyCode::Char('['), KeyModifiers::CONTROL);
+        assert_eq!(
+            route(&ctrl_bracket, &state(EditMode::Insert), &keys),
+            Some(SemanticAction::Modal(ModalAction::Escape))
+        );
+        assert_eq!(
+            route(&ctrl_bracket, &state(EditMode::Normal), &keys),
+            Some(SemanticAction::Dismiss)
+        );
+        assert_eq!(
+            route(
+                &ctrl_bracket,
+                &state(EditMode::Visual { line: true }),
+                &keys
+            ),
+            Some(SemanticAction::Modal(ModalAction::Escape))
+        );
+        let pending = ModalState {
+            pending: Some('g'),
+            ..state(EditMode::Normal)
+        };
+        assert_eq!(
+            route(&ctrl_bracket, &pending, &keys),
+            Some(SemanticAction::Modal(ModalAction::Cancel))
+        );
+    }
+
+    #[test]
+    fn plain_keys_for_actions_that_need_a_shortcut_a_terminal_may_not_send() {
+        let keys = KeyMap::defaults();
+        let seq = |first: char, second: char| {
+            let pending = ModalState {
+                pending: Some(first),
+                ..state(EditMode::Normal)
+            };
+            route(&ch(second), &pending, &keys)
+        };
+        assert_eq!(seq('g', 'r'), run(CommandId::GotoReferences));
+        assert_eq!(seq('g', 'a'), run(CommandId::CodeAction));
+        assert_eq!(seq('g', 't'), run(CommandId::TabNext));
+        assert_eq!(seq('g', 'T'), run(CommandId::TabPrev));
+        assert_eq!(seq(']', 'e'), run(CommandId::MoveLineDown));
+        assert_eq!(seq('[', 'e'), run(CommandId::MoveLineUp));
+        // gR is Shift+F2, which starts the rename prompt.
+        assert_eq!(seq('g', 'R'), Some(SemanticAction::StartRename));
+        assert_eq!(normal(&ch('=')), run(CommandId::Format));
+        assert_eq!(
+            normal(&press(KeyCode::Tab, KeyModifiers::NONE)),
+            run(CommandId::JumpForward)
+        );
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_are_half_pages_in_normal_only() {
+        let keys = KeyMap::defaults();
+        let down = press(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        let up = press(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(normal(&down), run(CommandId::HalfPageDown));
+        assert_eq!(normal(&up), run(CommandId::HalfPageUp));
+        // Insert keeps Ctrl+D (deselect), exactly as Modeless does.
+        assert_eq!(
+            route(&down, &state(EditMode::Insert), &keys),
+            crate::input::route(&down, Focus::Editor, false)
+        );
+        assert_eq!(
+            route(&down, &state(EditMode::Insert), &keys),
+            Some(SemanticAction::Deselect)
+        );
+        // Modeless routing is not touched by any of this.
+        assert_eq!(
+            crate::input::route(&down, Focus::Editor, false),
+            Some(SemanticAction::Deselect)
+        );
+        assert_eq!(crate::input::route(&up, Focus::Editor, false), None);
+        // A user who bound Ctrl+U to something keeps it.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("cut".to_string(), "ctrl+u".to_string());
+        let rebound = KeyMap::resolve(&overrides);
+        assert_eq!(
+            route(&up, &state(EditMode::Normal), &rebound),
+            Some(SemanticAction::Cut)
+        );
+    }
+
+    #[test]
+    fn tab_and_shift_tab_indent_and_outdent_in_visual() {
+        let keys = KeyMap::defaults();
+        for mode in [
+            EditMode::Visual { line: false },
+            EditMode::Visual { line: true },
+        ] {
+            assert_eq!(
+                route(
+                    &press(KeyCode::Tab, KeyModifiers::NONE),
+                    &state(mode),
+                    &keys
+                ),
+                run(CommandId::Indent)
+            );
+            assert_eq!(
+                route(
+                    &press(KeyCode::BackTab, KeyModifiers::SHIFT),
+                    &state(mode),
+                    &keys
+                ),
+                run(CommandId::Outdent)
+            );
+            assert_eq!(
+                route(
+                    &press(KeyCode::Tab, KeyModifiers::SHIFT),
+                    &state(mode),
+                    &keys
+                ),
+                run(CommandId::Outdent)
+            );
+        }
+    }
+
+    #[test]
+    fn line_keys_use_the_line_commands_and_visual_p_stays_a_plain_paste() {
+        assert_eq!(visual(&ch('p')), run(CommandId::Paste));
+        assert_eq!(normal(&ch('p')), run(CommandId::PasteAfter));
+        assert_eq!(normal(&ch('P')), run(CommandId::PasteBefore));
+        let y = ModalState {
+            pending: Some('y'),
+            ..state(EditMode::Normal)
+        };
+        assert_eq!(
+            route(&ch('y'), &y, &KeyMap::defaults()),
+            run(CommandId::CopyLine)
+        );
+    }
+
+    #[test]
+    fn the_key_list_documents_the_ctrl_keys_that_differ_from_vim() {
+        for mode in [EditMode::Normal, EditMode::Visual { line: false }] {
+            let rows = key_list(mode, "ctrl");
+            let keys: Vec<_> = rows.iter().map(|row| row.keys).collect();
+            for expected in ["Ctrl+V", "Ctrl+C", "Ctrl+W", "Ctrl+R", "Ctrl+H"] {
+                assert!(keys.contains(&expected), "{expected} in {mode:?}");
+            }
+        }
+        // They are notes: the keys themselves still do what they do without modes.
+        let keys = KeyMap::defaults();
+        for (c, expected) in [
+            ('v', SemanticAction::Paste),
+            ('c', SemanticAction::Copy),
+            ('w', SemanticAction::FocusPrefix),
+        ] {
+            assert_eq!(
+                route(
+                    &press(KeyCode::Char(c), KeyModifiers::CONTROL),
+                    &state(EditMode::Normal),
+                    &keys
+                ),
+                Some(expected)
+            );
+        }
+        // Ctrl+R is unused: it does not redo.
+        assert_ne!(
+            route(
+                &press(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                &state(EditMode::Normal),
+                &keys
+            ),
+            Some(SemanticAction::Redo)
         );
     }
 }
