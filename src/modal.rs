@@ -567,60 +567,11 @@ pub const KEYS: &[ModalKey] = &[
         "Inside [ ]",
     ),
     key(
-        "si\"",
+        "si",
         Modes::Visual,
-        cmd(CommandId::SelectInsideQuotes),
-        "Select inside quotes",
-        "Inside quotes",
-    ),
-    key(
-        "si'",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideQuotes),
-        "Select inside quotes",
-        "Inside quotes",
-    ),
-    key(
-        "si(",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideParens),
-        "Select inside ( )",
-        "Inside ( )",
-    ),
-    key(
-        "si)",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideParens),
-        "Select inside ( )",
-        "Inside ( )",
-    ),
-    key(
-        "si{",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideBraces),
-        "Select inside { }",
-        "Inside { }",
-    ),
-    key(
-        "si}",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideBraces),
-        "Select inside { }",
-        "Inside { }",
-    ),
-    key(
-        "si[",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideBrackets),
-        "Select inside [ ]",
-        "Inside [ ]",
-    ),
-    key(
-        "si]",
-        Modes::Visual,
-        cmd(CommandId::SelectInsideBrackets),
-        "Select inside [ ]",
-        "Inside [ ]",
+        cmd(CommandId::SelectInside),
+        "Select inside the nearest quotes or brackets",
+        "Select inside",
     ),
     key(
         "%",
@@ -1111,62 +1062,12 @@ pub const MNEMONIC_KEYS: &[ModalKey] = &[
         "Select inside [ ]",
     ),
     key(
-        "si\"",
+        "si",
         Modes::Both,
-        cmd(CommandId::SelectInsideQuotes),
-        "Select inside quotes; again takes the quotes",
-        "Select inside quotes",
+        cmd(CommandId::SelectInside),
+        "Select inside the nearest quotes or brackets; again expands",
+        "Select inside",
     ),
-    key(
-        "si'",
-        Modes::Both,
-        cmd(CommandId::SelectInsideQuotes),
-        "Select inside quotes; again takes the quotes",
-        "Select inside quotes",
-    ),
-    key(
-        "si(",
-        Modes::Both,
-        cmd(CommandId::SelectInsideParens),
-        "Select inside ( ); again takes the parentheses",
-        "Select inside ( )",
-    ),
-    key(
-        "si)",
-        Modes::Both,
-        cmd(CommandId::SelectInsideParens),
-        "Select inside ( ); again takes the parentheses",
-        "Select inside ( )",
-    ),
-    key(
-        "si{",
-        Modes::Both,
-        cmd(CommandId::SelectInsideBraces),
-        "Select inside { }; again takes the braces",
-        "Select inside { }",
-    ),
-    key(
-        "si}",
-        Modes::Both,
-        cmd(CommandId::SelectInsideBraces),
-        "Select inside { }; again takes the braces",
-        "Select inside { }",
-    ),
-    key(
-        "si[",
-        Modes::Both,
-        cmd(CommandId::SelectInsideBrackets),
-        "Select inside [ ]; again takes the brackets",
-        "Select inside [ ]",
-    ),
-    key(
-        "si]",
-        Modes::Both,
-        cmd(CommandId::SelectInsideBrackets),
-        "Select inside [ ]; again takes the brackets",
-        "Select inside [ ]",
-    ),
-    // d: delete without the clipboard. u / r: undo / redo.
     key(
         "dc",
         Modes::Normal,
@@ -2141,9 +2042,9 @@ pub fn hints(state: &ModalState, keys: &KeyMap) -> Vec<Hint> {
             }
             let next_c = rest.chars().next().expect("rest");
             let mid = format!("{prefix}{next_c}");
-            // `si"` after `s`: one "inside" hint for the next letter, not `i"`.
+            // A longer key after a shorter prefix: one hint for the next letter, not `i"`.
             if rest.chars().count() > 1 && continues_prefix(state.style, state.mode, &mid) {
-                // Next letter only (`i` of `si`), so the hint is `[i]nside`, not `ins[i]de`.
+                // Next letter only, so a group named "Inside" is `[i]nside`, not `ins[i]de`.
                 let group = named_hint(&next_c.to_string(), "Inside", 0);
                 if !out.iter().any(|shown| {
                     shown.key == group.key && shown.word.eq_ignore_ascii_case(&group.word)
@@ -2732,7 +2633,7 @@ mod tests {
                 "( inside ( )",
                 "{ inside { }",
                 "[ inside [ ]",
-                "[i]nside",
+                "select [i]nside",
                 "Esc cancel"
             ]
         );
@@ -2997,7 +2898,7 @@ mod tests {
                 "select [p]arens",
                 "{ select inside { }",
                 "[ select inside [ ]",
-                "[i]nside",
+                "select [i]nside",
                 "Esc cancel"
             ]
         );
@@ -3173,27 +3074,14 @@ mod tests {
     }
 
     #[test]
-    fn si_prefix_selects_inside_and_keeps_the_shorter_s_keys() {
+    fn si_selects_inside_automatically_and_keeps_the_shorter_s_keys() {
         let visual = state(EditMode::Visual { line: false });
         let mnemonic_n = mnemonic(EditMode::Normal);
         let mnemonic_v = mnemonic(EditMode::Visual { line: false });
         for state in [&visual, &mnemonic_v, &mnemonic_n] {
-            assert_eq!(type_keys(state, "si\""), run(CommandId::SelectInsideQuotes));
-            assert_eq!(type_keys(state, "si'"), run(CommandId::SelectInsideQuotes));
-            assert_eq!(type_keys(state, "si("), run(CommandId::SelectInsideParens));
-            assert_eq!(type_keys(state, "si)"), run(CommandId::SelectInsideParens));
-            assert_eq!(type_keys(state, "si{"), run(CommandId::SelectInsideBraces));
-            assert_eq!(type_keys(state, "si}"), run(CommandId::SelectInsideBraces));
-            assert_eq!(
-                type_keys(state, "si["),
-                run(CommandId::SelectInsideBrackets)
-            );
-            assert_eq!(
-                type_keys(state, "si]"),
-                run(CommandId::SelectInsideBrackets)
-            );
+            assert_eq!(type_keys(state, "si"), run(CommandId::SelectInside));
         }
-        // Existing shorter keys stay.
+        // Existing shorter keys stay for an explicit pair.
         assert_eq!(type_keys(&visual, "s("), run(CommandId::SelectInsideParens));
         assert_eq!(
             type_keys(&visual, "s\""),
@@ -3209,60 +3097,21 @@ mod tests {
         );
         assert_eq!(type_keys(&mnemonic_n, "ss"), run(CommandId::ModeVisualLine));
         assert_eq!(type_keys(&mnemonic_n, "sw"), run(CommandId::SelectWord));
-        // Vim Normal has no `s` prefix, so `s` / `si(` stay unbound.
+        // Vim Normal has no `s` prefix: `s` is unbound, and `si` is not a key.
         assert!(matches!(
             type_keys(&state(EditMode::Normal), "s"),
             Some(SemanticAction::Modal(ModalAction::Unbound(_)))
         ));
-        assert!(matches!(
-            type_keys(&state(EditMode::Normal), "si("),
-            Some(SemanticAction::Modal(ModalAction::Unbound(_)))
-        ));
-        // After `s`, `i` waits for the bracket; it does not run Insert.
+        assert!(lookup(KeyStyle::Vim, EditMode::Normal, "si").is_none());
+        // After `s`, `i` runs Select inside; it does not wait and does not run Insert.
+        assert_eq!(keys_for(KeyStyle::Vim, CommandId::SelectInside), ["si"]);
         assert_eq!(
-            type_keys(&visual, "si"),
-            Some(SemanticAction::Modal(ModalAction::Pend("si".into())))
+            keys_for(KeyStyle::Mnemonic, CommandId::SelectInside),
+            ["si"]
         );
-        assert_eq!(
-            type_keys(&mnemonic_n, "si"),
-            Some(SemanticAction::Modal(ModalAction::Pend("si".into())))
-        );
-        let keys_map = KeyMap::defaults();
-        let words = |state: &ModalState| -> Vec<String> {
-            hints(state, &keys_map).iter().map(Hint::plain).collect()
-        };
-        let pending_si = ModalState {
-            pending: Some("si".into()),
-            ..visual
-        };
-        assert_eq!(
-            words(&pending_si),
-            [
-                "\" inside quotes",
-                "( inside ( )",
-                "{ inside { }",
-                "[ inside [ ]",
-                "Esc cancel"
-            ]
-        );
-        let mnemonic_si = ModalState {
-            pending: Some("si".into()),
-            ..mnemonic_n
-        };
-        assert_eq!(
-            words(&mnemonic_si),
-            [
-                "\" select inside quotes",
-                "( select inside ( )",
-                "{ select inside { }",
-                "[ select inside [ ]",
-                "Esc cancel"
-            ]
-        );
-        assert_eq!(
-            key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "si(").len(),
-            1
-        );
+        assert!(key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "si(").is_empty());
+        let entry = lookup(KeyStyle::Vim, EditMode::Visual { line: false }, "si").unwrap();
+        assert_eq!(list_hint(entry).plain(), "[s]elect [i]nside");
     }
 
     #[test]

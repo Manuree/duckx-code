@@ -39,9 +39,10 @@ pub fn from_literal(rope: &Rope, start: usize, end: usize) -> Option<QuoteSpan> 
     })
 }
 
-/// The innermost quoted span on `at`'s line that contains `at`, pairing unescaped marks of each
-/// quote kind left to right. A cursor on a mark selects that mark's pair.
-pub fn scan_line(rope: &Rope, at: usize) -> Option<QuoteSpan> {
+/// Every quoted span on `at`'s line that contains `at`, innermost first, pairing
+/// unescaped marks of each quote kind left to right. A cursor on a mark includes
+/// that mark's pair. Backticks are included with `"` and `'`.
+pub fn enclosing_on_line(rope: &Rope, at: usize) -> Vec<QuoteSpan> {
     let at = at.min(rope.len_chars());
     let line = rope.char_to_line(at);
     let line_start = rope.line_to_char(line);
@@ -51,22 +52,31 @@ pub fn scan_line(rope: &Rope, at: usize) -> Option<QuoteSpan> {
         .take_while(|&ch| ch != '\n' && ch != '\r')
         .collect();
     let col = at - line_start;
-    let mut best: Option<(usize, usize)> = None;
+    let mut found = Vec::new();
     for quote in QUOTES {
         let marks: Vec<usize> = (0..chars.len())
             .filter(|&i| chars[i] == quote && !escaped(&chars, i))
             .collect();
         for &[open, close] in marks.as_chunks::<2>().0 {
-            if open <= col && col <= close && best.is_none_or(|(o, c)| close - open < c - o) {
-                best = Some((open, close));
+            if open <= col && col <= close {
+                found.push((open, close));
             }
         }
     }
-    let (open, close) = best?;
-    Some(QuoteSpan {
-        inner: (line_start + open + 1, line_start + close),
-        outer: (line_start + open, line_start + close + 1),
-    })
+    found.sort_by_key(|&(open, close)| (close - open, open));
+    found
+        .into_iter()
+        .map(|(open, close)| QuoteSpan {
+            inner: (line_start + open + 1, line_start + close),
+            outer: (line_start + open, line_start + close + 1),
+        })
+        .collect()
+}
+
+/// The innermost quoted span on `at`'s line that contains `at`, pairing unescaped marks of each
+/// quote kind left to right. A cursor on a mark selects that mark's pair.
+pub fn scan_line(rope: &Rope, at: usize) -> Option<QuoteSpan> {
+    enclosing_on_line(rope, at).into_iter().next()
 }
 
 /// Whether the char at `i` follows an odd run of backslashes.

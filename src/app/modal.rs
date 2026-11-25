@@ -839,6 +839,7 @@ impl App {
                 result
             }
             CommandId::SelectBracket
+            | CommandId::SelectInside
             | CommandId::SelectInsideQuotes
             | CommandId::SelectInsideParens
             | CommandId::SelectInsideBraces
@@ -1906,7 +1907,7 @@ mod tests {
         let mut app = mnemonic_app("fn f(x: i32) {}\n");
         let open = app.buffer().rope().chars().position(|c| c == '(').unwrap();
         app.buffer_mut().move_to(open + 1, false);
-        keys(&mut app, "si(");
+        keys(&mut app, "si");
         assert_eq!(mode(&app), EditMode::Visual { line: false });
         assert_eq!(app.buffer().selected_text(), "x: i32");
     }

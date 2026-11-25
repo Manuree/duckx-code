@@ -5212,6 +5212,7 @@ impl App {
             CommandId::NextBracket => self.jump_bracket(true),
             CommandId::PrevBracket => self.jump_bracket(false),
             CommandId::SelectBracket => self.match_bracket(true),
+            CommandId::SelectInside => self.select_inside(),
             CommandId::SelectInsideQuotes => self.select_inside_quotes(),
             CommandId::SelectInsideParens => self.select_inside_pair('(', ')'),
             CommandId::SelectInsideBraces => self.select_inside_pair('{', '}'),
@@ -5993,6 +5994,60 @@ impl App {
             return;
         };
         self.buffer_mut().move_to(target, extend);
+        self.scroll_to_cursor();
+    }
+
+    /// Selects the text inside the nearest enclosing `""` `''` `` ` ` `` `()` `{}` `[]`
+    /// pair around the cursor. Again expands to the inside of the next outer pair
+    /// in the actual nest, and wraps back to the innermost after the outermost.
+    /// Quotes are found on the current line (or by the syntax tree); brackets may
+    /// span lines. `<>` is not paired. No enclosing pair leaves a short message.
+    fn select_inside(&mut self) {
+        self.dismiss_lsp_popups();
+        self.clear_snippet();
+        let range = {
+            let tab = self.active_editor().tab();
+            let rope = tab.buffer.rope();
+            let selection = tab.buffer.selection();
+            let current = (
+                selection.anchor.min(selection.head),
+                selection.anchor.max(selection.head),
+            );
+            // After an expand the caret may sit on a delimiter; a point inside
+            // the selection keeps the nest around the original contents.
+            let at = if current.0 < current.1 {
+                current.0 + (current.1 - current.0) / 2
+            } else {
+                selection.head
+            };
+            let quotes = match tab
+                .syntax
+                .as_ref()
+                .filter(|state| state.has_tree())
+                .and_then(|state| state.string_span(rope, at))
+            {
+                Some(Some(span)) => vec![span],
+                Some(None) => Vec::new(),
+                None => crate::quotes::enclosing_on_line(rope, at),
+            };
+            let literals = tab
+                .syntax
+                .as_ref()
+                .filter(|state| state.has_tree())
+                .map(|state| state.literal_ranges(rope, 0, rope.len_chars()))
+                .unwrap_or_default();
+            let literal_of = |at: usize| {
+                let after = literals.partition_point(|(from, _)| *from <= at);
+                (after > 0 && at < literals[after - 1].1).then(|| literals[after - 1])
+            };
+            let pairs = crate::brackets::enclosing_inside(rope, at, &quotes, &literal_of);
+            crate::brackets::next_inside(&pairs, current)
+        };
+        let Some(range) = range else {
+            self.message = Some("No enclosing pair".to_string());
+            return;
+        };
+        self.buffer_mut().select_span(range.0, range.1);
         self.scroll_to_cursor();
     }
 
@@ -7730,6 +7785,42 @@ mod tests {
         let mut app = quotes_app("let x| = (1, 2);", None, false);
         assert_eq!(select_pair(&mut app, SelectInsideBraces), "");
         assert_eq!(app.buffer().selection().head, 5);
+    }
+
+    #[test]
+    fn select_inside_picks_the_nearest_pair_and_expands_along_the_nest() {
+        use crate::command::CommandId::SelectInside;
+        let mut app = quotes_app("{[(x|)]}", None, false);
+        assert_eq!(select_pair(&mut app, SelectInside), "x");
+        assert_eq!(select_pair(&mut app, SelectInside), "(x)");
+        assert_eq!(select_pair(&mut app, SelectInside), "[(x)]");
+        // Wrap shrinks back to the innermost.
+        assert_eq!(select_pair(&mut app, SelectInside), "x");
+        // Backticks count; angle brackets in a comparison do not.
+        let mut app = quotes_app("run `cargo |test` now", None, false);
+        assert_eq!(select_pair(&mut app, SelectInside), "cargo test");
+        let mut app = quotes_app("if a < b && c > |d { }", None, false);
+        assert_eq!(select_pair(&mut app, SelectInside), "");
+        assert_eq!(app.message.as_deref(), Some("No enclosing pair"));
+        assert_eq!(app.buffer().selection().head, 16);
+        // Cursor on a delimiter uses that pair.
+        let mut app = quotes_app("f(|)", None, false);
+        assert_eq!(select_pair(&mut app, SelectInside), "");
+        assert_eq!(
+            (
+                app.buffer().selection().anchor,
+                app.buffer().selection().head
+            ),
+            (2, 2)
+        );
+        // Mixed quote and bracket nesting, either way around.
+        let mut app = quotes_app(r#"("a [|b] c")"#, None, false);
+        assert_eq!(select_pair(&mut app, SelectInside), "b");
+        assert_eq!(select_pair(&mut app, SelectInside), "a [b] c");
+        assert_eq!(select_pair(&mut app, SelectInside), "\"a [b] c\"");
+        // Multi-line brackets.
+        let mut app = quotes_app("fn f() {\n    if x {\n        y|;\n    }\n}\n", None, false);
+        assert_eq!(select_pair(&mut app, SelectInside), "\n        y;\n    ");
     }
 
     #[test]

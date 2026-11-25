@@ -140,6 +140,9 @@ pub enum CommandId {
     FindPrevious,
     /// Extend the selection to the bracket paired with the one under the cursor.
     SelectBracket,
+    /// Select the text inside the nearest enclosing quotes or brackets around the cursor;
+    /// again expands to the next outer pair.
+    SelectInside,
     /// Select the text inside the quotes around the cursor; again to take in the quotes too.
     SelectInsideQuotes,
     /// Select the text inside the `()` around the cursor; again to take in the parentheses.
@@ -793,6 +796,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: false,
     },
     CommandSpec {
+        id: CommandId::SelectInside,
+        name: "select-inside",
+        description: "Select inside the nearest quotes or brackets; again expands",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
         id: CommandId::SelectInsideQuotes,
         name: "select-inside-quotes",
         description: "\"\" or '': select inside quotes; again adds them",
@@ -1229,6 +1241,7 @@ fn importance(id: CommandId) -> u16 {
         CommandId::NextBracket => 116,
         CommandId::PrevBracket => 117,
         CommandId::SelectBracket => 274,
+        CommandId::SelectInside => 275,
         CommandId::SelectInsideQuotes => 276,
         CommandId::SelectInsideParens => 277,
         CommandId::SelectInsideBraces => 278,
@@ -1851,6 +1864,7 @@ mod tests {
                 "select-all",
                 "deselect",
                 "select-bracket",
+                "select-inside",
                 "select-inside-quotes",
                 "select-inside-parens",
                 "select-inside-braces",
