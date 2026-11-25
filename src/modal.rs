@@ -673,6 +673,20 @@ pub const KEYS: &[ModalKey] = &[
         "Previous diagnostic",
     ),
     key(
+        "]]",
+        Modes::Both,
+        cmd(CommandId::NextBracket),
+        "Next bracket",
+        "Next bracket",
+    ),
+    key(
+        "[[",
+        Modes::Both,
+        cmd(CommandId::PrevBracket),
+        "Previous bracket",
+        "Previous bracket",
+    ),
+    key(
         ":",
         Modes::Both,
         like(KeyCode::F(1), NONE),
@@ -1303,6 +1317,20 @@ pub const MNEMONIC_KEYS: &[ModalKey] = &[
         cmd(CommandId::DiagnosticPrev),
         "Previous diagnostic",
         "Previous diagnostic",
+    ),
+    key(
+        "]]",
+        Modes::Both,
+        cmd(CommandId::NextBracket),
+        "Next bracket",
+        "Next bracket",
+    ),
+    key(
+        "[[",
+        Modes::Both,
+        cmd(CommandId::PrevBracket),
+        "Previous bracket",
+        "Previous bracket",
     ),
     key(
         "=",
@@ -2561,6 +2589,41 @@ mod tests {
                 "Esc cancel"
             ]
         );
+        let close = ModalState {
+            pending: Some(']'),
+            ..state(EditMode::Normal)
+        };
+        assert_eq!(
+            words(&close),
+            [
+                "e move line down",
+                "d next diagnostic",
+                "] next bracket",
+                "Esc cancel"
+            ]
+        );
+        let open = ModalState {
+            pending: Some('['),
+            ..state(EditMode::Normal)
+        };
+        assert_eq!(
+            words(&open),
+            [
+                "e move line up",
+                "d previous diagnostic",
+                "[ previous bracket",
+                "Esc cancel"
+            ]
+        );
+        let mnemonic_close = ModalState {
+            style: crate::modal::KeyStyle::Mnemonic,
+            pending: Some(']'),
+            ..state(EditMode::Normal)
+        };
+        assert_eq!(
+            words(&mnemonic_close),
+            ["d next diagnostic", "] next bracket", "Esc cancel"]
+        );
     }
 
     fn mnemonic(mode: EditMode) -> ModalState {
@@ -3053,6 +3116,8 @@ mod tests {
         assert_eq!(seq('g', 'T'), run(CommandId::TabPrev));
         assert_eq!(seq(']', 'e'), run(CommandId::MoveLineDown));
         assert_eq!(seq('[', 'e'), run(CommandId::MoveLineUp));
+        assert_eq!(seq(']', ']'), run(CommandId::NextBracket));
+        assert_eq!(seq('[', '['), run(CommandId::PrevBracket));
         // gR is Shift+F2, which starts the rename prompt.
         assert_eq!(seq('g', 'R'), Some(SemanticAction::StartRename));
         assert_eq!(normal(&ch('=')), run(CommandId::Format));
@@ -3060,6 +3125,37 @@ mod tests {
             normal(&press(KeyCode::Tab, KeyModifiers::NONE)),
             run(CommandId::JumpForward)
         );
+    }
+
+    #[test]
+    fn mnemonic_style_uses_the_same_bracket_jumps_and_leaves_move_line_on_md() {
+        let keys = KeyMap::defaults();
+        let pending = |first: char| ModalState {
+            style: KeyStyle::Mnemonic,
+            pending: Some(first),
+            ..state(EditMode::Normal)
+        };
+        let seq = |first: char, second: char| route(&ch(second), &pending(first), &keys);
+        assert_eq!(seq(']', ']'), run(CommandId::NextBracket));
+        assert_eq!(seq('[', '['), run(CommandId::PrevBracket));
+        assert_eq!(seq(']', 'd'), run(CommandId::DiagnosticNext));
+        assert_eq!(seq('[', 'd'), run(CommandId::DiagnosticPrev));
+        assert_ne!(seq(']', 'e'), run(CommandId::MoveLineDown));
+        assert_ne!(seq('[', 'e'), run(CommandId::MoveLineUp));
+        assert_eq!(
+            type_keys(&mnemonic(EditMode::Normal), "md"),
+            run(CommandId::MoveLineDown)
+        );
+        assert_eq!(
+            type_keys(&mnemonic(EditMode::Normal), "mu"),
+            run(CommandId::MoveLineUp)
+        );
+        let visual = ModalState {
+            style: KeyStyle::Vim,
+            pending: Some(']'),
+            ..state(EditMode::Visual { line: false })
+        };
+        assert_eq!(route(&ch(']'), &visual, &keys), run(CommandId::NextBracket));
     }
 
     #[test]

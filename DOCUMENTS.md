@@ -384,6 +384,7 @@ Printable keys never type in Normal. A key with no command shows *No command on 
 | `]e` `[e` | Move the line down / up |
 | `Tab` | Jump forward (`jump-forward`) |
 | `]d` `[d` | Next / previous diagnostic |
+| `]]` `[[` | Next / previous `( ) [ ] { }` character (`next-bracket`, `prev-bracket`). Works across lines; nothing happens at the ends of the file. A count repeats the jump: `3]]`. |
 | `:` `Shift + Space` | Open the Command Bar (`F1`) |
 | `?` | The key list |
 | `Esc` | Close popups. With nothing to close, a second quick `Esc` opens the Command Bar (Double Esc) |
@@ -413,7 +414,7 @@ In Visual Line, `y` and `d` take the line break after the last line, so `p` / `P
 
 ### Mnemonic keys
 
-With **Key style** set to Mnemonic, a key names its command: a verb letter, then what it acts on. A first letter is either a key or the start of a sequence, never both, so nothing waits for a timeout. Motions, `i a I A o O`, `v V`, `>> <<`, `gc`, `%`, `=`, `Tab`, `]d [d`, `:`, `?`, `Esc`, `Ctrl + D` / `Ctrl + U`, and every `Ctrl`, `Alt`, and F-key shortcut are the same as in Vim style. Save stays `Ctrl + S` or `:w`.
+With **Key style** set to Mnemonic, a key names its command: a verb letter, then what it acts on. A first letter is either a key or the start of a sequence, never both, so nothing waits for a timeout. Motions, `i a I A o O`, `v V`, `>> <<`, `gc`, `%`, `=`, `Tab`, `]d [d`, `]] [[`, `:`, `?`, `Esc`, `Ctrl + D` / `Ctrl + U`, and every `Ctrl`, `Alt`, and F-key shortcut are the same as in Vim style. Save stays `Ctrl + S` or `:w`.
 
 | Keys (Normal) | Does |
 | :--- | :--- |
@@ -566,6 +567,8 @@ The mode commands are listed in the Command Bar only while Modeless is Off. Ever
 | `goto-definition` | — | Jump to where the symbol under the cursor is defined | `F12` |
 | `goto-references` | — | Show every place this symbol is used | `Shift + F12` |
 | `match-bracket` | — | Jump to the matching bracket | `Ctrl + ]` |
+| `next-bracket` | — | Jump to the next `( ) [ ] { }` character after the cursor. In Modeless Off, `]]`. | `]]` |
+| `prev-bracket` | — | Jump to the previous `( ) [ ] { }` character before the cursor. In Modeless Off, `[[`. | `[[` |
 | `select-bracket` | — | Select through the matching bracket, the same as `Ctrl + Shift + ]` | `Ctrl + Shift + ]` |
 | `complete` | — | Open completions at the cursor | `Ctrl + Space` |
 | `comment` | — | Add or remove a line comment | `F4` |

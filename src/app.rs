@@ -5206,6 +5206,8 @@ impl App {
             CommandId::GotoDefinition => self.goto_definition(),
             CommandId::GotoReferences => self.goto_references(),
             CommandId::MatchBracket => self.match_bracket(false),
+            CommandId::NextBracket => self.jump_bracket(true),
+            CommandId::PrevBracket => self.jump_bracket(false),
             CommandId::SelectBracket => self.match_bracket(true),
             CommandId::SelectInsideQuotes => self.select_inside_quotes(),
             CommandId::SelectInsideParens => self.select_inside_pair('(', ')'),
@@ -5943,6 +5945,15 @@ impl App {
             after,
         });
         self.message = Some(format!("Saving {name}…"));
+    }
+
+    fn jump_bracket(&mut self, forward: bool) {
+        self.dismiss_lsp_popups();
+        self.clear_snippet();
+        let extend = self.modal().is_some_and(|state| state.mode.is_visual());
+        if self.buffer_mut().jump_bracket(forward, extend) {
+            self.scroll_to_cursor();
+        }
     }
 
     fn match_bracket(&mut self, extend: bool) {

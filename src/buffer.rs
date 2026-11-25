@@ -687,6 +687,32 @@ impl Buffer {
         };
     }
 
+    /// The next (`forward`) or previous `()[]{}` character, starting after or
+    /// before the cursor so a bracket under it is skipped. `None` when there is
+    /// no further bracket in that direction.
+    pub fn find_bracket(&self, forward: bool) -> Option<usize> {
+        let head = self.selection.head;
+        let len = self.rope.len_chars();
+        if forward {
+            let start = head.saturating_add(1).min(len);
+            (start..len).find(|&i| is_jump_bracket(self.rope.char(i)))
+        } else {
+            (0..head)
+                .rev()
+                .find(|&i| is_jump_bracket(self.rope.char(i)))
+        }
+    }
+
+    /// Moves to the next or previous `()[]{}` character. Returns `false` and
+    /// stays put when there is none in that direction.
+    pub fn jump_bracket(&mut self, forward: bool, extend: bool) -> bool {
+        let Some(pos) = self.find_bracket(forward) else {
+            return false;
+        };
+        self.move_to(pos, extend);
+        true
+    }
+
     // ---- Movement ----------------------------------------------------------
 
     /// Without `extend`, a selection stays highlighted (sticky) while the cursor moves.
@@ -1665,6 +1691,11 @@ pub fn bracket_near(rope: &Rope, head: usize) -> Option<(usize, char)> {
 
 fn is_bracket_char(ch: char) -> bool {
     matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>')
+}
+
+/// Characters `next-bracket` / `prev-bracket` jump to. Not `<>`.
+fn is_jump_bracket(ch: char) -> bool {
+    matches!(ch, '(' | ')' | '[' | ']' | '{' | '}')
 }
 
 /// Pair of `bracket` at char index `at`, counting nested `()[]{}`.
@@ -2981,5 +3012,79 @@ mod tests {
         assert_eq!(split_line_break("x\r\n"), ("x", "\r\n"));
         assert_eq!(split_line_break("x\u{2028}"), ("x", "\u{2028}"));
         assert_eq!(split_line_break("x"), ("x", ""));
+    }
+
+    #[test]
+    fn find_bracket_jumps_to_the_next_and_previous_of_the_six_chars() {
+        let mut buf = Buffer::from_text("let items = [1, 2, 3];\nfn f(x: i32) {}\n");
+        let pos = |c: char, n: usize| {
+            buf.rope()
+                .chars()
+                .enumerate()
+                .filter(|(_, ch)| *ch == c)
+                .nth(n)
+                .map(|(i, _)| i)
+                .unwrap()
+        };
+        let open_sq = pos('[', 0);
+        let close_sq = pos(']', 0);
+        let open_par = pos('(', 0);
+        let close_par = pos(')', 0);
+        let open_br = pos('{', 0);
+        let close_br = pos('}', 0);
+
+        buf.move_to(0, false);
+        assert_eq!(buf.find_bracket(true), Some(open_sq));
+        assert_eq!(buf.find_bracket(false), None);
+
+        buf.move_to(open_sq, false);
+        assert_eq!(buf.find_bracket(true), Some(close_sq));
+        assert_eq!(buf.find_bracket(false), None);
+
+        assert!(buf.jump_bracket(true, false));
+        assert_eq!(buf.selection().head, close_sq);
+        assert!(buf.jump_bracket(true, false));
+        assert_eq!(buf.selection().head, open_par);
+        assert!(buf.jump_bracket(true, false));
+        assert_eq!(buf.selection().head, close_par);
+        assert!(buf.jump_bracket(true, false));
+        assert_eq!(buf.selection().head, open_br);
+        assert!(buf.jump_bracket(true, false));
+        assert_eq!(buf.selection().head, close_br);
+        let end = buf.selection().head;
+        assert!(!buf.jump_bracket(true, false));
+        assert_eq!(buf.selection().head, end);
+
+        assert!(buf.jump_bracket(false, false));
+        assert_eq!(buf.selection().head, open_br);
+        buf.move_to(open_sq, false);
+        assert!(!buf.jump_bracket(false, false));
+        assert_eq!(buf.selection().head, open_sq);
+    }
+
+    #[test]
+    fn find_bracket_skips_angle_brackets_and_keeps_the_cursor_on_noop() {
+        let mut buf = Buffer::from_text("a <T> [x]");
+        buf.move_to(0, false);
+        let open = buf.rope().chars().position(|c| c == '[').unwrap();
+        let close = buf.rope().chars().position(|c| c == ']').unwrap();
+        assert_eq!(buf.find_bracket(true), Some(open));
+        buf.move_to(buf.rope().len_chars(), false);
+        assert_eq!(buf.find_bracket(true), None);
+        assert_eq!(buf.find_bracket(false), Some(close));
+        let empty = Buffer::from_text("no brackets here");
+        assert_eq!(empty.find_bracket(true), None);
+        assert_eq!(empty.find_bracket(false), None);
+    }
+
+    #[test]
+    fn jump_bracket_can_extend_the_selection() {
+        let mut buf = Buffer::from_text("ab(cd)");
+        let open = buf.rope().chars().position(|c| c == '(').unwrap();
+        let close = buf.rope().chars().position(|c| c == ')').unwrap();
+        buf.move_to(open, false);
+        assert!(buf.jump_bracket(true, true));
+        assert_eq!(buf.selection().anchor, open);
+        assert_eq!(buf.selection().head, close);
     }
 }
