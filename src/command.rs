@@ -174,6 +174,22 @@ pub enum CommandId {
     ChangeSelection,
     /// Modeless off: list every key of the current mode.
     Keys,
+    /// Modeless off: copy the line (or N lines) to the clipboard as whole lines.
+    CopyLine,
+    /// Modeless off: cut the line (or N lines) to the clipboard as whole lines.
+    CutLine,
+    /// Modeless off: paste below the line when the clipboard holds whole lines.
+    PasteAfter,
+    /// Modeless off: paste above the line when the clipboard holds whole lines.
+    PasteBefore,
+    /// Modeless off: move the cursor half a screen down.
+    HalfPageDown,
+    /// Modeless off: move the cursor half a screen up.
+    HalfPageUp,
+    /// Save the focused file, then close its tab (or quit when it is the last one).
+    SaveClose,
+    /// Close the focused tab, or quit when it is the last one.
+    CloseOrQuit,
     /// Open the assistant panel and make it one row taller.
     AgentTaller,
     /// Open the assistant panel and make it one row shorter.
@@ -452,6 +468,78 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "keys",
         description: "List every key of the current mode",
         shortcut: "?",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::CopyLine,
+        name: "copy-line",
+        description: "Copy the line to the clipboard as a whole line (3yy: three lines)",
+        shortcut: "yy",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::CutLine,
+        name: "cut-line",
+        description: "Cut the line to the clipboard as a whole line (3dd: three lines)",
+        shortcut: "dd",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::PasteAfter,
+        name: "paste-after",
+        description: "Paste below the line when the clipboard holds whole lines, else at the cursor",
+        shortcut: "p",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::PasteBefore,
+        name: "paste-before",
+        description: "Paste above the line when the clipboard holds whole lines, else at the cursor",
+        shortcut: "P",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::HalfPageDown,
+        name: "half-page-down",
+        description: "Move the cursor half a screen down",
+        shortcut: "Ctrl+D",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::HalfPageUp,
+        name: "half-page-up",
+        description: "Move the cursor half a screen up",
+        shortcut: "Ctrl+U",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::SaveClose,
+        name: "save-close",
+        description: "Save the file, then close its tab (quit when it is the last one). `wq` is another name",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::CloseOrQuit,
+        name: "close-or-quit",
+        description: "Close the focused tab, or quit when it is the last one. `q` is another name",
+        shortcut: "",
         arg: None,
         editor: true,
         explorer: false,
@@ -1096,6 +1184,14 @@ fn importance(id: CommandId) -> u16 {
         CommandId::OpenLineAbove => 291,
         CommandId::SwapSelectionEnds => 292,
         CommandId::ChangeSelection => 293,
+        CommandId::CopyLine => 294,
+        CommandId::CutLine => 295,
+        CommandId::PasteAfter => 296,
+        CommandId::PasteBefore => 297,
+        CommandId::HalfPageDown => 298,
+        CommandId::HalfPageUp => 299,
+        CommandId::SaveClose => 51,
+        CommandId::CloseOrQuit => 375,
         CommandId::LspRestart => 269,
         CommandId::Focus => 258,
         CommandId::Preview => 257,
@@ -1155,6 +1251,9 @@ fn surface_rank(id: CommandId, context: CommandContext) -> u32 {
 pub fn aliases(id: CommandId) -> &'static [&'static str] {
     match id {
         CommandId::Settings => &["config"],
+        CommandId::Save => &["w"],
+        CommandId::SaveClose => &["wq"],
+        CommandId::CloseOrQuit => &["q"],
         CommandId::CloseView => &["clean-view"],
         CommandId::AgentNew => &["agent-new"],
         CommandId::SelectInsideQuotes => &["\"\"", "''"],
@@ -1221,6 +1320,12 @@ pub fn modal_only(id: CommandId) -> bool {
             | CommandId::SwapSelectionEnds
             | CommandId::ChangeSelection
             | CommandId::Keys
+            | CommandId::CopyLine
+            | CommandId::CutLine
+            | CommandId::PasteAfter
+            | CommandId::PasteBefore
+            | CommandId::HalfPageDown
+            | CommandId::HalfPageUp
     )
 }
 
@@ -1518,12 +1623,11 @@ pub fn suggestions(
         let pinned = matches.remove(i);
         matches.insert(0, pinned);
     }
-    // A symbol alias typed in full, such as `""` or `()`, names one command outright.
-    if let Some(i) = matches.iter().position(|c| {
-        aliases(c.id)
-            .iter()
-            .any(|alias| *alias == query && !alias.contains(char::is_alphanumeric))
-    }) {
+    // An alias typed in full, such as `""`, `()`, `w`, or `q`, names one command outright.
+    if let Some(i) = matches
+        .iter()
+        .position(|c| aliases(c.id).iter().any(|alias| *alias == query))
+    {
         let exact = matches.remove(i);
         matches.insert(0, exact);
     }
@@ -1612,6 +1716,7 @@ mod tests {
                 "replace",
                 "goto",
                 "save",
+                "save-close",
                 "reload",
                 "encoding",
                 "undo",
@@ -1673,6 +1778,7 @@ mod tests {
                 "split-down",
                 "close",
                 "close-view",
+                "close-or-quit",
                 "close-all",
                 "setting",
                 "agent",
@@ -1795,7 +1901,16 @@ mod tests {
             ["setting"]
         );
         assert_eq!(names("all", None), ["select-all", "close-all"]);
-        assert_eq!(names("close", None), ["close", "close-view", "close-all"]);
+        assert_eq!(
+            names("close", None),
+            [
+                "close",
+                "close-view",
+                "close-or-quit",
+                "close-all",
+                "save-close"
+            ]
+        );
         assert_eq!(names("clean", None), ["close-view"]);
         assert_eq!(names("clean-view", None), ["close-view"]);
         assert_eq!(names("find", None), ["find", "find-next", "find-previous"]);

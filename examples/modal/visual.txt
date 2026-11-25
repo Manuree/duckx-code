@@ -17,3 +17,6 @@ Press Esc when done.
 
 Selecting with Shift and the arrows, Ctrl+A, or the mouse
 also switches to VISUAL. Esc goes back to NORMAL.
+
+Press V, then j to select two lines. Tab indents them, Shift+Tab outdents.
+In NORMAL, yy copies a line and p pastes it on a new line below (P above).
