@@ -358,15 +358,9 @@ impl App {
     }
 
     fn enter_insert(&mut self) {
-        if self.modal_state.mode.is_visual() {
-            if let Some(line) = self.modal_state.line {
-                // Visual Line snaps the head to a line end; put the cursor back
-                // on the column it was on, the same way Esc does.
-                let len = self.buffer().rope().len_chars();
-                self.buffer_mut().move_to(line.cursor.min(len), false);
-            }
-            self.buffer_mut().deselect();
-        }
+        // From Visual, keep the selection highlighted. The first typed
+        // character or paste replaces it; Backspace/Delete deletes it; a
+        // move or Esc clears it without deleting. Nothing is cut yet.
         self.modal_state.line = None;
         self.modal_state.mode = EditMode::Insert;
     }
@@ -375,6 +369,9 @@ impl App {
         match self.modal_state.mode {
             EditMode::Visual { .. } => self.leave_visual(false),
             EditMode::Insert => {
+                // Esc (and mode-normal) drop a selection kept from Visual `i`
+                // without deleting it, and stay out of Visual.
+                self.buffer_mut().deselect();
                 self.buffer_mut().seal_undo();
                 self.modal_state.mode = EditMode::Normal;
             }
@@ -1797,34 +1794,100 @@ mod tests {
     }
 
     #[test]
-    fn i_in_visual_enters_insert_at_the_cursor_and_keeps_the_text() {
+    fn i_in_visual_keeps_the_selection_and_typing_replaces_it() {
         let mut app = modal_app("abcdef\n");
+        app.clipboard.set_text("CLIP".into()).unwrap();
         keys(&mut app, "vllll");
-        let at = head(&app);
-        let before = text(&app);
         assert_eq!(app.buffer().selected_text(), "abcd");
         keys(&mut app, "i");
         assert_eq!(mode(&app), EditMode::Insert);
-        assert!(app.buffer().selected_text().is_empty());
-        assert_eq!(head(&app), at);
+        assert_eq!(app.buffer().selected_text(), "abcd");
         keys(&mut app, "X");
-        assert_eq!(text(&app), "abcdXef\n");
-        assert_eq!(before, "abcdef\n");
+        assert_eq!(text(&app), "Xef\n");
+        assert!(app.buffer().selected_text().is_empty());
+        assert_eq!(app.clipboard.get_text().unwrap(), "CLIP");
+        app.handle(crate::action::SemanticAction::Undo);
+        assert_eq!(text(&app), "abcdef\n");
+        assert_eq!(app.buffer().selected_text(), "abcd");
     }
 
     #[test]
-    fn i_in_visual_line_inserts_at_the_remembered_column() {
-        let mut app = modal_app("abcdef\nxyz\n");
-        keys(&mut app, "ll");
-        assert_eq!(app.buffer().cursor_line_col(), (0, 2));
-        keys(&mut app, "V");
-        assert_eq!(mode(&app), EditMode::Visual { line: true });
+    fn i_in_visual_paste_replaces_the_selection_and_backspace_deletes_it() {
+        let mut app = modal_app("abcdef\n");
+        app.clipboard.set_text("CLIP".into()).unwrap();
+        keys(&mut app, "vllll");
         keys(&mut app, "i");
+        app.handle(crate::action::SemanticAction::Paste);
+        assert_eq!(mode(&app), EditMode::Insert);
+        assert_eq!(text(&app), "CLIPef\n");
+        assert_eq!(app.clipboard.get_text().unwrap(), "CLIP");
+        app.handle(crate::action::SemanticAction::Undo);
+        assert_eq!(text(&app), "abcdef\n");
+        assert_eq!(app.buffer().selected_text(), "abcd");
+
+        let mut app = modal_app("abcdef\n");
+        app.clipboard.set_text("CLIP".into()).unwrap();
+        keys(&mut app, "vllll");
+        keys(&mut app, "i");
+        app.handle(crate::action::SemanticAction::DeleteBackward);
+        assert_eq!(text(&app), "ef\n");
+        assert!(app.buffer().selected_text().is_empty());
+        assert_eq!(app.clipboard.get_text().unwrap(), "CLIP");
+        app.handle(crate::action::SemanticAction::Undo);
+        assert_eq!(text(&app), "abcdef\n");
+    }
+
+    #[test]
+    fn i_in_visual_move_or_esc_clears_the_selection_without_deleting() {
+        let mut app = modal_app("abcdef\n");
+        keys(&mut app, "vllll");
+        keys(&mut app, "i");
+        assert_eq!(app.buffer().selected_text(), "abcd");
+        app.handle(crate::action::SemanticAction::Move {
+            movement: crate::buffer::Movement::Right,
+            extend: false,
+        });
         assert_eq!(mode(&app), EditMode::Insert);
         assert!(app.buffer().selected_text().is_empty());
-        assert_eq!(app.buffer().cursor_line_col(), (0, 2));
+        assert_eq!(text(&app), "abcdef\n");
+
+        let mut app = modal_app("abcdef\n");
+        keys(&mut app, "vllll");
+        keys(&mut app, "i");
+        esc(&mut app);
+        assert_eq!(mode(&app), EditMode::Normal);
+        assert!(app.buffer().selected_text().is_empty());
+        assert_eq!(text(&app), "abcdef\n");
+    }
+
+    #[test]
+    fn i_in_visual_line_keeps_the_line_selection_until_you_type() {
+        let mut app = modal_app("abcdef\nxyz\n");
+        keys(&mut app, "V");
+        assert_eq!(mode(&app), EditMode::Visual { line: true });
+        assert_eq!(app.buffer().selected_text(), "abcdef");
+        keys(&mut app, "i");
+        assert_eq!(mode(&app), EditMode::Insert);
+        assert_eq!(app.buffer().selected_text(), "abcdef");
         keys(&mut app, "X");
-        assert_eq!(text(&app), "abXcdef\nxyz\n");
+        assert_eq!(text(&app), "X\nxyz\n");
+        assert!(app.buffer().selected_text().is_empty());
+        app.handle(crate::action::SemanticAction::Undo);
+        assert_eq!(text(&app), "abcdef\nxyz\n");
+        assert_eq!(app.buffer().selected_text(), "abcdef");
+    }
+
+    #[test]
+    fn visual_c_still_cuts_to_the_clipboard_and_enters_insert() {
+        let mut app = modal_app("abcdef\n");
+        keys(&mut app, "vllll");
+        keys(&mut app, "c");
+        assert_eq!(mode(&app), EditMode::Insert);
+        assert_eq!(text(&app), "ef\n");
+        assert!(app.buffer().selected_text().is_empty());
+        assert_eq!(app.clipboard.get_text().unwrap(), "abcd");
+        keys(&mut app, "X");
+        assert_eq!(text(&app), "Xef\n");
     }
 
     #[test]
