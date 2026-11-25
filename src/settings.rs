@@ -29,6 +29,8 @@ pub enum SettingId {
     ModeHints,
     /// The mode after start or after turning Modeless off.
     StartMode,
+    /// While Modeless is off, the keys of Normal and Visual: Vim or Mnemonic.
+    KeyStyle,
     /// Highlight the bracket at the cursor and its partner.
     MatchBrackets,
     /// Color brackets by nesting depth.
@@ -1516,6 +1518,7 @@ impl AiPrefs {
                 | SettingId::Modeless
                 | SettingId::ModeHints
                 | SettingId::StartMode
+                | SettingId::KeyStyle
                 | SettingId::MatchBrackets
                 | SettingId::ColorizeBrackets
                 | SettingId::ColorTheme
@@ -1841,6 +1844,9 @@ pub struct EditorPrefs {
     /// The mode after start or after turning Modeless off. Normal by default.
     #[serde(default)]
     pub start_mode: StartModePref,
+    /// The keys of Normal and Visual while Modeless is off. Vim by default.
+    #[serde(default)]
+    pub key_style: crate::modal::KeyStyle,
     /// Highlight the bracket at the cursor and its partner. On by default.
     #[serde(default = "enabled")]
     pub match_brackets: bool,
@@ -1861,6 +1867,7 @@ impl Default for EditorPrefs {
             modeless: true,
             mode_hints: true,
             start_mode: StartModePref::Normal,
+            key_style: crate::modal::KeyStyle::Vim,
             match_brackets: true,
             colorize_brackets: true,
         }
@@ -1885,6 +1892,7 @@ impl EditorPrefs {
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => vec!["On".into(), "Off".into()],
             SettingId::StartMode => vec!["Normal".into(), "Insert".into()],
+            SettingId::KeyStyle => vec!["Vim".into(), "Mnemonic".into()],
             SettingId::LineEnding => vec!["Auto".into(), "LF".into(), "CRLF".into()],
             _ => Vec::new(),
         }
@@ -1903,6 +1911,7 @@ impl EditorPrefs {
             SettingId::Modeless => usize::from(!self.modeless),
             SettingId::ModeHints => usize::from(!self.mode_hints),
             SettingId::StartMode => self.start_mode.index(),
+            SettingId::KeyStyle => self.key_style.index(),
             SettingId::MatchBrackets => usize::from(!self.match_brackets),
             SettingId::ColorizeBrackets => usize::from(!self.colorize_brackets),
             SettingId::LineEnding => self.line_ending.index(),
@@ -1920,6 +1929,7 @@ impl EditorPrefs {
             SettingId::Modeless => on_off(self.modeless),
             SettingId::ModeHints => on_off(self.mode_hints),
             SettingId::StartMode => self.start_mode.as_str().to_string(),
+            SettingId::KeyStyle => self.key_style.as_str().to_string(),
             SettingId::MatchBrackets => on_off(self.match_brackets),
             SettingId::ColorizeBrackets => on_off(self.colorize_brackets),
             SettingId::LineEnding => self.line_ending.as_str().to_string(),
@@ -1948,6 +1958,7 @@ impl EditorPrefs {
             SettingId::Modeless => self.modeless = index == 0,
             SettingId::ModeHints => self.mode_hints = index == 0,
             SettingId::StartMode => self.start_mode = StartModePref::from_index(index),
+            SettingId::KeyStyle => self.key_style = crate::modal::KeyStyle::from_index(index),
             SettingId::MatchBrackets => self.match_brackets = index == 0,
             SettingId::ColorizeBrackets => self.colorize_brackets = index == 0,
             SettingId::LineEnding => self.line_ending = LineEndingPref::from_index(index),
@@ -1977,6 +1988,9 @@ impl EditorPrefs {
                     StartModePref::Normal
                 };
             }
+            SettingId::KeyStyle => {
+                self.key_style = crate::modal::KeyStyle::parse(token).unwrap_or_default();
+            }
             SettingId::MatchBrackets => self.match_brackets = token != "off",
             SettingId::ColorizeBrackets => self.colorize_brackets = token != "off",
             SettingId::LineEnding => {
@@ -2003,6 +2017,7 @@ impl EditorPrefs {
             SettingId::Modeless => self.modeless = defaults.modeless,
             SettingId::ModeHints => self.mode_hints = defaults.mode_hints,
             SettingId::StartMode => self.start_mode = defaults.start_mode,
+            SettingId::KeyStyle => self.key_style = defaults.key_style,
             SettingId::MatchBrackets => self.match_brackets = defaults.match_brackets,
             SettingId::ColorizeBrackets => self.colorize_brackets = defaults.colorize_brackets,
             SettingId::LineEnding => self.line_ending = defaults.line_ending,
@@ -2442,6 +2457,11 @@ pub fn sections() -> &'static [Section] {
                             label: "Start mode",
                             detail: "With Modeless off, the mode after start or after turning Modeless off.",
                             id: SettingId::StartMode,
+                        },
+                        Item {
+                            label: "Key style",
+                            detail: "With Modeless off: Vim keys (yy copy line) or Mnemonic keys (cl copy line).",
+                            id: SettingId::KeyStyle,
                         },
                         Item {
                             label: "Match brackets",
@@ -3022,6 +3042,35 @@ mod tests {
             index(SettingId::AiApiKey),
             "the nearest shown row above"
         );
+    }
+
+    #[test]
+    fn key_style_is_vim_by_default_and_saves_by_name() {
+        use crate::modal::KeyStyle;
+        let mut prefs = EditorPrefs::default();
+        assert_eq!(prefs.key_style, KeyStyle::Vim);
+        assert_eq!(
+            EditorPrefs::choice_names(SettingId::KeyStyle),
+            ["Vim", "Mnemonic"]
+        );
+        assert_eq!(prefs.choice_label(SettingId::KeyStyle), "Vim");
+        prefs.set_choice(SettingId::KeyStyle, 1);
+        assert_eq!(prefs.key_style, KeyStyle::Mnemonic);
+        assert_eq!(prefs.choice_token(SettingId::KeyStyle), "mnemonic");
+        let json = serde_json::to_string(&prefs).unwrap();
+        assert!(json.contains(r#""key_style":"mnemonic""#), "{json}");
+        let back: EditorPrefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.key_style, KeyStyle::Mnemonic);
+        prefs.restore_choice(SettingId::KeyStyle, "vim");
+        assert_eq!(prefs.key_style, KeyStyle::Vim);
+        prefs.restore_choice(SettingId::KeyStyle, "something else");
+        assert_eq!(prefs.key_style, KeyStyle::Vim);
+        prefs.key_style = KeyStyle::Mnemonic;
+        prefs.reset(SettingId::KeyStyle);
+        assert_eq!(prefs.key_style, KeyStyle::Vim);
+        // An older file without the field keeps Vim.
+        let old: EditorPrefs = serde_json::from_str(r#"{"modeless":false}"#).unwrap();
+        assert_eq!(old.key_style, KeyStyle::Vim);
     }
 
     #[test]

@@ -186,6 +186,16 @@ pub enum CommandId {
     HalfPageDown,
     /// Modeless off: move the cursor half a screen up.
     HalfPageUp,
+    /// Modeless off: copy the word at the cursor.
+    CopyWord,
+    /// Modeless off: cut the word at the cursor.
+    CutWord,
+    /// Modeless off: select the word at the cursor (Visual mode).
+    SelectWord,
+    /// Modeless off: copy the whole file, keeping the cursor where it is.
+    CopyAll,
+    /// Choose the keys of Normal and Visual: Vim or Mnemonic (Settings → Editor → Key style).
+    KeyStyle,
     /// Save the focused file, then close its tab (or quit when it is the last one).
     SaveClose,
     /// Close the focused tab, or quit when it is the last one.
@@ -365,6 +375,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: false,
     },
     CommandSpec {
+        id: CommandId::KeyStyle,
+        name: "key-style",
+        description: "With Modeless off, use Vim keys (yy, dd) or Mnemonic keys (cl, xl); no name switches",
+        shortcut: "",
+        arg: Some("[vim|mnemonic]"),
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
         id: CommandId::ModeNormal,
         name: "mode-normal",
         description: "Return to Normal mode",
@@ -522,6 +541,42 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "half-page-up",
         description: "Move the cursor half a screen up",
         shortcut: "Ctrl+U",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::CopyWord,
+        name: "copy-word",
+        description: "Copy the word at the cursor",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::CutWord,
+        name: "cut-word",
+        description: "Cut the word at the cursor",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::SelectWord,
+        name: "select-word",
+        description: "Select the word at the cursor (Visual mode)",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::CopyAll,
+        name: "copy-all",
+        description: "Copy the whole file; the cursor stays where it is",
+        shortcut: "",
         arg: None,
         editor: true,
         explorer: false,
@@ -1190,6 +1245,11 @@ fn importance(id: CommandId) -> u16 {
         CommandId::PasteBefore => 297,
         CommandId::HalfPageDown => 298,
         CommandId::HalfPageUp => 299,
+        CommandId::CopyWord => 301,
+        CommandId::CutWord => 302,
+        CommandId::SelectWord => 303,
+        CommandId::CopyAll => 304,
+        CommandId::KeyStyle => 256,
         CommandId::SaveClose => 51,
         CommandId::CloseOrQuit => 375,
         CommandId::LspRestart => 269,
@@ -1326,6 +1386,11 @@ pub fn modal_only(id: CommandId) -> bool {
             | CommandId::PasteBefore
             | CommandId::HalfPageDown
             | CommandId::HalfPageUp
+            | CommandId::CopyWord
+            | CommandId::CutWord
+            | CommandId::SelectWord
+            | CommandId::CopyAll
+            | CommandId::KeyStyle
     )
 }
 
@@ -1368,7 +1433,7 @@ pub fn is_line_number(text: &str) -> bool {
 /// Commands whose argument may be left out. `preview` alone opens the side picker
 /// instead of waiting for a typed side.
 pub fn optional_arg(id: CommandId) -> bool {
-    matches!(id, CommandId::Preview)
+    matches!(id, CommandId::Preview | CommandId::KeyStyle)
 }
 
 /// Which names a command argument can complete.

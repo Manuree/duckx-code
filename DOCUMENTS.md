@@ -339,10 +339,12 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 Settings → Editor → **Modeless** is On by default, and then nothing in this section applies: keys work exactly as described everywhere else in this file. Turn it Off (or run `modeless`) for three modes in the editor. The mode is shown in three places at once, so it is never a guess:
 
 * **The status bar badge:** `NORMAL` (blue), `INSERT` (green), `VISUAL` or `V-LINE` (pink). Each mode has its own color in every built-in theme, never shared with another badge. A started key sequence or count shows right after it, such as `3d` or `g`.
-* **The hint row** just above the status bar lists the keys that do something in this mode, with a short word each (`i insert  v select  dd del line … ? keys`). While a sequence is started it lists only the keys that can finish it, plus `Esc cancel`. Turn it off with Settings → Editor → **Mode hints** or `mode-hints`.
+* **The hint row** just above the status bar lists the keys that do something in this mode by name, with the letters to press highlighted in the mode color, bold, and underlined (`Insert  Visual  dd Cut line … ? Keys`: the `I` of Insert and the `V` of Visual are marked). When a key's letters are not all in its name, or it is a symbol, a named key, or a `Ctrl` key, the key is shown before the name instead (`dd Cut line`, `Tab Jump forward`, `? Keys`). While a sequence is started it lists only the keys that can finish it, with the next letter highlighted (after `g`, the `D` of goto Definition), plus `Esc cancel`. Turn it off with Settings → Editor → **Mode hints** or `mode-hints`.
 * **The cursor:** a block in Normal, a green underline in Insert, and a pink block in Visual. The cursor line number takes the mode color too.
 
 **Start mode** (Settings → Editor) picks the mode when Modeless turns off and when duckx-code starts: Normal (the default) or Insert. There is one mode for the whole app; switching windows or tabs keeps it, except that Visual becomes Normal when another window gets the focus.
+
+**Key style** (Settings → Editor, or `key-style`) picks the keys of Normal and Visual: **Vim** (the default; the tables below) or **Mnemonic** (see [Mnemonic keys](#mnemonic-keys)). Insert is the same in both.
 
 Every key below either does the same as a key duckx-code already has (shown in brackets) or runs a Command Bar command, so there is nothing new to learn behind it. `Ctrl`, `Alt`, and F-key shortcuts, the arrows, `Home`, `End`, `PgUp`, `PgDn`, and the mouse work in every mode exactly as in Modeless. Mode keys cannot be rebound yet; the shortcuts in Settings → Keybindings still can.
 
@@ -409,6 +411,47 @@ Printable keys never type in Normal. A key with no command shows *No command on 
 
 In Visual Line, `y` and `d` take the line break after the last line, so `p` / `P` in Normal bring back whole lines. Counts work: `3yy` copies three lines.
 
+### Mnemonic keys
+
+With **Key style** set to Mnemonic, a key names its command: a verb letter, then what it acts on. A first letter is either a key or the start of a sequence, never both, so nothing waits for a timeout. Motions, `i a I A o O`, `v V`, `>> <<`, `gc`, `%`, `=`, `Tab`, `]d [d`, `:`, `?`, `Esc`, `Ctrl + D` / `Ctrl + U`, and every `Ctrl`, `Alt`, and F-key shortcut are the same as in Vim style. Save stays `Ctrl + S` or `:w`.
+
+| Keys (Normal) | Does |
+| :--- | :--- |
+| `cl` `cc` | Copy the line (`copy-line`); `3cl` copies three lines |
+| `cw` | Copy the word at the cursor (`copy-word`) |
+| `ca` | Copy the whole file; the cursor stays (`copy-all`) |
+| `xl` `xx` | Cut the line (`cut-line`) |
+| `xw` | Cut the word at the cursor (`cut-word`) |
+| `p` `P` | Paste below / above (`paste-after`, `paste-before`) |
+| `sc` | Select characters: Visual (`mode-visual`) |
+| `sl` `ss` | Select lines: Visual Line (`mode-visual-line`) |
+| `sw` `sa` `sb` | Select the word (`select-word`), all (`select-all`), to the matching bracket (`select-bracket`) |
+| `sq` `sp` `s{` `s[` | Select inside quotes, `( )`, `{ }`, `[ ]`; again takes the brackets too |
+| `dc` | Delete the character (`Delete`) |
+| `dl` `dd` | Delete the line; the clipboard is untouched (`delete-line`) |
+| `u` `r` | Undo / redo |
+| `md` `mu` | Move the line down / up |
+| `ff` `fn` `fP` | Find, next match, previous match (`/`, `n`, `N` work too) |
+| `fo` | Open a file by name (`file-picker`) |
+| `R` | Find and replace (`replace`) |
+| `gd` `gr` `ga` `gR` | Definition, references, code actions, rename |
+| `gt` `gT` | Next / previous tab |
+| `gl` | Go to a line: `12gl` goes to line 12; `gl` alone opens `goto ` in the Command Bar |
+| `gh` `H` | Hover |
+| `e` | Show or hide the explorer (`explorer`) |
+| `q` | Close the tab, or quit on the last one (`close-or-quit`) |
+
+| Keys (Visual) | Does |
+| :--- | :--- |
+| `c` | Copy the selection |
+| `x` | Cut it |
+| `e` | Edit: delete it and Insert (`change-selection`) |
+| `p` | Paste over it |
+| `>` `<` `Tab` `Shift + Tab` `gc` `o` | Indent, outdent, comment, other end, as in Vim style |
+| `s…` | The select keys above change the selection |
+
+The hint row names each verb (`Insert  Select  Copy  x Cut  Paste  Undo  Redo  Find  : Commands  ? Keys`) and, after `c`, shows `copy Line  copy Word  copy All`. `x` is not a letter of "Cut", so it is shown before the name.
+
 ### Keys that differ from vim
 
 These keep their duckx-code meaning in every mode; the `?` list shows them too (type `ctrl`).
@@ -424,7 +467,7 @@ These keep their duckx-code meaning in every mode; the `?` list shows them too (
 
 ### The key list
 
-`?` in Normal or Visual (or the `keys` command) opens a list of every key of the mode with what it does and the command or key it mirrors. Type to filter, `Up` / `Down` to move, `Enter` to run the highlighted key, `Esc` to close.
+`?` in Normal or Visual (or the `keys` command) opens a list of every key of the mode in the current Key style: the key, its name with the letters highlighted as in the hint row, what it does, and the command or key it mirrors. Type to filter, `Up` / `Down` to move, `Enter` to run the highlighted key, `Esc` to close.
 
 ### Esc and Double Esc
 
@@ -438,6 +481,7 @@ An `Esc` that leaves Insert or Visual, or cancels a count or sequence, is not th
 | :--- | :--- | :--- |
 | `modeless` | Turn Modeless on or off. Flips and saves **Modeless** (Settings → Editor) | — |
 | `mode-hints` | Show or hide the hint row. Flips and saves **Mode hints** | — |
+| `key-style [vim\|mnemonic]` | Set **Key style**; with no name, switch between Vim and Mnemonic, and save it | — |
 | `mode-normal` | Back to Normal | `Esc` |
 | `mode-insert` | Insert at the cursor | `i` |
 | `mode-visual` | Visual, or back to Normal from it | `v` |
@@ -456,6 +500,12 @@ An `Esc` that leaves Insert or Visual, or cancels a count or sequence, is not th
 | `paste-before` | Paste above (a whole line) or at the cursor | `P` |
 | `half-page-down` | Half a page down | `Ctrl + D` |
 | `half-page-up` | Half a page up | `Ctrl + U` |
+| `copy-word` | Copy the word at the cursor | `cw` (Mnemonic) |
+| `cut-word` | Cut the word at the cursor | `xw` (Mnemonic) |
+| `select-word` | Select the word at the cursor (Visual) | `sw` (Mnemonic) |
+| `copy-all` | Copy the whole file; the cursor stays | `ca` (Mnemonic) |
+
+The Mode key column and the Command Bar show the key of the current Key style (`yy` in Vim, `cl` in Mnemonic).
 
 The mode commands are listed in the Command Bar only while Modeless is Off. Every other mode key runs a command that is already in the [Command List](#64-command-list) (`gd` is `goto-definition`, `gr` is `goto-references`, and so on) or does what an existing key does.
 
@@ -811,6 +861,7 @@ Editor, Files, and Keybindings are saved in the same `settings.json` as the them
 | Modeless | On, Off | On (the default) keeps the editor modeless: every printable key types. Off adds Normal, Insert, and Visual modes (see [Modal editing](#modal-editing-modeless-off)). The `modeless` command flips it. |
 | Mode hints | On, Off | With Modeless Off, On shows the keys of the current mode in a row above the status bar. The default is On. The `mode-hints` command flips it. |
 | Start mode | Normal, Insert | With Modeless Off, the mode after start and after turning Modeless off. The default is Normal. |
+| Key style | Vim, Mnemonic | With Modeless Off, the keys of Normal and Visual. Vim (the default) uses `yy`, `dd`, …; Mnemonic names the command, such as `cl` copy line and `xl` cut line (see [Mnemonic keys](#mnemonic-keys)). The `key-style` command sets or switches it. |
 | Match brackets | On, Off | On draws the bracket at the cursor (or just before it) and its pair bold on a soft background, in the focused window, when both are on screen. A bracket with no pair is drawn in the error color. Brackets in strings and comments are skipped. The default is On. The `bracket-match` command flips it. |
 | Colorize bracket pairs | On, Off | On colors `()` `[]` `{}` by how deep they are nested, cycling through the syntax theme's bracket colors. Unmatched ones use the error color. The default is On. The `bracket-colors` command flips it. |
 | Trim trailing space | On, Off | On removes spaces and tabs at the end of a line when the file is saved. The default is Off. |

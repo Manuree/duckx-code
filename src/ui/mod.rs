@@ -758,6 +758,48 @@ mod tests {
             .join("\n")
     }
 
+    /// The hint row of a modal app: its text and the cells drawn bold and underlined.
+    fn hint_row(app: &App, width: u16, height: u16) -> (String, String) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = height - 2;
+        let text: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+        let marked: String = (0..width)
+            .map(|x| {
+                let cell = &buffer[(x, y)];
+                let on = cell.modifier.contains(ratatui::style::Modifier::BOLD)
+                    && cell.modifier.contains(ratatui::style::Modifier::UNDERLINED);
+                if on { cell.symbol() } else { " " }.to_string()
+            })
+            .collect();
+        (text, marked)
+    }
+
+    #[test]
+    fn the_hint_row_marks_the_letters_to_press_in_both_key_styles() {
+        let mut app = App::new(Buffer::from_text("one two\n"), None);
+        app.editor_prefs.modeless = false;
+        app.handle(SemanticAction::Deselect);
+        assert!(app.mode_hints_shown());
+        let (text, marked) = hint_row(&app, 120, 12);
+        assert!(text.contains("Insert"), "{text}");
+        assert!(text.contains("dd Cut line"), "{text}");
+        let marked: String = marked.split_whitespace().collect();
+        assert!(marked.starts_with("IVVdd"), "{marked}");
+
+        app.editor_prefs.key_style = crate::modal::KeyStyle::Mnemonic;
+        app.handle(SemanticAction::Deselect);
+        let (text, marked) = hint_row(&app, 120, 12);
+        assert!(
+            text.contains("Insert  Select  Copy  x Cut  Paste"),
+            "{text}"
+        );
+        let marked: String = marked.split_whitespace().collect();
+        // I(nsert) S(elect) C(opy), the fallback key x, P(aste) U(ndo) R(edo) F(ind) : ?
+        assert_eq!(marked, "ISCxPURF:?", "{text}");
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn the_convert_keyboard_list_is_a_rounded_dropdown_under_the_selection() {

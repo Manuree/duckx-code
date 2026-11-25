@@ -10,7 +10,9 @@ use super::App;
 use crate::action::{Focus, SemanticAction};
 use crate::buffer::Movement;
 use crate::command::CommandId;
-use crate::modal::{EditMode, KeyList, KeyListAction, LineSelect, ModalAction, ModalState};
+use crate::modal::{
+    EditMode, KeyList, KeyListAction, KeyStyle, LineSelect, ModalAction, ModalState,
+};
 use crate::settings::StartModePref;
 
 /// What [`App::modal_after`] needs to know about the state before an action.
@@ -63,6 +65,18 @@ impl App {
         })
     }
 
+    /// The shortcut the Command Bar shows for `spec`. While Modeless is off, a mode
+    /// command shows its key in the current Key style (`yy` or `cl`).
+    pub fn command_shortcut(&self, spec: &crate::command::CommandSpec) -> &'static str {
+        if self.modal().is_none() || !crate::command::modal_only(spec.id) {
+            return spec.shortcut;
+        }
+        crate::modal::keys_for(self.modal_state.style, spec.id)
+            .first()
+            .copied()
+            .unwrap_or("")
+    }
+
     /// True when the hint row is drawn above the status bar.
     pub fn mode_hints_shown(&self) -> bool {
         self.editor_prefs.mode_hints && self.modal_input().is_some()
@@ -73,12 +87,21 @@ impl App {
     pub(super) fn sync_modal(&mut self) {
         let on = !self.editor_prefs.modeless;
         crate::command::show_modal_commands(on);
+        let style = self.editor_prefs.key_style;
+        if self.modal_state.style != style {
+            // A started sequence or the `?` list belongs to the other keys.
+            self.modal_state.style = style;
+            self.modal_state.pending = None;
+            self.modal_state.count = None;
+            self.modal_state.key_list = None;
+        }
         if on == self.modal_applied {
             return;
         }
         self.modal_applied = on;
         self.modal_state = ModalState {
             mode: start_mode(self.editor_prefs.start_mode),
+            style,
             ..ModalState::default()
         };
     }
@@ -96,6 +119,33 @@ impl App {
                 _ => "Modeless off: NORMAL. Press i to type, ? for keys".to_string(),
             }
         });
+    }
+
+    /// `key-style [vim|mnemonic]`: set Settings → Editor → Key style, or switch it
+    /// with no name, and save it.
+    pub(super) fn set_key_style(&mut self, arg: Option<&str>) -> Result<(), String> {
+        let arg = arg.map(str::trim).filter(|text| !text.is_empty());
+        let style = match arg {
+            Some(text) => KeyStyle::parse(text)
+                .ok_or_else(|| format!("Unknown key style: {text}. Use vim or mnemonic"))?,
+            None => match self.editor_prefs.key_style {
+                KeyStyle::Vim => KeyStyle::Mnemonic,
+                KeyStyle::Mnemonic => KeyStyle::Vim,
+            },
+        };
+        self.editor_prefs.key_style = style;
+        self.queue_settings_save();
+        self.sync_modal();
+        let example = match style {
+            KeyStyle::Vim => "yy copies a line, dd cuts it",
+            KeyStyle::Mnemonic => "cl copies a line, xl cuts it",
+        };
+        self.message = Some(if self.editor_prefs.modeless {
+            format!("Key style {}: used when Modeless is off", style.label())
+        } else {
+            format!("Key style {}: {example}. ? for keys", style.label())
+        });
+        Ok(())
     }
 
     /// `mode-hints`: flip Settings → Editor → Mode hints and save it.
@@ -510,6 +560,64 @@ impl App {
         Ok(())
     }
 
+    /// The word, punctuation, or space run under the cursor (the start of a selection).
+    fn word_at_cursor(&self) -> (usize, usize) {
+        let selection = self.buffer().selection();
+        let at = if selection.is_empty() {
+            selection.head
+        } else {
+            selection.from()
+        };
+        let buffer = self.buffer();
+        let blank = |(start, end): (usize, usize)| {
+            buffer
+                .rope()
+                .slice(start..end)
+                .chars()
+                .all(char::is_whitespace)
+        };
+        let range = buffer.word_range(at);
+        // Just past a word (where `w` stops): that word, not the space after it.
+        if blank(range) && at > 0 {
+            let before = buffer.word_range(at - 1);
+            if !blank(before) && before.1 == at {
+                return before;
+            }
+        }
+        range
+    }
+
+    /// `cw` and `xw`: copy or cut the word at the cursor. The cursor ends at its start.
+    fn word_clip(&mut self, cut: bool) -> Result<(), String> {
+        let (start, end) = self.word_at_cursor();
+        if start == end {
+            return Err("No word at the cursor".to_string());
+        }
+        self.enter_normal_from_visual();
+        self.buffer_mut().select_range(start, end);
+        let result = if cut { self.cut() } else { self.copy() };
+        if self.buffer().selection().is_empty() {
+            return result;
+        }
+        self.buffer_mut().select_range(start, start);
+        result
+    }
+
+    /// `ca`: the whole file on the clipboard; the cursor and the mode stay.
+    fn copy_all(&mut self) -> Result<(), String> {
+        let text = self.buffer().rope().to_string();
+        if text.is_empty() {
+            return Err("Nothing to copy: the file is empty".to_string());
+        }
+        let lines = self.buffer().len_lines();
+        self.clipboard.set_text(text)?;
+        self.message = Some(format!(
+            "Copied the whole file ({lines} {})",
+            if lines == 1 { "line" } else { "lines" }
+        ));
+        Ok(())
+    }
+
     /// `Ctrl+D` and `Ctrl+U` in Normal: half a screen, scrolling with the cursor.
     fn half_page(&mut self, down: bool) {
         let lines = (self.view().height / 2).max(1);
@@ -631,6 +739,25 @@ impl App {
             CommandId::CutLine => self.line_clip(true, 1),
             CommandId::PasteAfter => self.paste_lines(true),
             CommandId::PasteBefore => self.paste_lines(false),
+            CommandId::CopyWord => self.word_clip(false),
+            CommandId::CutWord => self.word_clip(true),
+            CommandId::SelectWord => {
+                let (start, end) = self.word_at_cursor();
+                self.modal_state.line = None;
+                self.buffer_mut().select_range(start, end);
+                self.modal_state.mode = EditMode::Visual { line: false };
+                Ok(())
+            }
+            CommandId::CopyAll => self.copy_all(),
+            CommandId::GotoLine => {
+                // `gl` with no count asks for the line, as `goto` does.
+                self.handle_inner(SemanticAction::OpenCommandBar);
+                if let Some(bar) = self.command_bar.as_mut() {
+                    bar.set_input("goto ");
+                    bar.prompted = Some(CommandId::GotoLine);
+                }
+                Ok(())
+            }
             CommandId::HalfPageDown => {
                 self.half_page(true);
                 Ok(())
@@ -667,7 +794,11 @@ impl App {
             }
             CommandId::ChangeSelection => {
                 if !mode.is_visual() || self.buffer().selection().is_empty() {
-                    Err("Select text first (v or V), then c".to_string())
+                    let key = crate::modal::keys_for(self.modal_state.style, id)
+                        .first()
+                        .copied()
+                        .unwrap_or("c");
+                    Err(format!("Select text first (v or V), then {key}"))
                 } else {
                     let result = self.run_command(CommandId::Cut, None);
                     self.enter_insert();
@@ -757,7 +888,7 @@ impl App {
             return;
         };
         let mode = self.modal_state.mode;
-        let rows = crate::modal::key_list(mode, &list.query);
+        let rows = crate::modal::key_list(self.modal_state.style, mode, &list.query);
         match action {
             KeyListAction::Prev => {
                 list.selected = super::wrap_index(list.selected, rows.len(), -1);
@@ -884,6 +1015,197 @@ mod tests {
 
     fn head(app: &App) -> usize {
         app.buffer().selection().head
+    }
+
+    fn mnemonic_app(text: &str) -> App {
+        let mut app = modal_app(text);
+        app.run_command(CommandId::KeyStyle, Some("mnemonic"))
+            .unwrap();
+        assert_eq!(app.modal().unwrap().style, KeyStyle::Mnemonic);
+        app
+    }
+
+    #[test]
+    fn key_style_command_sets_switches_and_rejects_unknown_names() {
+        let mut app = modal_app("one\n");
+        assert_eq!(app.editor_prefs.key_style, KeyStyle::Vim);
+        assert!(
+            crate::command::find_command(
+                "key-style",
+                crate::command::CommandContext::Editor,
+                false
+            )
+            .is_some()
+        );
+        app.run_command(CommandId::KeyStyle, None).unwrap();
+        assert_eq!(app.editor_prefs.key_style, KeyStyle::Mnemonic);
+        assert_eq!(app.modal().unwrap().style, KeyStyle::Mnemonic);
+        app.run_command(CommandId::KeyStyle, None).unwrap();
+        assert_eq!(app.modal().unwrap().style, KeyStyle::Vim);
+        app.run_command(CommandId::KeyStyle, Some("Mnemonic"))
+            .unwrap();
+        assert_eq!(app.modal().unwrap().style, KeyStyle::Mnemonic);
+        assert!(app.run_command(CommandId::KeyStyle, Some("emacs")).is_err());
+        assert_eq!(app.modal().unwrap().style, KeyStyle::Mnemonic);
+        // A started sequence ends when the keys change.
+        keys(&mut app, "c");
+        assert_eq!(app.modal().unwrap().pending, Some('c'));
+        app.run_command(CommandId::KeyStyle, Some("vim")).unwrap();
+        assert_eq!(app.modal().unwrap().pending, None);
+    }
+
+    #[test]
+    fn key_style_survives_modeless_on_and_off_and_modeless_on_ignores_it() {
+        let mut app = mnemonic_app("abc\n");
+        app.run_command(CommandId::Modeless, None).unwrap();
+        assert!(app.modal().is_none());
+        // Modeless on: letters still type, whatever the key style.
+        keys(&mut app, "cl");
+        assert_eq!(text(&app), "clabc\n");
+        assert!(
+            crate::command::find_command(
+                "key-style",
+                crate::command::CommandContext::Editor,
+                false
+            )
+            .is_none()
+        );
+        app.run_command(CommandId::Modeless, None).unwrap();
+        assert_eq!(app.modal().unwrap().style, KeyStyle::Mnemonic);
+    }
+
+    #[test]
+    fn mnemonic_copy_cut_and_paste_lines_and_words() {
+        let mut app = mnemonic_app("one two\nthree\n");
+        keys(&mut app, "cl");
+        assert_eq!(app.clipboard.get_text().unwrap(), "one two\n");
+        assert_eq!(text(&app), "one two\nthree\n");
+        keys(&mut app, "j");
+        keys(&mut app, "p");
+        assert_eq!(text(&app), "one two\nthree\none two\n");
+        keys(&mut app, "gg");
+        keys(&mut app, "cw");
+        assert_eq!(app.clipboard.get_text().unwrap(), "one");
+        assert_eq!(mode(&app), EditMode::Normal);
+        assert!(app.buffer().selection().is_empty());
+        keys(&mut app, "xw");
+        assert_eq!(text(&app), " two\nthree\none two\n");
+        assert_eq!(app.clipboard.get_text().unwrap(), "one");
+        keys(&mut app, "xx");
+        assert_eq!(text(&app), "three\none two\n");
+        assert_eq!(app.clipboard.get_text().unwrap(), " two\n");
+        keys(&mut app, "P");
+        assert_eq!(text(&app), " two\nthree\none two\n");
+    }
+
+    #[test]
+    fn mnemonic_counts_take_that_many_lines() {
+        let mut app = mnemonic_app("a\nb\nc\nd\n");
+        keys(&mut app, "3cl");
+        assert_eq!(app.clipboard.get_text().unwrap(), "a\nb\nc\n");
+        keys(&mut app, "2xx");
+        assert_eq!(text(&app), "c\nd\n");
+        assert_eq!(app.clipboard.get_text().unwrap(), "a\nb\n");
+        // dl / dd delete without touching the clipboard.
+        keys(&mut app, "dd");
+        assert_eq!(text(&app), "d\n");
+        assert_eq!(app.clipboard.get_text().unwrap(), "a\nb\n");
+        keys(&mut app, "dc");
+        assert_eq!(text(&app), "\n");
+    }
+
+    #[test]
+    fn mnemonic_select_keys_enter_visual() {
+        let mut app = mnemonic_app("alpha beta\ngamma\n");
+        keys(&mut app, "wl");
+        keys(&mut app, "sw");
+        assert_eq!(mode(&app), EditMode::Visual { line: false });
+        assert_eq!(app.buffer().selected_text(), "beta");
+        keys(&mut app, "c");
+        assert_eq!(app.clipboard.get_text().unwrap(), "beta");
+        assert_eq!(mode(&app), EditMode::Normal);
+        keys(&mut app, "sl");
+        assert_eq!(mode(&app), EditMode::Visual { line: true });
+        esc(&mut app);
+        keys(&mut app, "sa");
+        assert_eq!(mode(&app), EditMode::Visual { line: false });
+        assert_eq!(app.buffer().selected_text(), "alpha beta\ngamma\n");
+        keys(&mut app, "x");
+        assert_eq!(text(&app), "");
+        assert_eq!(mode(&app), EditMode::Normal);
+    }
+
+    #[test]
+    fn a_word_key_just_past_a_word_takes_that_word() {
+        let mut app = mnemonic_app("alpha beta\n");
+        keys(&mut app, "w");
+        keys(&mut app, "cw");
+        assert_eq!(app.clipboard.get_text().unwrap(), "alpha");
+    }
+
+    #[test]
+    fn mnemonic_visual_e_edits_the_selection() {
+        let mut app = mnemonic_app("alpha beta\n");
+        keys(&mut app, "sw");
+        keys(&mut app, "e");
+        assert_eq!(mode(&app), EditMode::Insert);
+        keys(&mut app, "Z");
+        assert_eq!(text(&app), "Z beta\n");
+    }
+
+    #[test]
+    fn mnemonic_copy_all_keeps_the_cursor_and_undo_redo_use_u_and_r() {
+        let mut app = mnemonic_app("a\nb\n");
+        keys(&mut app, "j");
+        let at = head(&app);
+        keys(&mut app, "ca");
+        assert_eq!(app.clipboard.get_text().unwrap(), "a\nb\n");
+        assert_eq!(head(&app), at);
+        assert_eq!(mode(&app), EditMode::Normal);
+        keys(&mut app, "dd");
+        assert_eq!(text(&app), "a\n");
+        keys(&mut app, "u");
+        assert_eq!(text(&app), "a\nb\n");
+        keys(&mut app, "r");
+        assert_eq!(text(&app), "a\n");
+    }
+
+    #[test]
+    fn mnemonic_gl_asks_for_a_line_and_a_count_goes_there() {
+        let mut app = mnemonic_app("1\n2\n3\n4\n");
+        keys(&mut app, "3gl");
+        assert_eq!(app.buffer().rope().char_to_line(head(&app)), 2);
+        keys(&mut app, "gl");
+        assert_eq!(app.focus(), Focus::CommandBar);
+        assert_eq!(app.command_bar.as_ref().unwrap().input, "goto ");
+    }
+
+    #[test]
+    fn mnemonic_md_and_mu_move_the_line() {
+        let mut app = mnemonic_app("a\nb\n");
+        keys(&mut app, "md");
+        assert_eq!(text(&app), "b\na\n");
+        keys(&mut app, "mu");
+        assert_eq!(text(&app), "a\nb\n");
+    }
+
+    #[test]
+    fn command_bar_shows_the_mode_key_of_the_current_style() {
+        let mut app = modal_app("x\n");
+        let copy_line = crate::command::spec(CommandId::CopyLine);
+        assert_eq!(app.command_shortcut(copy_line), "yy");
+        app.run_command(CommandId::KeyStyle, Some("mnemonic"))
+            .unwrap();
+        assert_eq!(app.command_shortcut(copy_line), "cl");
+        assert_eq!(
+            app.command_shortcut(crate::command::spec(CommandId::CopyWord)),
+            "cw"
+        );
+        // Other commands keep their own shortcut.
+        assert_eq!(
+            app.command_shortcut(crate::command::spec(CommandId::Find)),
+            crate::command::spec(CommandId::Find).shortcut
+        );
     }
 
     #[test]
@@ -1089,7 +1411,11 @@ mod tests {
         assert!(app.modal().unwrap().key_list.is_some());
         keys(&mut app, "open-line-b");
         let state = app.modal().unwrap();
-        let rows = crate::modal::key_list(state.mode, &state.key_list.as_ref().unwrap().query);
+        let rows = crate::modal::key_list(
+            state.style,
+            state.mode,
+            &state.key_list.as_ref().unwrap().query,
+        );
         assert_eq!(rows[0].keys, "o");
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.modal().unwrap().key_list.is_none());

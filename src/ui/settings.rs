@@ -357,6 +357,7 @@ fn choice_label(app: &App, id: SettingId, open: bool, capturing: bool) -> String
         | SettingId::Modeless
         | SettingId::ModeHints
         | SettingId::StartMode
+        | SettingId::KeyStyle
         | SettingId::MatchBrackets
         | SettingId::ColorizeBrackets => {
             format!("{} {mark}", app.editor_prefs.choice_label(id))
@@ -675,6 +676,7 @@ fn paint_menu(
         | SettingId::Modeless
         | SettingId::ModeHints
         | SettingId::StartMode
+        | SettingId::KeyStyle
         | SettingId::MatchBrackets
         | SettingId::ColorizeBrackets => crate::settings::EditorPrefs::choice_names(id),
         SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {

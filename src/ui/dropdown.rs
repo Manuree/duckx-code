@@ -31,6 +31,10 @@ const GAP: &str = "  ";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Row {
     pub label: String,
+    /// Text right after the label in the label's color, with the chars at
+    /// `lead_marks` drawn in the list's mark style (the `?` list's key names).
+    pub lead: String,
+    pub lead_marks: Vec<usize>,
     pub detail: String,
     pub tag: String,
 }
@@ -41,6 +45,12 @@ impl Row {
             label: label.into(),
             ..Self::default()
         }
+    }
+
+    pub fn lead(mut self, lead: impl Into<String>, marks: Vec<usize>) -> Self {
+        self.lead = lead.into();
+        self.lead_marks = marks;
+        self
     }
 
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
@@ -66,6 +76,8 @@ pub(crate) struct List<'a> {
     pub note: &'a str,
     /// Labels are padded to this width so details line up. 0 keeps them natural.
     pub label_width: usize,
+    /// How the marked chars of a row's lead are drawn. `None`: like the rest.
+    pub marks: Option<Style>,
 }
 
 impl<'a> List<'a> {
@@ -78,7 +90,13 @@ impl<'a> List<'a> {
             empty: "",
             note: "",
             label_width: 0,
+            marks: None,
         }
+    }
+
+    pub fn marks(mut self, style: Style) -> Self {
+        self.marks = Some(style);
+        self
     }
 
     pub fn selected(mut self, selected: Option<usize>) -> Self {
@@ -109,6 +127,9 @@ impl<'a> List<'a> {
             .iter()
             .map(|row| {
                 let mut width = MARKER.width() + row.label.width().max(self.label_width);
+                if !row.lead.is_empty() {
+                    width += GAP.width() + row.lead.width();
+                }
                 if !row.detail.is_empty() {
                     width += GAP.width() + row.detail.width();
                 }
@@ -239,7 +260,7 @@ pub(crate) fn render(frame: &mut Frame, area: Rect, list: &List, theme: &UiStyle
         for (offset, row) in list.rows.iter().enumerate().skip(start).take(slots) {
             let on = selected == Some(offset);
             let y = inner.y + (offset - start) as u16;
-            let (line, style) = row_line(row, on, list.label_width, width, &colors);
+            let (line, style) = row_line(row, on, list, width, &colors);
             frame.render_widget(
                 Paragraph::new(line).style(style),
                 Rect::new(inner.x, y, inner.width, 1),
@@ -261,10 +282,11 @@ pub(crate) fn render(frame: &mut Frame, area: Rect, list: &List, theme: &UiStyle
 fn row_line(
     row: &Row,
     on: bool,
-    label_width: usize,
+    list: &List,
     width: usize,
     colors: &Colors,
 ) -> (Line<'static>, Style) {
+    let label_width = list.label_width;
     let (base, name, dim) = if on {
         (colors.on, colors.on_name, colors.on_dim)
     } else {
@@ -282,19 +304,44 @@ fn row_line(
     room = room.saturating_sub(tag.width());
     let label = clip(&pad(&row.label, label_width), room);
     room = room.saturating_sub(label.width());
+    let mut lead: Vec<Span<'static>> = Vec::new();
+    if !row.lead.is_empty() && room > GAP.width() + 1 {
+        let text = format!("{GAP}{}", row.lead);
+        if text.width() <= room {
+            room -= text.width();
+            lead.push(Span::styled(GAP, name));
+            let marks: &[usize] = if list.marks.is_some() {
+                &row.lead_marks
+            } else {
+                &[]
+            };
+            let mark = list.marks.map_or(name, |style| name.patch(style));
+            lead.extend(super::command_bar::marked_spans(
+                &row.lead, marks, name, mark,
+            ));
+        } else {
+            let text = clip(&text, room);
+            room = room.saturating_sub(text.width());
+            lead.push(Span::styled(text, name));
+        }
+    }
     let detail = if row.detail.is_empty() || room <= GAP.width() + 1 {
         String::new()
     } else {
         clip(&format!("{GAP}{}", row.detail), room.saturating_sub(1))
     };
     room = room.saturating_sub(detail.width());
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(marker, if on { name } else { base }),
         Span::styled(label, name),
+    ];
+    spans.extend(lead);
+    spans.extend([
         Span::styled(detail, dim),
         Span::styled(" ".repeat(room), base),
         Span::styled(tag, dim),
     ]);
+    let line = Line::from(spans);
     (line, base)
 }
 

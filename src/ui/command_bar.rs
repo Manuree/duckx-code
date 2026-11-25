@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -113,7 +113,19 @@ pub fn render_modal_hint(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
     let pairs = crate::modal::hints(state, app.keys());
-    let pair_width = |hint: &crate::modal::Hint| 1 + hint.key.width() + 1 + hint.word.width() + 1;
+    let pair_width = |hint: &crate::modal::Hint| {
+        if hint.marked() {
+            1 + hint.word.width() + 1
+        } else {
+            1 + hint.key.width() + 1 + hint.word.width() + 1
+        }
+    };
+    // The letters to press: the mode color, bold, and underlined, so they read
+    // without color too.
+    let mark = theme
+        .hint_keys
+        .fg(color)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     let mut shown: Vec<&crate::modal::Hint> = Vec::new();
     if let Some((last, rest)) = pairs.split_last() {
         let mut room = width.saturating_sub(used + pair_width(last));
@@ -130,11 +142,15 @@ pub fn render_modal_hint(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
     for hint in shown {
-        spans.push(Span::styled(
-            format!(" {}", hint.key),
-            theme.hint_keys.fg(color),
-        ));
-        spans.push(Span::styled(format!(" {} ", hint.word), theme.hint));
+        if hint.marked() {
+            spans.push(Span::styled(" ", theme.hint));
+            spans.extend(marked_spans(&hint.word, &hint.marks, theme.hint, mark));
+            spans.push(Span::styled(" ", theme.hint));
+        } else {
+            spans.push(Span::styled(" ", theme.hint));
+            spans.push(Span::styled(hint.key.clone(), mark));
+            spans.push(Span::styled(format!(" {} ", hint.word), theme.hint));
+        }
         used += pair_width(hint);
     }
     spans.push(Span::styled(
@@ -145,6 +161,31 @@ pub fn render_modal_hint(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)).style(theme.hint), rect);
 }
 
+/// `word` as spans: the chars at `marks` in `mark`, the rest in `base`.
+pub(crate) fn marked_spans(
+    word: &str,
+    marks: &[usize],
+    base: Style,
+    mark: Style,
+) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    for (index, c) in word.chars().enumerate() {
+        if marks.contains(&index) {
+            if !run.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut run), base));
+            }
+            spans.push(Span::styled(c.to_string(), mark));
+        } else {
+            run.push(c);
+        }
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, base));
+    }
+    spans
+}
+
 /// The `?` key list, a dropdown standing on `floor` (the hint row or status line).
 pub fn render_key_list(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
     let Some(state) = app.modal_input() else {
@@ -153,7 +194,7 @@ pub fn render_key_list(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
     let Some(list) = state.key_list.as_ref() else {
         return;
     };
-    let entries = crate::modal::key_list(state.mode, &list.query);
+    let entries = crate::modal::key_list(state.style, state.mode, &list.query);
     let rows: Vec<Row> = entries
         .iter()
         .map(|entry| {
@@ -161,7 +202,11 @@ pub fn render_key_list(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
                 .map(str::to_string)
                 .or_else(|| crate::modal::mirror_name(entry))
                 .unwrap_or_default();
-            Row::new(entry.keys).detail(entry.label).tag(tag)
+            let name = crate::modal::list_hint(entry);
+            Row::new(entry.keys)
+                .lead(name.word, name.marks)
+                .detail(entry.label)
+                .tag(tag)
         })
         .collect();
     let mode = state.mode.badge().trim();
@@ -170,7 +215,14 @@ pub fn render_key_list(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
     } else {
         format!(" Keys · {mode} · {} ", list.query)
     };
+    let theme = theme_of(app);
+    let color = app.mode_color().unwrap_or(theme.status_a_bg);
     let dropdown = List::new(&title, "↑↓  enter  type to filter  esc ", &rows)
+        .marks(
+            Style::new()
+                .fg(color)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )
         .selected(Some(list.selected))
         .empty("No key matches")
         .label_width(4);
@@ -181,7 +233,7 @@ pub fn render_key_list(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
     let height = super::dropdown::frame_height(rows.len().max(1), 14).min(room);
     let width = dropdown.natural_width().min(area.width);
     let rect = Rect::new(area.x, floor - height, width, height);
-    super::dropdown::render(frame, rect, &dropdown, &theme_of(app));
+    super::dropdown::render(frame, rect, &dropdown, &theme);
 }
 
 fn theme_of(app: &App) -> crate::theme::UiStyles {
@@ -219,7 +271,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             let marker = if Some(spec.id) == recent { "★ " } else { "" };
             Row::new(format!("{marker}{}", command_name(spec, bar)))
                 .detail(spec.description)
-                .tag(spec.shortcut)
+                .tag(app.command_shortcut(spec))
         })
         .collect();
     let list = List::new(" Commands ", keys, &rows)

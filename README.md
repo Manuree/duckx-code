@@ -49,7 +49,25 @@ duckx-code is modeless by default: every printable key types, and actions use sh
 * **Normal:** move with `h j k l`, `w b`, `0 $`, `gg G`; `Ctrl + D` / `Ctrl + U` move half a page. Edit with `x`, `u` / `U`, `>>`, `gc`, `=` (format), and whole lines with `yy` / `dd` then `p` (below) or `P` (above) on a new line; counts like `5j` and `3dd`. `/` finds, `gd` goes to the definition, `gr` lists references, `ga` shows code actions, `gR` renames, `K` shows hover, `]e` / `[e` move the line, `gt` / `gT` switch tabs, `Tab` jumps forward, and `:` or `Shift + Space` opens the Command Bar, which runs every other action by name.
 * **Insert:** `i`, `a`, `o` and friends start typing; `Esc` (or `Ctrl + [`) goes back to Normal. A terminal that sends `Esc` and the next letter together as `Alt` + letter is handled as `Esc`, then that letter, so no key is lost.
 * **Visual / Visual Line:** `v` or `V`, then `d` cut, `y` copy, `c` change, `>` / `<` or `Tab` / `Shift + Tab` indent and outdent, `gc` comment. `y` and `d` in Visual Line take whole lines, so `p` / `P` bring them back as lines.
-* **Always clear which mode you are in:** a colored badge (`NORMAL`, `INSERT`, `VISUAL`, `V-LINE`) in the status bar, a mode-colored cursor, a hint row above the status bar with the keys that work right now (Settings → Editor → **Mode hints**), and `?` for a searchable list of every key in the mode.
+* **Always clear which mode you are in:** a colored badge (`NORMAL`, `INSERT`, `VISUAL`, `V-LINE`) in the status bar, a mode-colored cursor, a hint row above the status bar with the keys that work right now (Settings → Editor → **Mode hints**), and `?` for a searchable list of every key in the mode. The hints show each command's name with the letters to press highlighted (mode color, bold, underlined), such as **C**opy **L**ine for `cl`; a key whose letters are not in the name, or a symbol or `Ctrl` key, is shown before the name instead (`Tab  Jump forward`).
+
+**Key style: Vim or Mnemonic.** Settings → Editor → **Key style** (or the `key-style` command) picks the keys of Normal and Visual. **Vim** (the default) is the table above. **Mnemonic** names the command: a verb letter, then what it acts on. It applies only while Modeless is Off; motions (`h j k l w b 0 $ gg G { }`), `i a I A o O`, `v V`, `:`, `?`, `Esc`, and every `Ctrl` key stay the same.
+
+| Mnemonic keys | Does |
+| :--- | :--- |
+| `cl` (`cc`) `cw` `ca` | Copy the line, the word, the whole file |
+| `xl` (`xx`) `xw` | Cut the line, the word (`x` as in `Ctrl + X`) |
+| `p` `P` | Paste below / above |
+| `sc` `sl` (`ss`) `sw` `sa` `sb` `sq` `sp` | Select characters (Visual), lines (Visual Line), the word, all, to the bracket, inside quotes, inside `( )` |
+| `dc` `dl` (`dd`) | Delete the character, the line (the clipboard is untouched) |
+| `u` `r` | Undo / redo |
+| `ff` (`/`) `fn` (`n`) `fP` (`N`) `fo` `R` | Find, next, previous, open a file, replace |
+| `md` `mu` | Move the line down / up |
+| `gd` `gr` `ga` `gR` `gt` `gT` `gl` `gh` (`H`) | Definition, references, actions, rename, next / previous tab, go to line (`12gl`), hover |
+| `e` `q` | Explorer, close the tab (or quit on the last one) |
+| Visual: `c` `x` `e` `p` | Copy, cut, edit (delete and type), paste |
+
+Counts work the same way (`3cl` copies three lines), and `Esc` cancels a started sequence. Save stays `Ctrl + S` or `:w`.
 
 **Command Bar aliases:** `:w` saves, `:q` closes the tab (or quits when it is the last one), and `:wq` saves and then does that. They match exactly, so `:q` never picks another command.
 

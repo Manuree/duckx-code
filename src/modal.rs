@@ -8,12 +8,15 @@
 //!   they do without modes (the same [`crate::input::route_editor_key`] call), in
 //!   every mode. In Visual a move extends the selection.
 //! - Insert mode is the modeless editor, except that `Esc` returns to Normal.
-//! - In Normal and Visual, plain keys come from [`KEYS`]. Every entry either runs a
-//!   Command Bar command or behaves like a modeless key (`h` is `Left`), so nothing
-//!   here is reachable only by a letter.
+//! - In Normal and Visual, plain keys come from [`KEYS`] (Key style Vim, the default)
+//!   or [`MNEMONIC_KEYS`] (Key style Mnemonic: `cl` copies the line). Every entry
+//!   either runs a Command Bar command or behaves like a modeless key (`h` is
+//!   `Left`), so nothing here is reachable only by a letter.
 //!
 //! The selling point is clarity, so the same table feeds the hint row above the
-//! status bar ([`hints`]) and the `?` key list ([`key_list`]).
+//! status bar ([`hints`]) and the `?` key list ([`key_list`]). Both show each key's
+//! name with the letters to press marked in it ([`marks`]), or the key before the
+//! name when the name does not hold them.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -46,6 +49,68 @@ impl EditMode {
 
     pub fn is_visual(self) -> bool {
         matches!(self, Self::Visual { .. })
+    }
+}
+
+/// Which keys Normal and Visual use (Settings → Editor → Key style). Only while
+/// Modeless is off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyStyle {
+    /// The vim keys ([`KEYS`]): `yy` copies a line, `dd` cuts it.
+    #[default]
+    Vim,
+    /// A verb letter, then what it acts on ([`MNEMONIC_KEYS`]): `cl` copies the line.
+    Mnemonic,
+}
+
+impl KeyStyle {
+    pub fn index(self) -> usize {
+        match self {
+            Self::Vim => 0,
+            Self::Mnemonic => 1,
+        }
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        if index == 1 {
+            Self::Mnemonic
+        } else {
+            Self::Vim
+        }
+    }
+
+    /// The saved token: `vim` or `mnemonic`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Vim => "vim",
+            Self::Mnemonic => "mnemonic",
+        }
+    }
+
+    /// `vim` or `mnemonic` (any case); `None` for anything else.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "vim" => Some(Self::Vim),
+            "mnemonic" => Some(Self::Mnemonic),
+            _ => None,
+        }
+    }
+
+    /// The name Settings and messages show.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Vim => "Vim",
+            Self::Mnemonic => "Mnemonic",
+        }
+    }
+
+    /// Every key of this style.
+    pub fn keys(self) -> &'static [ModalKey] {
+        match self {
+            Self::Vim => KEYS,
+            Self::Mnemonic => MNEMONIC_KEYS,
+        }
     }
 }
 
@@ -86,8 +151,9 @@ pub struct ModalKey {
     pub run: Do,
     /// What it does, for the `?` key list.
     pub label: &'static str,
-    /// Short word for the hint row. Empty: only in the key list.
-    pub hint: &'static str,
+    /// The name the hint row and the `?` list show, with the letters of `keys`
+    /// highlighted in it when they are all there (see [`marks`]).
+    pub name: &'static str,
 }
 
 const NONE: KeyModifiers = KeyModifiers::NONE;
@@ -99,14 +165,14 @@ const fn key(
     modes: Modes,
     run: Do,
     label: &'static str,
-    hint: &'static str,
+    name: &'static str,
 ) -> ModalKey {
     ModalKey {
         keys,
         modes,
         run,
         label,
-        hint,
+        name,
     }
 }
 
@@ -118,7 +184,8 @@ const fn like(code: KeyCode, modifiers: KeyModifiers) -> Do {
     Do::Key(code, modifiers)
 }
 
-/// Every key of Normal and Visual mode, in the order the `?` list shows them.
+/// Every key of Normal and Visual mode in the Vim key style (the default), in the
+/// order the `?` list shows them.
 pub const KEYS: &[ModalKey] = &[
     // Changing mode.
     key(
@@ -126,144 +193,156 @@ pub const KEYS: &[ModalKey] = &[
         Modes::Normal,
         cmd(CommandId::ModeInsert),
         "Type at the cursor (Insert)",
-        "insert",
+        "Insert",
     ),
     key(
         "a",
         Modes::Normal,
         cmd(CommandId::InsertAfter),
         "Type after the cursor",
-        "",
+        "Append",
     ),
     key(
         "I",
         Modes::Normal,
         cmd(CommandId::InsertLineStart),
         "Type at the start of the line",
-        "",
+        "Insert at line start",
     ),
     key(
         "A",
         Modes::Normal,
         cmd(CommandId::InsertLineEnd),
         "Type at the end of the line",
-        "",
+        "Append at line end",
     ),
     key(
         "o",
         Modes::Normal,
         cmd(CommandId::OpenLineBelow),
         "Open a line below and type",
-        "",
+        "Open line below",
     ),
     key(
         "O",
         Modes::Normal,
         cmd(CommandId::OpenLineAbove),
         "Open a line above and type",
-        "",
+        "Open line above",
     ),
     key(
         "v",
         Modes::Both,
         cmd(CommandId::ModeVisual),
         "Select characters (Visual)",
-        "select",
+        "Visual",
     ),
     key(
         "V",
         Modes::Both,
         cmd(CommandId::ModeVisualLine),
         "Select whole lines (Visual Line)",
-        "lines",
+        "Visual Line",
     ),
     key(
         "Esc",
         Modes::Both,
         cmd(CommandId::ModeNormal),
         "Back to Normal; in Normal, close popups",
-        "normal",
+        "Normal",
     ),
     // Motions: the same moves as the arrow and Ctrl keys.
-    key("h", Modes::Both, like(KeyCode::Left, NONE), "Left (←)", ""),
-    key("j", Modes::Both, like(KeyCode::Down, NONE), "Down (↓)", ""),
-    key("k", Modes::Both, like(KeyCode::Up, NONE), "Up (↑)", ""),
+    key(
+        "h",
+        Modes::Both,
+        like(KeyCode::Left, NONE),
+        "Left (←)",
+        "Left",
+    ),
+    key(
+        "j",
+        Modes::Both,
+        like(KeyCode::Down, NONE),
+        "Down (↓)",
+        "Down",
+    ),
+    key("k", Modes::Both, like(KeyCode::Up, NONE), "Up (↑)", "Up"),
     key(
         "l",
         Modes::Both,
         like(KeyCode::Right, NONE),
         "Right (→)",
-        "",
+        "Right",
     ),
     key(
         "w",
         Modes::Both,
         like(KeyCode::Right, CTRL),
         "Next word (Ctrl+→)",
-        "",
+        "Word",
     ),
     key(
         "b",
         Modes::Both,
         like(KeyCode::Left, CTRL),
         "Previous word (Ctrl+←)",
-        "",
+        "Back a word",
     ),
     key(
         "0",
         Modes::Both,
         like(KeyCode::Home, NONE),
         "Start of the line (Home)",
-        "",
+        "Line start",
     ),
     key(
         "$",
         Modes::Both,
         like(KeyCode::End, NONE),
         "End of the line (End)",
-        "",
+        "Line end",
     ),
     key(
         "gg",
         Modes::Both,
         like(KeyCode::Home, CTRL),
         "Top of the file; 5gg: line 5 (Ctrl+Home)",
-        "top",
+        "Goto beginning",
     ),
     key(
         "G",
         Modes::Both,
         like(KeyCode::End, CTRL),
         "End of the file; 5G: line 5 (Ctrl+End)",
-        "end",
+        "Goto end",
     ),
     key(
         "{",
         Modes::Both,
         like(KeyCode::Up, CTRL),
         "Previous blank line (Ctrl+↑)",
-        "",
+        "Previous blank line",
     ),
     key(
         "}",
         Modes::Both,
         like(KeyCode::Down, CTRL),
         "Next blank line (Ctrl+↓)",
-        "",
+        "Next blank line",
     ),
     key(
         "Enter",
         Modes::Both,
         like(KeyCode::Down, NONE),
         "Down (↓)",
-        "",
+        "Down",
     ),
     key(
         "Backspace",
         Modes::Both,
         like(KeyCode::Left, NONE),
         "Left (←)",
-        "",
+        "Left",
     ),
     // Editing in Normal.
     key(
@@ -271,93 +350,93 @@ pub const KEYS: &[ModalKey] = &[
         Modes::Normal,
         like(KeyCode::Delete, NONE),
         "Delete the character (Delete)",
-        "",
+        "Delete character",
     ),
     key(
         "dd",
         Modes::Normal,
         cmd(CommandId::CutLine),
         "Cut the line (3dd: three lines)",
-        "cut line",
+        "Cut line",
     ),
     key(
         "yy",
         Modes::Normal,
         cmd(CommandId::CopyLine),
         "Copy the line (3yy: three lines)",
-        "copy line",
+        "Copy line",
     ),
     key(
         "p",
         Modes::Normal,
         cmd(CommandId::PasteAfter),
         "Paste: a copied line goes on a new line below",
-        "paste",
+        "Paste",
     ),
     key(
         "P",
         Modes::Normal,
         cmd(CommandId::PasteBefore),
         "Paste: a copied line goes on a new line above",
-        "",
+        "Paste before",
     ),
     key(
         "p",
         Modes::Visual,
         cmd(CommandId::Paste),
         "Paste over the selection",
-        "paste",
+        "Paste",
     ),
-    key("u", Modes::Normal, cmd(CommandId::Undo), "Undo", "undo"),
-    key("U", Modes::Normal, cmd(CommandId::Redo), "Redo", ""),
+    key("u", Modes::Normal, cmd(CommandId::Undo), "Undo", "Undo"),
+    key("U", Modes::Normal, cmd(CommandId::Redo), "Redo", "Redo"),
     key(
         ">>",
         Modes::Normal,
         cmd(CommandId::Indent),
         "Indent the line",
-        "indent",
+        "Indent",
     ),
     key(
         "<<",
         Modes::Normal,
         cmd(CommandId::Outdent),
         "Outdent the line",
-        "outdent",
+        "Outdent",
     ),
     key(
         "gc",
         Modes::Both,
         cmd(CommandId::Comment),
         "Comment or uncomment",
-        "comment",
+        "toggle Comment",
     ),
     key(
         "Ctrl+D",
         Modes::Normal,
         cmd(CommandId::HalfPageDown),
         "Half a screen down",
-        "",
+        "Half page down",
     ),
     key(
         "Ctrl+U",
         Modes::Normal,
         cmd(CommandId::HalfPageUp),
         "Half a screen up",
-        "",
+        "Half page up",
     ),
     key(
         "]e",
         Modes::Normal,
         cmd(CommandId::MoveLineDown),
         "Move the line down (Alt+↓)",
-        "line down",
+        "Move line down",
     ),
     key(
         "[e",
         Modes::Normal,
         cmd(CommandId::MoveLineUp),
         "Move the line up (Alt+↑)",
-        "line up",
+        "Move line up",
     ),
     // Editing the Visual selection.
     key(
@@ -365,133 +444,134 @@ pub const KEYS: &[ModalKey] = &[
         Modes::Visual,
         cmd(CommandId::Indent),
         "Indent the lines",
-        "indent",
+        "Indent",
     ),
     key(
         "Shift+Tab",
         Modes::Visual,
         cmd(CommandId::Outdent),
         "Outdent the lines",
-        "outdent",
+        "Outdent",
     ),
     key(
         "d",
         Modes::Visual,
         cmd(CommandId::Cut),
         "Cut the selection",
-        "cut",
+        "Delete (cut)",
     ),
+    // Editing in Normal.
     key(
         "x",
         Modes::Visual,
         cmd(CommandId::Cut),
         "Cut the selection",
-        "",
+        "Cut",
     ),
     key(
         "y",
         Modes::Visual,
         cmd(CommandId::Copy),
         "Copy the selection",
-        "copy",
+        "Yank (copy)",
     ),
     key(
         "c",
         Modes::Visual,
         cmd(CommandId::ChangeSelection),
         "Delete the selection and type",
-        "change",
+        "Change",
     ),
     key(
         ">",
         Modes::Visual,
         cmd(CommandId::Indent),
         "Indent the lines",
-        "indent",
+        "Indent",
     ),
     key(
         "<",
         Modes::Visual,
         cmd(CommandId::Outdent),
         "Outdent the lines",
-        "outdent",
+        "Outdent",
     ),
     key(
         "o",
         Modes::Visual,
         cmd(CommandId::SwapSelectionEnds),
         "Cursor to the other end",
-        "other end",
+        "Other end",
     ),
     key(
         "i\"",
         Modes::Visual,
         cmd(CommandId::SelectInsideQuotes),
         "Select inside quotes",
-        "inside quotes",
+        "Inside quotes",
     ),
     key(
         "i'",
         Modes::Visual,
         cmd(CommandId::SelectInsideQuotes),
         "Select inside quotes",
-        "inside quotes",
+        "Inside quotes",
     ),
     key(
         "i(",
         Modes::Visual,
         cmd(CommandId::SelectInsideParens),
         "Select inside ( )",
-        "inside ( )",
+        "Inside ( )",
     ),
     key(
         "i)",
         Modes::Visual,
         cmd(CommandId::SelectInsideParens),
         "Select inside ( )",
-        "inside ( )",
+        "Inside ( )",
     ),
     key(
         "i{",
         Modes::Visual,
         cmd(CommandId::SelectInsideBraces),
         "Select inside { }",
-        "inside { }",
+        "Inside { }",
     ),
     key(
         "i}",
         Modes::Visual,
         cmd(CommandId::SelectInsideBraces),
         "Select inside { }",
-        "inside { }",
+        "Inside { }",
     ),
     key(
         "i[",
         Modes::Visual,
         cmd(CommandId::SelectInsideBrackets),
         "Select inside [ ]",
-        "inside [ ]",
+        "Inside [ ]",
     ),
     key(
         "i]",
         Modes::Visual,
         cmd(CommandId::SelectInsideBrackets),
         "Select inside [ ]",
-        "inside [ ]",
+        "Inside [ ]",
     ),
     key(
         "%",
         Modes::Normal,
         cmd(CommandId::MatchBracket),
         "Matching bracket",
-        "",
+        "Matching bracket",
     ),
     key(
         "%",
         Modes::Visual,
         cmd(CommandId::SelectBracket),
         "Select to the matching bracket",
-        "",
+        "Select to bracket",
     ),
     // Search, language server, and the rest.
     key(
@@ -499,112 +579,112 @@ pub const KEYS: &[ModalKey] = &[
         Modes::Normal,
         cmd(CommandId::Find),
         "Find in the file",
-        "find",
+        "Find",
     ),
     key(
         "n",
         Modes::Normal,
         cmd(CommandId::FindNext),
         "Next match",
-        "",
+        "Next match",
     ),
     key(
         "N",
         Modes::Normal,
         cmd(CommandId::FindPrevious),
         "Previous match",
-        "",
+        "Previous match",
     ),
     key(
         "gd",
         Modes::Normal,
         cmd(CommandId::GotoDefinition),
         "Go to definition",
-        "definition",
+        "Goto Definition",
     ),
     key(
         "K",
         Modes::Normal,
         cmd(CommandId::Hover),
         "Hover documentation",
-        "",
+        "Hover",
     ),
     key(
         "gr",
         Modes::Normal,
         cmd(CommandId::GotoReferences),
         "Find references",
-        "references",
+        "Goto References",
     ),
     key(
         "ga",
         Modes::Normal,
         cmd(CommandId::CodeAction),
         "Code actions",
-        "actions",
+        "Goto Actions",
     ),
     key(
         "gR",
         Modes::Normal,
         like(KeyCode::F(2), SHIFT),
         "Rename the symbol (Shift+F2)",
-        "rename",
+        "Goto Rename",
     ),
     key(
         "gt",
         Modes::Normal,
         cmd(CommandId::TabNext),
         "Next tab",
-        "next tab",
+        "Goto next tab",
     ),
     key(
         "gT",
         Modes::Normal,
         cmd(CommandId::TabPrev),
         "Previous tab",
-        "previous tab",
+        "Goto previous Tab",
     ),
     key(
         "=",
         Modes::Normal,
         cmd(CommandId::Format),
         "Format the file",
-        "format",
+        "Format",
     ),
     key(
         "Tab",
         Modes::Normal,
         cmd(CommandId::JumpForward),
         "Jump forward (Ctrl+O goes back)",
-        "jump forward",
+        "Jump forward",
     ),
     key(
         "]d",
         Modes::Normal,
         cmd(CommandId::DiagnosticNext),
         "Next diagnostic",
-        "next diagnostic",
+        "Next diagnostic",
     ),
     key(
         "[d",
         Modes::Normal,
         cmd(CommandId::DiagnosticPrev),
         "Previous diagnostic",
-        "previous diagnostic",
+        "Previous diagnostic",
     ),
     key(
         ":",
         Modes::Both,
         like(KeyCode::F(1), NONE),
         "Command Bar (F1)",
-        "commands",
+        "Commands",
     ),
     key(
         "?",
         Modes::Both,
         cmd(CommandId::Keys),
         "This list of keys",
-        "keys",
+        "Keys",
     ),
     // Ctrl keys that differ from vim. They keep their duckx-code meaning in every mode.
     key(
@@ -612,49 +692,724 @@ pub const KEYS: &[ModalKey] = &[
         Modes::Both,
         like(KeyCode::F(1), NONE),
         "Command Bar (same as :)",
-        "",
+        "Commands",
     ),
     key(
         "Ctrl+V",
         Modes::Both,
         like(KeyCode::Char('v'), CTRL),
         "Pastes (in vim it starts a block selection)",
-        "",
+        "Paste",
     ),
     key(
         "Ctrl+C",
         Modes::Both,
         like(KeyCode::Char('c'), CTRL),
         "Copies (in vim it cancels; it never quits here)",
-        "",
+        "Copy",
     ),
     key(
         "Ctrl+W",
         Modes::Both,
         like(KeyCode::Char('w'), CTRL),
         "PANE: pick a window (in vim it is the window prefix)",
-        "",
+        "Pane",
     ),
     key(
         "Ctrl+R",
         Modes::Both,
         like(KeyCode::Char('y'), CTRL),
         "Not used; redo is U (or Ctrl+Y, shown here)",
-        "",
+        "Not used",
     ),
     key(
         "Ctrl+H",
         Modes::Both,
         like(KeyCode::Left, NONE),
         "Same as Backspace: left (many terminals send Backspace as ^H)",
-        "",
+        "Left",
     ),
 ];
 
-/// Hint row order in Normal. The last one always stays when the row is narrow.
+/// Every key of Normal and Visual mode in the Mnemonic key style: a verb letter, then
+/// what it acts on (`cl` copies the line). Same order rules as [`KEYS`].
+pub const MNEMONIC_KEYS: &[ModalKey] = &[
+    // Changing mode: the same keys as Vim.
+    key(
+        "i",
+        Modes::Normal,
+        cmd(CommandId::ModeInsert),
+        "Type at the cursor (Insert)",
+        "Insert",
+    ),
+    key(
+        "a",
+        Modes::Normal,
+        cmd(CommandId::InsertAfter),
+        "Type after the cursor",
+        "insert After",
+    ),
+    key(
+        "I",
+        Modes::Normal,
+        cmd(CommandId::InsertLineStart),
+        "Type at the start of the line",
+        "Insert start",
+    ),
+    key(
+        "A",
+        Modes::Normal,
+        cmd(CommandId::InsertLineEnd),
+        "Type at the end of the line",
+        "insert At end",
+    ),
+    key(
+        "o",
+        Modes::Normal,
+        cmd(CommandId::OpenLineBelow),
+        "Open a line below and type",
+        "Open below",
+    ),
+    key(
+        "O",
+        Modes::Normal,
+        cmd(CommandId::OpenLineAbove),
+        "Open a line above and type",
+        "Open above",
+    ),
+    key(
+        "v",
+        Modes::Both,
+        cmd(CommandId::ModeVisual),
+        "Select characters (Visual; same as sc)",
+        "Visual",
+    ),
+    key(
+        "V",
+        Modes::Both,
+        cmd(CommandId::ModeVisualLine),
+        "Select whole lines (Visual Line; same as sl)",
+        "Visual Line",
+    ),
+    key(
+        "Esc",
+        Modes::Both,
+        cmd(CommandId::ModeNormal),
+        "Back to Normal; in Normal, close popups",
+        "Normal",
+    ),
+    // Motions: the same as Vim.
+    key(
+        "h",
+        Modes::Both,
+        like(KeyCode::Left, NONE),
+        "Left (←)",
+        "Left",
+    ),
+    key(
+        "j",
+        Modes::Both,
+        like(KeyCode::Down, NONE),
+        "Down (↓)",
+        "Down",
+    ),
+    key("k", Modes::Both, like(KeyCode::Up, NONE), "Up (↑)", "Up"),
+    key(
+        "l",
+        Modes::Both,
+        like(KeyCode::Right, NONE),
+        "Right (→)",
+        "Right",
+    ),
+    key(
+        "w",
+        Modes::Both,
+        like(KeyCode::Right, CTRL),
+        "Next word (Ctrl+→)",
+        "Word",
+    ),
+    key(
+        "b",
+        Modes::Both,
+        like(KeyCode::Left, CTRL),
+        "Previous word (Ctrl+←)",
+        "Back a word",
+    ),
+    key(
+        "0",
+        Modes::Both,
+        like(KeyCode::Home, NONE),
+        "Start of the line (Home)",
+        "Line start",
+    ),
+    key(
+        "$",
+        Modes::Both,
+        like(KeyCode::End, NONE),
+        "End of the line (End)",
+        "Line end",
+    ),
+    key(
+        "gg",
+        Modes::Both,
+        like(KeyCode::Home, CTRL),
+        "Top of the file; 5gg: line 5 (Ctrl+Home)",
+        "Goto beginning",
+    ),
+    key(
+        "G",
+        Modes::Both,
+        like(KeyCode::End, CTRL),
+        "End of the file; 5G: line 5 (Ctrl+End)",
+        "Goto end",
+    ),
+    key(
+        "{",
+        Modes::Both,
+        like(KeyCode::Up, CTRL),
+        "Previous blank line (Ctrl+↑)",
+        "Previous blank line",
+    ),
+    key(
+        "}",
+        Modes::Both,
+        like(KeyCode::Down, CTRL),
+        "Next blank line (Ctrl+↓)",
+        "Next blank line",
+    ),
+    key(
+        "Enter",
+        Modes::Both,
+        like(KeyCode::Down, NONE),
+        "Down (↓)",
+        "Down",
+    ),
+    key(
+        "Backspace",
+        Modes::Both,
+        like(KeyCode::Left, NONE),
+        "Left (←)",
+        "Left",
+    ),
+    // c: copy. x: cut (as Ctrl+X). p: paste.
+    key(
+        "cl",
+        Modes::Normal,
+        cmd(CommandId::CopyLine),
+        "Copy the line (3cl: three lines)",
+        "Copy Line",
+    ),
+    key(
+        "cc",
+        Modes::Normal,
+        cmd(CommandId::CopyLine),
+        "Copy the line (3cc: three lines)",
+        "Copy Line",
+    ),
+    key(
+        "cw",
+        Modes::Normal,
+        cmd(CommandId::CopyWord),
+        "Copy the word at the cursor",
+        "Copy Word",
+    ),
+    key(
+        "ca",
+        Modes::Normal,
+        cmd(CommandId::CopyAll),
+        "Copy the whole file",
+        "Copy All",
+    ),
+    key(
+        "xl",
+        Modes::Normal,
+        cmd(CommandId::CutLine),
+        "Cut the line (3xl: three lines)",
+        "Cut Line",
+    ),
+    key(
+        "xx",
+        Modes::Normal,
+        cmd(CommandId::CutLine),
+        "Cut the line (3xx: three lines)",
+        "Cut Line",
+    ),
+    key(
+        "xw",
+        Modes::Normal,
+        cmd(CommandId::CutWord),
+        "Cut the word at the cursor",
+        "Cut Word",
+    ),
+    key(
+        "p",
+        Modes::Normal,
+        cmd(CommandId::PasteAfter),
+        "Paste: a copied line goes on a new line below",
+        "Paste",
+    ),
+    key(
+        "P",
+        Modes::Normal,
+        cmd(CommandId::PasteBefore),
+        "Paste: a copied line goes on a new line above",
+        "Paste Before",
+    ),
+    // s: select. In Visual these change the selection.
+    key(
+        "sc",
+        Modes::Both,
+        cmd(CommandId::ModeVisual),
+        "Select characters (Visual)",
+        "Select Characters",
+    ),
+    key(
+        "sl",
+        Modes::Both,
+        cmd(CommandId::ModeVisualLine),
+        "Select whole lines (Visual Line)",
+        "Select Line",
+    ),
+    key(
+        "ss",
+        Modes::Both,
+        cmd(CommandId::ModeVisualLine),
+        "Select whole lines (Visual Line)",
+        "Select Line",
+    ),
+    key(
+        "sw",
+        Modes::Both,
+        cmd(CommandId::SelectWord),
+        "Select the word at the cursor",
+        "Select Word",
+    ),
+    key(
+        "sa",
+        Modes::Both,
+        cmd(CommandId::SelectAll),
+        "Select the whole file",
+        "Select All",
+    ),
+    key(
+        "sb",
+        Modes::Both,
+        cmd(CommandId::SelectBracket),
+        "Select to the matching bracket",
+        "Select Bracket",
+    ),
+    key(
+        "sq",
+        Modes::Both,
+        cmd(CommandId::SelectInsideQuotes),
+        "Select inside quotes; again takes the quotes",
+        "Select Quotes",
+    ),
+    key(
+        "sp",
+        Modes::Both,
+        cmd(CommandId::SelectInsideParens),
+        "Select inside ( ); again takes the parentheses",
+        "Select Parens",
+    ),
+    key(
+        "s{",
+        Modes::Both,
+        cmd(CommandId::SelectInsideBraces),
+        "Select inside { }; again takes the braces",
+        "Select inside { }",
+    ),
+    key(
+        "s[",
+        Modes::Both,
+        cmd(CommandId::SelectInsideBrackets),
+        "Select inside [ ]; again takes the brackets",
+        "Select inside [ ]",
+    ),
+    // d: delete without the clipboard. u / r: undo / redo.
+    key(
+        "dc",
+        Modes::Normal,
+        like(KeyCode::Delete, NONE),
+        "Delete the character (Delete)",
+        "Delete Character",
+    ),
+    key(
+        "dl",
+        Modes::Normal,
+        cmd(CommandId::DeleteLine),
+        "Delete the line, clipboard untouched (3dl: three lines)",
+        "Delete Line",
+    ),
+    key(
+        "dd",
+        Modes::Normal,
+        cmd(CommandId::DeleteLine),
+        "Delete the line, clipboard untouched (3dd: three lines)",
+        "Delete Line",
+    ),
+    key("u", Modes::Normal, cmd(CommandId::Undo), "Undo", "Undo"),
+    key("r", Modes::Normal, cmd(CommandId::Redo), "Redo", "Redo"),
+    key(
+        ">>",
+        Modes::Normal,
+        cmd(CommandId::Indent),
+        "Indent the line",
+        "Indent",
+    ),
+    key(
+        "<<",
+        Modes::Normal,
+        cmd(CommandId::Outdent),
+        "Outdent the line",
+        "Outdent",
+    ),
+    key(
+        "gc",
+        Modes::Both,
+        cmd(CommandId::Comment),
+        "Comment or uncomment",
+        "toggle Comment",
+    ),
+    key(
+        "md",
+        Modes::Normal,
+        cmd(CommandId::MoveLineDown),
+        "Move the line down (Alt+↓)",
+        "Move line Down",
+    ),
+    key(
+        "mu",
+        Modes::Normal,
+        cmd(CommandId::MoveLineUp),
+        "Move the line up (Alt+↑)",
+        "Move line Up",
+    ),
+    key(
+        "Ctrl+D",
+        Modes::Normal,
+        cmd(CommandId::HalfPageDown),
+        "Half a screen down",
+        "Half page down",
+    ),
+    key(
+        "Ctrl+U",
+        Modes::Normal,
+        cmd(CommandId::HalfPageUp),
+        "Half a screen up",
+        "Half page up",
+    ),
+    // Editing the Visual selection.
+    key(
+        "c",
+        Modes::Visual,
+        cmd(CommandId::Copy),
+        "Copy the selection",
+        "Copy",
+    ),
+    key(
+        "x",
+        Modes::Visual,
+        cmd(CommandId::Cut),
+        "Cut the selection",
+        "Cut",
+    ),
+    key(
+        "e",
+        Modes::Visual,
+        cmd(CommandId::ChangeSelection),
+        "Edit: delete the selection and type",
+        "Edit",
+    ),
+    key(
+        "p",
+        Modes::Visual,
+        cmd(CommandId::Paste),
+        "Paste over the selection",
+        "Paste",
+    ),
+    key(
+        ">",
+        Modes::Visual,
+        cmd(CommandId::Indent),
+        "Indent the lines",
+        "Indent",
+    ),
+    key(
+        "<",
+        Modes::Visual,
+        cmd(CommandId::Outdent),
+        "Outdent the lines",
+        "Outdent",
+    ),
+    key(
+        "Tab",
+        Modes::Visual,
+        cmd(CommandId::Indent),
+        "Indent the lines",
+        "Indent",
+    ),
+    key(
+        "Shift+Tab",
+        Modes::Visual,
+        cmd(CommandId::Outdent),
+        "Outdent the lines",
+        "Outdent",
+    ),
+    key(
+        "o",
+        Modes::Visual,
+        cmd(CommandId::SwapSelectionEnds),
+        "Cursor to the other end",
+        "Other end",
+    ),
+    key(
+        "%",
+        Modes::Normal,
+        cmd(CommandId::MatchBracket),
+        "Matching bracket",
+        "Matching bracket",
+    ),
+    // f: find. g: go to. The rest.
+    key(
+        "ff",
+        Modes::Normal,
+        cmd(CommandId::Find),
+        "Find in the file (same as /)",
+        "Find in File",
+    ),
+    key(
+        "fn",
+        Modes::Normal,
+        cmd(CommandId::FindNext),
+        "Next match (same as n)",
+        "Find Next",
+    ),
+    key(
+        "fP",
+        Modes::Normal,
+        cmd(CommandId::FindPrevious),
+        "Previous match (same as N)",
+        "Find Previous",
+    ),
+    key(
+        "fo",
+        Modes::Normal,
+        cmd(CommandId::FilePicker),
+        "Open a file by name (Ctrl+P)",
+        "File Open",
+    ),
+    key(
+        "/",
+        Modes::Normal,
+        cmd(CommandId::Find),
+        "Find in the file",
+        "Find",
+    ),
+    key(
+        "n",
+        Modes::Normal,
+        cmd(CommandId::FindNext),
+        "Next match",
+        "Next match",
+    ),
+    key(
+        "N",
+        Modes::Normal,
+        cmd(CommandId::FindPrevious),
+        "Previous match",
+        "Previous match",
+    ),
+    key(
+        "R",
+        Modes::Normal,
+        cmd(CommandId::Replace),
+        "Find and replace",
+        "Replace",
+    ),
+    key(
+        "gd",
+        Modes::Normal,
+        cmd(CommandId::GotoDefinition),
+        "Go to definition",
+        "Goto Definition",
+    ),
+    key(
+        "gr",
+        Modes::Normal,
+        cmd(CommandId::GotoReferences),
+        "Find references",
+        "Goto References",
+    ),
+    key(
+        "ga",
+        Modes::Normal,
+        cmd(CommandId::CodeAction),
+        "Code actions",
+        "Goto Action",
+    ),
+    key(
+        "gR",
+        Modes::Normal,
+        like(KeyCode::F(2), SHIFT),
+        "Rename the symbol (Shift+F2)",
+        "Goto Rename",
+    ),
+    key(
+        "gt",
+        Modes::Normal,
+        cmd(CommandId::TabNext),
+        "Next tab",
+        "Goto tab",
+    ),
+    key(
+        "gT",
+        Modes::Normal,
+        cmd(CommandId::TabPrev),
+        "Previous tab",
+        "Goto previous Tab",
+    ),
+    key(
+        "gl",
+        Modes::Normal,
+        cmd(CommandId::GotoLine),
+        "Go to a line: 5gl goes to line 5, gl asks",
+        "Goto Line",
+    ),
+    key(
+        "gh",
+        Modes::Normal,
+        cmd(CommandId::Hover),
+        "Hover documentation",
+        "Goto Hover",
+    ),
+    key(
+        "H",
+        Modes::Normal,
+        cmd(CommandId::Hover),
+        "Hover documentation",
+        "Hover",
+    ),
+    key(
+        "]d",
+        Modes::Normal,
+        cmd(CommandId::DiagnosticNext),
+        "Next diagnostic",
+        "Next diagnostic",
+    ),
+    key(
+        "[d",
+        Modes::Normal,
+        cmd(CommandId::DiagnosticPrev),
+        "Previous diagnostic",
+        "Previous diagnostic",
+    ),
+    key(
+        "=",
+        Modes::Normal,
+        cmd(CommandId::Format),
+        "Format the file",
+        "Format",
+    ),
+    key(
+        "Tab",
+        Modes::Normal,
+        cmd(CommandId::JumpForward),
+        "Jump forward (Ctrl+O goes back)",
+        "Jump forward",
+    ),
+    key(
+        "e",
+        Modes::Normal,
+        cmd(CommandId::ToggleExplorer),
+        "Show or hide the explorer",
+        "Explorer",
+    ),
+    key(
+        "q",
+        Modes::Normal,
+        cmd(CommandId::CloseOrQuit),
+        "Close the tab, or quit on the last one",
+        "close or Quit",
+    ),
+    key(
+        ":",
+        Modes::Both,
+        like(KeyCode::F(1), NONE),
+        "Command Bar (F1)",
+        "Commands",
+    ),
+    key(
+        "?",
+        Modes::Both,
+        cmd(CommandId::Keys),
+        "This list of keys",
+        "Keys",
+    ),
+    // Ctrl keys that keep their duckx-code meaning in every mode.
+    key(
+        "Shift+Space",
+        Modes::Both,
+        like(KeyCode::F(1), NONE),
+        "Command Bar (same as :)",
+        "Commands",
+    ),
+    key(
+        "Ctrl+V",
+        Modes::Both,
+        like(KeyCode::Char('v'), CTRL),
+        "Pastes (in vim it starts a block selection)",
+        "Paste",
+    ),
+    key(
+        "Ctrl+C",
+        Modes::Both,
+        like(KeyCode::Char('c'), CTRL),
+        "Copies (in vim it cancels; it never quits here)",
+        "Copy",
+    ),
+    key(
+        "Ctrl+W",
+        Modes::Both,
+        like(KeyCode::Char('w'), CTRL),
+        "PANE: pick a window (in vim it is the window prefix)",
+        "Pane",
+    ),
+    key(
+        "Ctrl+R",
+        Modes::Both,
+        like(KeyCode::Char('y'), CTRL),
+        "Not used; redo is r (or Ctrl+Y, shown here)",
+        "Not used",
+    ),
+    key(
+        "Ctrl+H",
+        Modes::Both,
+        like(KeyCode::Left, NONE),
+        "Same as Backspace: left (many terminals send Backspace as ^H)",
+        "Left",
+    ),
+];
+
+/// Hint row order in Normal (Vim keys). The last one always stays when the row is narrow.
 const NORMAL_HINTS: &[&str] = &["i", "v", "V", "dd", "yy", "p", "u", "/", ":", "?"];
-/// Hint row order in Visual. The last one always stays when the row is narrow.
+/// Hint row order in Visual (Vim keys). The last one always stays when the row is narrow.
 const VISUAL_HINTS: &[&str] = &["d", "y", "c", ">", "<", "gc", "o", "p", "?", "Esc"];
+/// Hint row order in Normal (Mnemonic keys). `s`, `c`, `x`, and `f` start a sequence.
+const MNEMONIC_NORMAL_HINTS: &[&str] = &["i", "s", "c", "x", "p", "u", "r", "f", ":", "?"];
+/// Hint row order in Visual (Mnemonic keys).
+const MNEMONIC_VISUAL_HINTS: &[&str] = &["c", "x", "e", "p", ">", "<", "gc", "o", "?", "Esc"];
+
+/// The first key of a Mnemonic sequence and the verb it stands for, for the hint row.
+const MNEMONIC_PREFIXES: &[(char, &str)] = &[
+    ('c', "Copy"),
+    ('x', "Cut"),
+    ('s', "Select"),
+    ('d', "Delete"),
+    ('f', "Find"),
+    ('m', "Move line"),
+    ('g', "Goto"),
+];
 
 /// Most a count can reach (`9999j`); more digits are ignored.
 pub const MAX_COUNT: u32 = 9999;
@@ -687,6 +1442,8 @@ pub struct ModalState {
     pub notice: Option<String>,
     /// Set in Visual Line mode.
     pub line: Option<LineSelect>,
+    /// The key table Normal and Visual use.
+    pub style: KeyStyle,
 }
 
 /// Actions only modal editing produces.
@@ -826,7 +1583,7 @@ fn route_key(key: &KeyEvent, state: &ModalState, keys: &KeyMap) -> Option<Semant
     if state.mode == EditMode::Normal
         && state.pending.is_none()
         && let Some(token) = half_page_token(key, keys)
-        && let Some(entry) = lookup(state.mode, token)
+        && let Some(entry) = lookup(state.style, state.mode, token)
     {
         let action = action_for(entry, state.mode, keys)?;
         return Some(with_count(action, entry, state.count));
@@ -844,13 +1601,13 @@ fn route_key(key: &KeyEvent, state: &ModalState, keys: &KeyMap) -> Option<Semant
         Some(first) => format!("{first}{token}"),
         None => token.clone(),
     };
-    if let Some(entry) = lookup(state.mode, &seq) {
+    if let Some(entry) = lookup(state.style, state.mode, &seq) {
         let action = action_for(entry, state.mode, keys)?;
         return Some(with_count(action, entry, state.count));
     }
     if state.pending.is_none()
         && let Some(first) = single_char(&token)
-        && starts_sequence(state.mode, first)
+        && starts_sequence(state.style, state.mode, first)
     {
         return modal(ModalAction::Pend(first));
     }
@@ -890,15 +1647,17 @@ fn is_named(keys: &str) -> bool {
     keys.chars().count() > 1 && keys.starts_with(|c: char| c.is_ascii_uppercase())
 }
 
-/// The entry for `keys` in `mode`.
-pub fn lookup(mode: EditMode, keys: &str) -> Option<&'static ModalKey> {
-    KEYS.iter()
+/// The entry for `keys` in `mode` with the `style` keys.
+pub fn lookup(style: KeyStyle, mode: EditMode, keys: &str) -> Option<&'static ModalKey> {
+    style
+        .keys()
+        .iter()
         .find(|entry| entry.keys == keys && entry.modes.has(mode))
 }
 
 /// True when some two-key sequence in `mode` starts with `first`.
-fn starts_sequence(mode: EditMode, first: char) -> bool {
-    KEYS.iter().any(|entry| {
+fn starts_sequence(style: KeyStyle, mode: EditMode, first: char) -> bool {
+    style.keys().iter().any(|entry| {
         entry.modes.has(mode)
             && !is_named(entry.keys)
             && entry.keys.chars().count() > 1
@@ -947,11 +1706,16 @@ fn changes_mode(id: CommandId) -> bool {
         )
 }
 
+/// Keys where a count is a line number (`5G`, `5gg`, `5gl`) rather than a repeat.
+fn goes_to_line(entry: &ModalKey) -> bool {
+    matches!(entry.keys, "gg" | "G") || matches!(entry.run, Do::Command(CommandId::GotoLine))
+}
+
 fn with_count(action: SemanticAction, entry: &ModalKey, count: Option<u32>) -> SemanticAction {
-    let Some(count) = count.filter(|n| *n > 1 || matches!(entry.keys, "gg" | "G")) else {
+    let Some(count) = count.filter(|n| *n > 1 || goes_to_line(entry)) else {
         return action;
     };
-    if matches!(entry.keys, "gg" | "G") {
+    if goes_to_line(entry) {
         return SemanticAction::Modal(ModalAction::GotoLine(count.max(1) as usize));
     }
     match &action {
@@ -1048,20 +1812,24 @@ fn route_key_list(key: &KeyEvent) -> Option<SemanticAction> {
     modal(ModalAction::KeyList(action))
 }
 
-/// The `?` list rows for `mode` (Insert lists Normal, where its keys work), filtered
-/// by `query` against the keys, the description, and the command name.
-pub fn key_list(mode: EditMode, query: &str) -> Vec<&'static ModalKey> {
+/// The `?` list rows for `mode` (Insert lists Normal, where its keys work) with the
+/// `style` keys, filtered by `query` against the keys, the name, the description,
+/// and the command name.
+pub fn key_list(style: KeyStyle, mode: EditMode, query: &str) -> Vec<&'static ModalKey> {
     let mode = if mode == EditMode::Insert {
         EditMode::Normal
     } else {
         mode
     };
     let query = query.to_lowercase();
-    KEYS.iter()
+    style
+        .keys()
+        .iter()
         .filter(|entry| entry.modes.has(mode))
         .filter(|entry| {
             query.is_empty()
                 || entry.keys.to_lowercase().contains(&query)
+                || entry.name.to_lowercase().contains(&query)
                 || entry.label.to_lowercase().contains(&query)
                 || command_name(entry).is_some_and(|name| name.contains(&query))
         })
@@ -1086,10 +1854,11 @@ pub fn mirror_name(entry: &ModalKey) -> Option<String> {
     }
 }
 
-/// The keys that run `id` while Modeless is off, for the Command Bar, such as `dd`.
-pub fn keys_for(id: CommandId) -> Vec<&'static str> {
+/// The keys that run `id` while Modeless is off with the `style` keys, for the
+/// Command Bar, such as `dd`.
+pub fn keys_for(style: KeyStyle, id: CommandId) -> Vec<&'static str> {
     let mut found: Vec<&'static str> = Vec::new();
-    for entry in KEYS {
+    for entry in style.keys() {
         if entry.run == Do::Command(id) && !found.contains(&entry.keys) {
             found.push(entry.keys);
         }
@@ -1097,33 +1866,140 @@ pub fn keys_for(id: CommandId) -> Vec<&'static str> {
     found
 }
 
-/// One `key word` pair of the hint row.
+/// One entry of the hint row: the name with the letters to press highlighted, or,
+/// when the name does not hold them, the key and then the name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hint {
     pub key: String,
     pub word: String,
+    /// Char indices into `word` to highlight. Empty: show `key` before `word`.
+    pub marks: Vec<usize>,
 }
 
+impl Hint {
+    /// True when the name carries the key (the letters are highlighted in it).
+    pub fn marked(&self) -> bool {
+        !self.marks.is_empty()
+    }
+
+    /// `C̲opy L̲ine` as plain text: `[C]opy [L]ine`, or `key word` when not marked.
+    /// For tests and messages.
+    pub fn plain(&self) -> String {
+        if !self.marked() {
+            return format!("{} {}", self.key, self.word);
+        }
+        let mut out = String::new();
+        for (index, c) in self.word.chars().enumerate() {
+            if self.marks.contains(&index) {
+                out.push('[');
+                out.push(c);
+                out.push(']');
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+}
+
+/// A hint with no highlighted letters: `key word`.
 fn hint(key: impl Into<String>, word: impl Into<String>) -> Hint {
     Hint {
         key: key.into(),
         word: word.into(),
+        marks: Vec::new(),
     }
+}
+
+/// A hint for `keys` named `name`: the letters highlighted when `name` holds them
+/// all, else `keys` shown before it. `typed` letters are already pressed (a started
+/// sequence): they are not highlighted and show in lower case.
+fn named_hint(keys: &str, name: &str, typed: usize) -> Hint {
+    let shown_key: String = keys.chars().skip(typed).collect();
+    match marks(name, keys) {
+        Some(found) => {
+            let mut word: Vec<char> = name.chars().collect();
+            for (n, &(index, c)) in found.iter().enumerate() {
+                word[index] = if n < typed { c.to_ascii_lowercase() } else { c };
+            }
+            Hint {
+                key: shown_key,
+                word: word.into_iter().collect(),
+                marks: found.iter().skip(typed).map(|&(index, _)| index).collect(),
+            }
+        }
+        None => {
+            let word = if typed > 0 {
+                name.to_lowercase()
+            } else {
+                name.to_string()
+            };
+            hint(shown_key, word)
+        }
+    }
+}
+
+/// True when `name[index]` begins a word: the first char, or after a space, `-`, or `_`.
+fn word_start(name: &[char], index: usize) -> bool {
+    index == 0 || matches!(name[index - 1], ' ' | '-' | '_' | '(')
+}
+
+/// Where the letters of `keys` sit in `name`, in order, and how each is shown: for each
+/// letter the first word start that has it, else its first place anywhere, always after
+/// the letter before. A shifted key shows upper case (`P` → `P`aste B`e`fore keeps `P`);
+/// a lower-case key keeps the name's own case. `None` when a letter is missing or the
+/// key is not only letters (`Tab`, `Ctrl+D`, `>>`, `]d`), so the key is shown instead.
+pub fn marks(name: &str, keys: &str) -> Option<Vec<(usize, char)>> {
+    if keys.is_empty() || is_named(keys) || !keys.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let chars: Vec<char> = name.chars().collect();
+    let mut from = 0;
+    let mut found = Vec::new();
+    for key in keys.chars() {
+        let lower = key.to_ascii_lowercase();
+        let hit = |i: &usize| chars[*i].to_ascii_lowercase() == lower;
+        let index = (from..chars.len())
+            .find(|i| word_start(&chars, *i) && hit(i))
+            .or_else(|| (from..chars.len()).find(hit))?;
+        let shown = if key.is_ascii_uppercase() {
+            key
+        } else {
+            chars[index]
+        };
+        found.push((index, shown));
+        from = index + 1;
+    }
+    Some(found)
 }
 
 /// The hint row for `state`: what the next key can do. The last entry is the one to
 /// keep when the row is too narrow for all of them.
 pub fn hints(state: &ModalState, keys: &KeyMap) -> Vec<Hint> {
+    let table = state.style.keys();
     if let Some(first) = state.pending {
-        let mut out: Vec<Hint> = KEYS
+        let mut out: Vec<Hint> = Vec::new();
+        for entry in table
             .iter()
             .filter(|entry| entry.modes.has(state.mode) && !is_named(entry.keys))
-            .filter_map(|entry| {
-                let rest = entry.keys.strip_prefix(first)?;
-                (!rest.is_empty()).then(|| hint(rest, short(entry)))
-            })
-            .collect();
-        out.dedup();
+        {
+            let Some(rest) = entry.keys.strip_prefix(first) else {
+                continue;
+            };
+            if rest.is_empty() {
+                continue;
+            }
+            let next = named_hint(entry.keys, entry.name, 1);
+            // `cc` after `cl` (both Copy Line): one highlighted name is enough.
+            let same_name = out
+                .iter()
+                .position(|shown| shown.word.eq_ignore_ascii_case(&next.word));
+            match same_name {
+                Some(at) if !out[at].marked() && next.marked() => out[at] = next,
+                Some(_) => {}
+                None => out.push(next),
+            }
+        }
         out.push(hint("Esc", "cancel"));
         return out;
     }
@@ -1133,8 +2009,8 @@ pub fn hints(state: &ModalState, keys: &KeyMap) -> Vec<Hint> {
             hint("Esc", "cancel"),
         ];
     }
-    let order = match state.mode {
-        EditMode::Insert => {
+    let order = match (state.mode, state.style) {
+        (EditMode::Insert, _) => {
             let display = |id: &str| keys.display_of(id);
             return vec![
                 hint(display("save"), "save"),
@@ -1145,22 +2021,37 @@ pub fn hints(state: &ModalState, keys: &KeyMap) -> Vec<Hint> {
                 hint("Esc", "normal"),
             ];
         }
-        EditMode::Normal => NORMAL_HINTS,
-        EditMode::Visual { .. } => VISUAL_HINTS,
+        (EditMode::Normal, KeyStyle::Vim) => NORMAL_HINTS,
+        (EditMode::Visual { .. }, KeyStyle::Vim) => VISUAL_HINTS,
+        (EditMode::Normal, KeyStyle::Mnemonic) => MNEMONIC_NORMAL_HINTS,
+        (EditMode::Visual { .. }, KeyStyle::Mnemonic) => MNEMONIC_VISUAL_HINTS,
     };
     order
         .iter()
-        .filter_map(|keys| lookup(state.mode, keys))
-        .map(|entry| hint(entry.keys, short(entry)))
+        .filter_map(|keys| {
+            if let Some(entry) = lookup(state.style, state.mode, keys) {
+                return Some(named_hint(entry.keys, entry.name, 0));
+            }
+            let first = single_char(keys)?;
+            prefix_name(state.style, state.mode, first).map(|name| named_hint(keys, name, 0))
+        })
         .collect()
 }
 
-fn short(entry: &ModalKey) -> String {
-    if entry.hint.is_empty() {
-        entry.label.to_lowercase()
-    } else {
-        entry.hint.to_string()
+/// The verb a sequence's first key stands for, for the hint row (`c` → Copy).
+fn prefix_name(style: KeyStyle, mode: EditMode, first: char) -> Option<&'static str> {
+    if style != KeyStyle::Mnemonic || !starts_sequence(style, mode, first) {
+        return None;
     }
+    MNEMONIC_PREFIXES
+        .iter()
+        .find(|(c, _)| *c == first)
+        .map(|(_, name)| *name)
+}
+
+/// The `?` list name of `entry`, highlighted the same way as the hint row.
+pub fn list_hint(entry: &ModalKey) -> Hint {
+    named_hint(entry.keys, entry.name, 0)
 }
 
 #[cfg(test)]
@@ -1545,9 +2436,9 @@ mod tests {
                 KeyListAction::Run
             )))
         );
-        assert_eq!(key_list(EditMode::Normal, "dd").len(), 1);
-        assert!(key_list(EditMode::Normal, "").len() > 30);
-        assert!(key_list(EditMode::Visual { line: false }, "i(").len() == 1);
+        assert_eq!(key_list(KeyStyle::Vim, EditMode::Normal, "dd").len(), 1);
+        assert!(key_list(KeyStyle::Vim, EditMode::Normal, "").len() > 30);
+        assert!(key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "i(").len() == 1);
     }
 
     /// Every key does something reachable without modes: a Command Bar command that
@@ -1556,41 +2447,44 @@ mod tests {
     fn every_mode_key_has_a_command_or_is_a_modeless_key() {
         let keys = KeyMap::defaults();
         crate::command::show_modal_commands(true);
-        for entry in KEYS {
-            match entry.run {
-                Do::Command(id) => {
-                    let spec = crate::command::spec(id);
-                    assert!(
-                        crate::command::find_command(
-                            spec.name,
-                            crate::command::CommandContext::Editor,
-                            false
-                        )
-                        .is_some(),
-                        "{}: {} is not offered in the editor",
-                        entry.keys,
-                        spec.name
-                    );
-                }
-                Do::Key(code, modifiers) => {
-                    let modeless =
-                        crate::input::route(&press(code, modifiers), Focus::Editor, false);
-                    assert!(
-                        modeless.is_some(),
-                        "{} mirrors a key that does nothing",
-                        entry.keys
-                    );
-                    let mode = if entry.modes == Modes::Visual {
-                        EditMode::Visual { line: false }
-                    } else {
-                        EditMode::Normal
-                    };
-                    let expected = if mode.is_visual() {
-                        modeless.clone().map(extend)
-                    } else {
-                        modeless.clone()
-                    };
-                    assert_eq!(action_for(entry, mode, &keys), expected, "{}", entry.keys);
+        for style in [KeyStyle::Vim, KeyStyle::Mnemonic] {
+            for entry in style.keys() {
+                assert!(!entry.name.is_empty(), "{} has no name", entry.keys);
+                match entry.run {
+                    Do::Command(id) => {
+                        let spec = crate::command::spec(id);
+                        assert!(
+                            crate::command::find_command(
+                                spec.name,
+                                crate::command::CommandContext::Editor,
+                                false
+                            )
+                            .is_some(),
+                            "{style:?} {}: {} is not offered in the editor",
+                            entry.keys,
+                            spec.name
+                        );
+                    }
+                    Do::Key(code, modifiers) => {
+                        let modeless =
+                            crate::input::route(&press(code, modifiers), Focus::Editor, false);
+                        assert!(
+                            modeless.is_some(),
+                            "{style:?} {} mirrors a key that does nothing",
+                            entry.keys
+                        );
+                        let mode = if entry.modes == Modes::Visual {
+                            EditMode::Visual { line: false }
+                        } else {
+                            EditMode::Normal
+                        };
+                        let expected = if mode.is_visual() {
+                            modeless.clone().map(extend)
+                        } else {
+                            modeless.clone()
+                        };
+                        assert_eq!(action_for(entry, mode, &keys), expected, "{}", entry.keys);
+                    }
                 }
             }
         }
@@ -1599,16 +2493,23 @@ mod tests {
 
     #[test]
     fn keys_are_unique_per_mode_and_never_both_a_key_and_a_prefix() {
-        for mode in [EditMode::Normal, EditMode::Visual { line: false }] {
-            let entries: Vec<_> = KEYS.iter().filter(|e| e.modes.has(mode)).collect();
-            for (i, a) in entries.iter().enumerate() {
-                for b in &entries[i + 1..] {
-                    assert_ne!(a.keys, b.keys, "{} twice in {mode:?}", a.keys);
-                }
-                if let Some(first) = single_char(a.keys) {
+        for style in [KeyStyle::Vim, KeyStyle::Mnemonic] {
+            for mode in [EditMode::Normal, EditMode::Visual { line: false }] {
+                let entries: Vec<_> = style.keys().iter().filter(|e| e.modes.has(mode)).collect();
+                for (i, a) in entries.iter().enumerate() {
+                    for b in &entries[i + 1..] {
+                        assert_ne!(a.keys, b.keys, "{style:?}: {} twice in {mode:?}", a.keys);
+                    }
+                    if let Some(first) = single_char(a.keys) {
+                        assert!(
+                            !starts_sequence(style, mode, first),
+                            "{style:?}: {} is a key and the start of a sequence in {mode:?}",
+                            a.keys
+                        );
+                    }
                     assert!(
-                        !starts_sequence(mode, first),
-                        "{} is a key and the start of a sequence in {mode:?}",
+                        a.keys.chars().count() <= 2 || is_named(a.keys),
+                        "{style:?}: {} is longer than two keys",
                         a.keys
                     );
                 }
@@ -1620,17 +2521,30 @@ mod tests {
     fn hints_follow_the_mode_and_the_pending_key() {
         let keys = KeyMap::defaults();
         let words = |state: &ModalState| -> Vec<String> {
-            hints(state, &keys)
-                .into_iter()
-                .map(|h| format!("{} {}", h.key, h.word))
-                .collect()
+            hints(state, &keys).iter().map(Hint::plain).collect()
         };
         let normal_hints = words(&state(EditMode::Normal));
-        assert_eq!(normal_hints.first().map(String::as_str), Some("i insert"));
-        assert_eq!(normal_hints.last().map(String::as_str), Some("? keys"));
+        assert_eq!(
+            normal_hints,
+            [
+                "[I]nsert",
+                "[V]isual",
+                "[V]isual Line",
+                "dd Cut line",
+                "yy Copy line",
+                "[P]aste",
+                "[U]ndo",
+                "/ Find",
+                ": Commands",
+                "? Keys"
+            ]
+        );
         let visual_hints = words(&state(EditMode::Visual { line: true }));
-        assert_eq!(visual_hints.first().map(String::as_str), Some("d cut"));
-        assert_eq!(visual_hints.last().map(String::as_str), Some("Esc normal"));
+        assert_eq!(
+            visual_hints.first().map(String::as_str),
+            Some("[D]elete (cut)")
+        );
+        assert_eq!(visual_hints.last().map(String::as_str), Some("Esc Normal"));
         let insert_hints = words(&state(EditMode::Insert));
         assert_eq!(
             insert_hints.first().map(String::as_str),
@@ -1644,17 +2558,405 @@ mod tests {
         assert_eq!(
             words(&g),
             [
-                "g top",
-                "c comment",
-                "d definition",
-                "r references",
-                "a actions",
-                "R rename",
-                "t next tab",
-                "T previous tab",
+                "goto be[g]inning",
+                "toggle [C]omment",
+                "goto [D]efinition",
+                "goto [R]eferences",
+                "goto [A]ctions",
+                "goto [R]ename",
+                "goto next [t]ab",
+                "goto previous [T]ab",
                 "Esc cancel"
             ]
         );
+    }
+
+    fn mnemonic(mode: EditMode) -> ModalState {
+        ModalState {
+            mode,
+            style: KeyStyle::Mnemonic,
+            ..ModalState::default()
+        }
+    }
+
+    fn type_keys(state: &ModalState, text: &str) -> Option<SemanticAction> {
+        let keys = KeyMap::defaults();
+        let mut state = state.clone();
+        let mut last = None;
+        for c in text.chars() {
+            last = route(&ch(c), &state, &keys);
+            match &last {
+                Some(SemanticAction::Modal(ModalAction::Pend(first))) => {
+                    state.pending = Some(*first);
+                }
+                Some(SemanticAction::Modal(ModalAction::Count(digit))) => {
+                    state.count = Some(state.count.unwrap_or(0) * 10 + u32::from(*digit));
+                }
+                _ => {
+                    state.pending = None;
+                    state.count = None;
+                }
+            }
+        }
+        last
+    }
+
+    // --- The hint matcher ---
+
+    fn shown(name: &str, keys: &str) -> Option<String> {
+        let found = marks(name, keys)?;
+        let mut out: Vec<String> = name.chars().map(String::from).collect();
+        for (index, c) in found {
+            out[index] = format!("[{c}]");
+        }
+        Some(out.concat())
+    }
+
+    #[test]
+    fn the_matcher_prefers_word_starts_then_any_letter_in_order() {
+        assert_eq!(shown("Copy Line", "cl").as_deref(), Some("[C]opy [L]ine"));
+        assert_eq!(shown("Copy Word", "cw").as_deref(), Some("[C]opy [W]ord"));
+        // A letter that starts no word is found inside one.
+        assert_eq!(
+            shown("Goto beginning", "gg").as_deref(),
+            Some("[G]oto be[g]inning")
+        );
+        assert_eq!(
+            shown("toggle Comment", "gc").as_deref(),
+            Some("to[g]gle [C]omment")
+        );
+        // Letters keep their order: the second never sits before the first.
+        assert_eq!(shown("Line Copy", "cl"), None);
+        // Case-insensitive; `-` and `_` start words too.
+        assert_eq!(
+            shown("close or Quit", "q").as_deref(),
+            Some("close or [Q]uit")
+        );
+        assert_eq!(shown("copy-line", "cl").as_deref(), Some("[c]opy-[l]ine"));
+        // The same letter is never used twice.
+        assert_eq!(shown("Copy Line", "cc"), None);
+    }
+
+    #[test]
+    fn shifted_keys_show_upper_case_and_lower_case_keys_keep_the_name() {
+        assert_eq!(
+            shown("Paste Before", "P").as_deref(),
+            Some("[P]aste Before")
+        );
+        assert_eq!(shown("Paste", "p").as_deref(), Some("[P]aste"));
+        assert_eq!(shown("example", "M").as_deref(), Some("exa[M]ple"));
+        assert_eq!(
+            shown("Goto Rename", "gR").as_deref(),
+            Some("[G]oto [R]ename")
+        );
+        assert_eq!(
+            shown("Goto previous Tab", "gT").as_deref(),
+            Some("[G]oto previous [T]ab")
+        );
+        assert_eq!(
+            shown("Find Previous", "fP").as_deref(),
+            Some("[F]ind [P]revious")
+        );
+    }
+
+    #[test]
+    fn the_matcher_falls_back_for_symbols_named_keys_and_missing_letters() {
+        for (name, keys) in [
+            ("Cut", "x"),
+            ("Cut Line", "xl"),
+            ("Jump forward", "Tab"),
+            ("Format", "="),
+            ("Keys", "?"),
+            ("Normal", "Esc"),
+            ("Half page down", "Ctrl+D"),
+            ("Left", "h"),
+            ("Indent", ">>"),
+            ("Next diagnostic", "]d"),
+            ("Anything", ""),
+        ] {
+            assert_eq!(marks(name, keys), None, "{keys} in {name}");
+        }
+        let fallback = named_hint("x", "Cut", 0);
+        assert!(!fallback.marked());
+        assert_eq!(fallback.plain(), "x Cut");
+    }
+
+    #[test]
+    fn every_hint_row_entry_is_highlighted_where_its_letters_allow() {
+        let keys = KeyMap::defaults();
+        for style in [KeyStyle::Vim, KeyStyle::Mnemonic] {
+            for mode in [EditMode::Normal, EditMode::Visual { line: false }] {
+                let state = ModalState {
+                    mode,
+                    style,
+                    ..ModalState::default()
+                };
+                for hint in hints(&state, &keys) {
+                    let letters = !hint.key.is_empty()
+                        && !is_named(&hint.key)
+                        && hint.key.chars().all(|c| c.is_ascii_alphabetic());
+                    if hint.marked() {
+                        assert!(letters, "{style:?} {} is marked", hint.key);
+                    } else if letters {
+                        assert!(
+                            marks(&hint.word, &hint.key).is_none(),
+                            "{style:?} {} could be marked in {}",
+                            hint.key,
+                            hint.word
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mnemonic_hint_rows_match_the_design() {
+        let keys = KeyMap::defaults();
+        let words = |state: &ModalState| -> Vec<String> {
+            hints(state, &keys).iter().map(Hint::plain).collect()
+        };
+        assert_eq!(
+            words(&mnemonic(EditMode::Normal)),
+            [
+                "[I]nsert",
+                "[S]elect",
+                "[C]opy",
+                "x Cut",
+                "[P]aste",
+                "[U]ndo",
+                "[R]edo",
+                "[F]ind",
+                ": Commands",
+                "? Keys"
+            ]
+        );
+        assert_eq!(
+            words(&mnemonic(EditMode::Visual { line: false })),
+            [
+                "[C]opy",
+                "x Cut",
+                "[E]dit",
+                "[P]aste",
+                "> Indent",
+                "< Outdent",
+                "to[g]gle [C]omment",
+                "[O]ther end",
+                "? Keys",
+                "Esc Normal"
+            ]
+        );
+        let after = |first: char| ModalState {
+            pending: Some(first),
+            ..mnemonic(EditMode::Normal)
+        };
+        assert_eq!(
+            words(&after('c')),
+            ["copy [L]ine", "copy [W]ord", "copy [A]ll", "Esc cancel"]
+        );
+        assert_eq!(
+            words(&after('s')),
+            [
+                "select [C]haracters",
+                "select [L]ine",
+                "select [W]ord",
+                "select [A]ll",
+                "select [B]racket",
+                "select [Q]uotes",
+                "select [P]arens",
+                "{ select inside { }",
+                "[ select inside [ ]",
+                "Esc cancel"
+            ]
+        );
+        assert_eq!(
+            words(&after('x')),
+            // `x` is not in "cut": the keys show before the name (`xx` is the same line).
+            ["l cut line", "w cut word", "Esc cancel"]
+        );
+        assert_eq!(
+            words(&after('f')),
+            [
+                "find in [F]ile",
+                "find [N]ext",
+                "find [P]revious",
+                "file [O]pen",
+                "Esc cancel"
+            ]
+        );
+    }
+
+    // --- The Mnemonic keys ---
+
+    #[test]
+    fn vim_stays_the_default_key_style() {
+        assert_eq!(ModalState::default().style, KeyStyle::Vim);
+        assert_eq!(KeyStyle::default(), KeyStyle::Vim);
+        assert_eq!(normal(&ch('x')), Some(SemanticAction::DeleteForward));
+        assert_eq!(
+            type_keys(&state(EditMode::Normal), "yy"),
+            run(CommandId::CopyLine)
+        );
+        assert_eq!(
+            type_keys(&state(EditMode::Normal), "dd"),
+            run(CommandId::CutLine)
+        );
+        // `c` is not a Normal key in Vim style, so `cl` is not a Mnemonic copy.
+        assert!(matches!(
+            normal(&ch('c')),
+            Some(SemanticAction::Modal(ModalAction::Unbound(_)))
+        ));
+    }
+
+    #[test]
+    fn mnemonic_keys_name_the_command() {
+        let n = mnemonic(EditMode::Normal);
+        for (typed, id) in [
+            ("cl", CommandId::CopyLine),
+            ("cc", CommandId::CopyLine),
+            ("cw", CommandId::CopyWord),
+            ("ca", CommandId::CopyAll),
+            ("xl", CommandId::CutLine),
+            ("xx", CommandId::CutLine),
+            ("xw", CommandId::CutWord),
+            ("p", CommandId::PasteAfter),
+            ("P", CommandId::PasteBefore),
+            ("sc", CommandId::ModeVisual),
+            ("sl", CommandId::ModeVisualLine),
+            ("ss", CommandId::ModeVisualLine),
+            ("sw", CommandId::SelectWord),
+            ("sa", CommandId::SelectAll),
+            ("sb", CommandId::SelectBracket),
+            ("sq", CommandId::SelectInsideQuotes),
+            ("sp", CommandId::SelectInsideParens),
+            ("dl", CommandId::DeleteLine),
+            ("dd", CommandId::DeleteLine),
+            ("u", CommandId::Undo),
+            ("r", CommandId::Redo),
+            ("md", CommandId::MoveLineDown),
+            ("mu", CommandId::MoveLineUp),
+            ("ff", CommandId::Find),
+            ("fn", CommandId::FindNext),
+            ("fP", CommandId::FindPrevious),
+            ("fo", CommandId::FilePicker),
+            ("R", CommandId::Replace),
+            ("gd", CommandId::GotoDefinition),
+            ("gr", CommandId::GotoReferences),
+            ("ga", CommandId::CodeAction),
+            ("gt", CommandId::TabNext),
+            ("gT", CommandId::TabPrev),
+            ("gl", CommandId::GotoLine),
+            ("gh", CommandId::Hover),
+            ("H", CommandId::Hover),
+            ("gc", CommandId::Comment),
+            ("q", CommandId::CloseOrQuit),
+            ("e", CommandId::ToggleExplorer),
+            ("i", CommandId::ModeInsert),
+            ("v", CommandId::ModeVisual),
+            ("?", CommandId::Keys),
+        ] {
+            assert_eq!(type_keys(&n, typed), run(id), "{typed}");
+        }
+        assert_eq!(type_keys(&n, "dc"), Some(SemanticAction::DeleteForward));
+        // Motions are the Vim ones.
+        assert_eq!(type_keys(&n, "j"), mv(Movement::Down, false));
+        assert_eq!(type_keys(&n, "w"), normal(&ch('w')));
+        assert_eq!(type_keys(&n, "G"), normal(&ch('G')));
+        // The verb letters start a sequence; they do nothing alone.
+        for first in ['c', 'x', 's', 'd', 'f', 'm', 'g'] {
+            assert_eq!(
+                type_keys(&n, &first.to_string()),
+                Some(SemanticAction::Modal(ModalAction::Pend(first))),
+                "{first}"
+            );
+        }
+        // Unbound in Mnemonic: no `yy`, `U`, `K`, or `]e`.
+        assert!(matches!(
+            type_keys(&n, "y"),
+            Some(SemanticAction::Modal(ModalAction::Unbound(_)))
+        ));
+    }
+
+    #[test]
+    fn mnemonic_visual_keys_copy_cut_edit_and_paste() {
+        let v = mnemonic(EditMode::Visual { line: false });
+        assert_eq!(type_keys(&v, "c"), run(CommandId::Copy));
+        assert_eq!(type_keys(&v, "x"), run(CommandId::Cut));
+        assert_eq!(type_keys(&v, "e"), run(CommandId::ChangeSelection));
+        assert_eq!(type_keys(&v, "p"), run(CommandId::Paste));
+        assert_eq!(type_keys(&v, ">"), run(CommandId::Indent));
+        assert_eq!(type_keys(&v, "<"), run(CommandId::Outdent));
+        assert_eq!(type_keys(&v, "gc"), run(CommandId::Comment));
+        assert_eq!(type_keys(&v, "o"), run(CommandId::SwapSelectionEnds));
+        assert_eq!(type_keys(&v, "sw"), run(CommandId::SelectWord));
+        assert_eq!(type_keys(&v, "j"), mv(Movement::Down, true));
+    }
+
+    #[test]
+    fn mnemonic_counts_and_esc_work_on_sequences() {
+        let n = mnemonic(EditMode::Normal);
+        assert_eq!(
+            type_keys(&n, "3cl"),
+            Some(SemanticAction::Modal(ModalAction::Repeat(
+                3,
+                Box::new(SemanticAction::Modal(ModalAction::Run(CommandId::CopyLine)))
+            )))
+        );
+        assert_eq!(
+            type_keys(&n, "3xx"),
+            Some(SemanticAction::Modal(ModalAction::Repeat(
+                3,
+                Box::new(SemanticAction::Modal(ModalAction::Run(CommandId::CutLine)))
+            )))
+        );
+        assert_eq!(
+            type_keys(&n, "12gl"),
+            Some(SemanticAction::Modal(ModalAction::GotoLine(12)))
+        );
+        let pending = ModalState {
+            pending: Some('c'),
+            ..n.clone()
+        };
+        assert_eq!(
+            route(
+                &press(KeyCode::Esc, KeyModifiers::NONE),
+                &pending,
+                &KeyMap::defaults()
+            ),
+            Some(SemanticAction::Modal(ModalAction::Cancel))
+        );
+    }
+
+    #[test]
+    fn the_key_list_and_command_keys_follow_the_style() {
+        assert_eq!(
+            key_list(KeyStyle::Mnemonic, EditMode::Normal, "copy line").len(),
+            2
+        );
+        assert!(key_list(KeyStyle::Mnemonic, EditMode::Normal, "yy").is_empty());
+        assert_eq!(keys_for(KeyStyle::Vim, CommandId::CopyLine), ["yy"]);
+        assert_eq!(
+            keys_for(KeyStyle::Mnemonic, CommandId::CopyLine),
+            ["cl", "cc"]
+        );
+        assert_eq!(
+            keys_for(KeyStyle::Mnemonic, CommandId::CutLine),
+            ["xl", "xx"]
+        );
+        // With Vim keys a mode command shows the same key as before.
+        for spec in crate::command::COMMANDS {
+            if crate::command::modal_only(spec.id) && !spec.shortcut.is_empty() {
+                assert_eq!(
+                    keys_for(KeyStyle::Vim, spec.id).first().copied(),
+                    Some(spec.shortcut),
+                    "{}",
+                    spec.name
+                );
+            }
+        }
+        // The `?` list shows the name with its letters marked.
+        let entry = lookup(KeyStyle::Mnemonic, EditMode::Normal, "cw").unwrap();
+        assert_eq!(list_hint(entry).plain(), "[C]opy [W]ord");
     }
 
     // --- Shortcut fixes for Modeless off ---
@@ -1848,7 +3150,7 @@ mod tests {
     #[test]
     fn the_key_list_documents_the_ctrl_keys_that_differ_from_vim() {
         for mode in [EditMode::Normal, EditMode::Visual { line: false }] {
-            let rows = key_list(mode, "ctrl");
+            let rows = key_list(KeyStyle::Vim, mode, "ctrl");
             let keys: Vec<_> = rows.iter().map(|row| row.keys).collect();
             for expected in ["Ctrl+V", "Ctrl+C", "Ctrl+W", "Ctrl+R", "Ctrl+H"] {
                 assert!(keys.contains(&expected), "{expected} in {mode:?}");
