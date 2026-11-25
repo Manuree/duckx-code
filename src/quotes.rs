@@ -39,37 +39,68 @@ pub fn from_literal(rope: &Rope, start: usize, end: usize) -> Option<QuoteSpan> 
     })
 }
 
-/// Every quoted span on `at`'s line that contains `at`, innermost first, pairing
-/// unescaped marks of each quote kind left to right. A cursor on a mark includes
-/// that mark's pair. Backticks are included with `"` and `'`.
-pub fn enclosing_on_line(rope: &Rope, at: usize) -> Vec<QuoteSpan> {
-    let at = at.min(rope.len_chars());
-    let line = rope.char_to_line(at);
+/// Every unescaped quoted span on `line`, pairing marks of each quote kind left
+/// to right. Backticks are included with `"` and `'`.
+pub fn spans_on_line(rope: &Rope, line: usize) -> Vec<QuoteSpan> {
+    let line = line.min(rope.len_lines().saturating_sub(1));
     let line_start = rope.line_to_char(line);
     let chars: Vec<char> = rope
         .line(line)
         .chars()
         .take_while(|&ch| ch != '\n' && ch != '\r')
         .collect();
-    let col = at - line_start;
     let mut found = Vec::new();
     for quote in QUOTES {
         let marks: Vec<usize> = (0..chars.len())
             .filter(|&i| chars[i] == quote && !escaped(&chars, i))
             .collect();
         for &[open, close] in marks.as_chunks::<2>().0 {
-            if open <= col && col <= close {
-                found.push((open, close));
-            }
+            found.push(QuoteSpan {
+                inner: (line_start + open + 1, line_start + close),
+                outer: (line_start + open, line_start + close + 1),
+            });
         }
     }
-    found.sort_by_key(|&(open, close)| (close - open, open));
+    found.sort_by_key(|span| {
+        let (start, end) = span.outer;
+        (end - start, start)
+    });
     found
+}
+
+/// Every quoted span on lines that overlap chars `start..end` whose marks sit
+/// inside that range.
+pub fn spans_in_range(rope: &Rope, start: usize, end: usize) -> Vec<QuoteSpan> {
+    let start = start.min(rope.len_chars());
+    let end = end.min(rope.len_chars());
+    if start >= end {
+        return Vec::new();
+    }
+    let first = rope.char_to_line(start);
+    let last = rope.char_to_line(end.saturating_sub(1));
+    let mut found = Vec::new();
+    for line in first..=last {
+        found.extend(
+            spans_on_line(rope, line)
+                .into_iter()
+                .filter(|span| span.outer.0 >= start && span.outer.1 <= end),
+        );
+    }
+    found.sort_by_key(|span| {
+        let (start, end) = span.outer;
+        (end - start, start)
+    });
+    found
+}
+
+/// Every quoted span on `at`'s line that contains `at`, innermost first, pairing
+/// unescaped marks of each quote kind left to right. A cursor on a mark includes
+/// that mark's pair. Backticks are included with `"` and `'`.
+pub fn enclosing_on_line(rope: &Rope, at: usize) -> Vec<QuoteSpan> {
+    let at = at.min(rope.len_chars());
+    spans_on_line(rope, rope.char_to_line(at))
         .into_iter()
-        .map(|(open, close)| QuoteSpan {
-            inner: (line_start + open + 1, line_start + close),
-            outer: (line_start + open, line_start + close + 1),
-        })
+        .filter(|span| span.outer.0 <= at && at < span.outer.1)
         .collect()
 }
 

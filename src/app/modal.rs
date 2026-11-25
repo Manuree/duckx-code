@@ -1992,4 +1992,21 @@ mod tests {
         assert_eq!(app.buffer().selected_text(), "x");
         assert!(app.inside_nest_active());
     }
+
+    #[test]
+    fn visual_si_left_descends_into_the_first_child_of_main() {
+        let mut app = modal_app(
+            "fn main() {\n    let items = [1, 2, 3];\n    if items.len() > 0 {\n        println!(\"{}\", items[0]);\n    }\n}\n",
+        );
+        let at = app.buffer().rope().chars().position(|c| c == '{').unwrap();
+        app.buffer_mut().move_to(at, false);
+        keys(&mut app, "vsi");
+        let body = app.buffer().selected_text();
+        assert!(body.contains("let items = [1, 2, 3];"), "{body:?}");
+        press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.buffer().selected_text(), "1, 2, 3");
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.buffer().selected_text(), body);
+        assert!(app.inside_nest_active());
+    }
 }

@@ -59,7 +59,7 @@ duckx-code is modeless by default: every printable key types, and actions use sh
 | `xl` (`xx`) `xw` | Cut the line, the word (`x` as in `Ctrl + X`) |
 | `p` `P` | Paste below / above |
 | `sc` `sl` (`ss`) `sw` `sa` `sb` `sq` `sp` | Select characters (Visual), lines (Visual Line), the word, all, to the bracket, inside quotes, inside `( )` |
-| `si` | Select inside the nearest enclosing `""` `''` `` ` `` `()` `{}` `[]`; then `→` expands and `←` shrinks along the nest (again wraps) |
+| `si` | Select inside the nearest enclosing `""` `''` `` ` `` `()` `{}` `[]`; then `→` expands and `←` shrinks along the nest, and `←` can descend into a child pair (again wraps) |
 | `dc` `dl` (`dd`) | Delete the character, the line (the clipboard is untouched) |
 | `u` `r` | Undo / redo |
 | `ff` (`/`) `fn` (`n`) `fP` (`N`) `fo` `R` | Find, next, previous, open a file, replace |
