@@ -1,5 +1,3 @@
-use std::path::MAIN_SEPARATOR;
-
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -9,11 +7,11 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::icons::{self, BRANCH, SEPARATOR_LEFT, SEPARATOR_RIGHT};
+use super::icons::{BRANCH, SEPARATOR_LEFT, SEPARATOR_RIGHT};
 use crate::app::{App, LspLabel};
 use crate::lsp::{ServerStatus, Severity};
 
-/// `[NORMAL|FILE|COMMAND|FIND|OPEN|SETTINGS|ABOUT][hints][icon file | ❯ input]  ...  [selection][progress line:col][branch]`.
+/// `[NORMAL|FILE|COMMAND|FIND|OPEN|SETTINGS|ABOUT][hints][message | ❯ input]  ...  [selection][progress line:col][branch]`.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let mut right = Line::from(right_spans(app));
     if let Some(bar) = app.command_bar.as_ref()
@@ -122,9 +120,9 @@ fn left_line(app: &App, width: usize) -> (Vec<Span<'static>>, usize) {
 }
 
 /// Modeless off: the mode badge in its own color, a started sequence or count
-/// (`3d`) right after it, then the mode's keys when Mode hints is on, then the
-/// file. Hints that do not fit are dropped from the end so the file name and
-/// the dirty marker stay visible.
+/// (`3d`) right after it, then the mode's keys when Mode hints is on, then a
+/// one-shot message. Hints that do not fit are dropped from the end so the
+/// message stays visible. The file name lives on the tab title, not here.
 fn mode_line(app: &App, state: &crate::modal::ModalState, width: usize) -> Vec<Span<'static>> {
     use crate::modal::EditMode;
     let theme = *app.styles();
@@ -149,16 +147,16 @@ fn mode_line(app: &App, state: &crate::modal::ModalState, width: usize) -> Vec<S
     }
     spans.push(separator(SEPARATOR_LEFT, badge_bg, theme.status_c_bg));
     let head = spans_width(&spans);
-    let file_full = file_info_spans(app, usize::MAX);
-    let hint_room = width.saturating_sub(head + spans_width(&file_full));
+    let after_full = after_hint_spans(app, usize::MAX);
+    let hint_room = width.saturating_sub(head + spans_width(&after_full));
     let hints = if app.mode_hints_shown() {
         super::command_bar::status_hint_spans(app, state, hint_room)
     } else {
         Vec::new()
     };
-    let file = file_info_spans(app, width.saturating_sub(head + spans_width(&hints)));
+    let after = after_hint_spans(app, width.saturating_sub(head + spans_width(&hints)));
     spans.extend(hints);
-    spans.extend(file);
+    spans.extend(after);
     spans
 }
 
@@ -265,78 +263,40 @@ fn file_line(app: &App, label: &'static str, badge: Style, badge_bg: Color) -> V
         Span::styled(label, badge),
         separator(SEPARATOR_LEFT, badge_bg, theme.status_c_bg),
     ];
-    spans.extend(file_info_spans(app, usize::MAX));
+    spans.extend(after_hint_spans(app, usize::MAX));
     spans
 }
 
-/// Icon, path, dirty marker, and a one-shot message. When `max_width` is tight,
-/// the parent path and the message drop first so the file name and `[+]` stay.
-fn file_info_spans(app: &App, max_width: usize) -> Vec<Span<'static>> {
+/// A `diff` label when the buffer is showing a diff, then a one-shot message.
+/// The file name and dirty marker live on the tab title, not here.
+fn after_hint_spans(app: &App, max_width: usize) -> Vec<Span<'static>> {
     let theme = *app.styles();
-    let (icon, icon_color) = icons::file_icon(app.path());
-    let icon_span = Span::styled(format!(" {icon} "), theme.status_c.fg(icon_color));
-    let (parent, name) = match app.path() {
-        Some(path) => {
-            let path = crate::agent::strip_verbatim(path);
-            let parent = path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| format!("{}{MAIN_SEPARATOR}", p.display()));
-            let name = path
-                .file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy()
-                .into_owned();
-            (parent, name)
+    let mut spans = Vec::new();
+    if app.show_diff() {
+        spans.push(Span::styled("  diff", theme.status_c_dim));
+    }
+    if let Some(text) = app.status_message() {
+        spans.push(Span::styled(format!("  {text}"), theme.status_message));
+    }
+    if spans_width(&spans) <= max_width {
+        return spans;
+    }
+    // Prefer the message over the diff label when they cannot both fit.
+    if let Some(text) = app.status_message() {
+        let message = format!("  {text}");
+        if message.width() <= max_width {
+            return vec![Span::styled(message, theme.status_message)];
         }
-        None => match app.preview_source(app.active_id()) {
-            Some((_, title)) => (None, title.trim().to_string()),
-            None => (None, "[No Name]".to_string()),
-        },
-    };
-    let parent_span = parent.map(|text| Span::styled(text, theme.status_c_dim));
-    let name_span = |text: String| Span::styled(text, theme.status_c_bold);
-    let diff = app
-        .show_diff()
-        .then(|| Span::styled("  diff", theme.status_c_dim));
-    let dirty = app
-        .is_dirty()
-        .then(|| Span::styled(" [+]", theme.status_message));
-    let message = app
-        .status_message()
-        .map(|text| Span::styled(format!("  {text}"), theme.status_message));
-
-    let assemble = |parent: bool, with_diff: bool, with_message: bool, name: &str| {
-        let mut spans = vec![icon_span.clone()];
-        if parent {
-            spans.extend(parent_span.clone());
-        }
-        spans.push(name_span(name.to_string()));
-        if with_diff {
-            spans.extend(diff.clone());
-        }
-        spans.extend(dirty.clone());
-        if with_message {
-            spans.extend(message.clone());
-        }
-        spans
-    };
-
-    for (parent, with_diff, with_message) in [
-        (true, true, true),
-        (false, true, true),
-        (false, true, false),
-        (false, false, false),
-    ] {
-        let spans = assemble(parent, with_diff, with_message, &name);
-        if spans_width(&spans) <= max_width {
-            return spans;
+        let clipped = fit_width(&message, max_width);
+        if !clipped.is_empty() {
+            return vec![Span::styled(clipped, theme.status_message)];
         }
     }
-
-    let reserved = icon_span.content.width() + dirty.as_ref().map_or(0, |s| s.content.width());
-    let clipped = fit_width(&name, max_width.saturating_sub(reserved));
-    assemble(false, false, false, &clipped)
+    spans
+        .into_iter()
+        .take(1)
+        .filter(|span| span.content.width() <= max_width)
+        .collect()
 }
 
 /// The diagnostic on the cursor line, on its own row above the status bar.
