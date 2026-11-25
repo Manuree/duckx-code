@@ -3697,6 +3697,7 @@ impl App {
             | SettingId::Modeless
             | SettingId::ModeHints
             | SettingId::StartMode
+            | SettingId::KeyStyle
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.set_choice(id, index);
@@ -3774,6 +3775,7 @@ impl App {
             | SettingId::Modeless
             | SettingId::ModeHints
             | SettingId::StartMode
+            | SettingId::KeyStyle
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.restore_choice(id, origin);
@@ -3844,6 +3846,7 @@ impl App {
             | SettingId::Modeless
             | SettingId::ModeHints
             | SettingId::StartMode
+            | SettingId::KeyStyle
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => self.editor_prefs.choice_token(id),
             SettingId::TrimTrailingSpace | SettingId::FinalNewline | SettingId::ShowHidden => {
@@ -3915,6 +3918,7 @@ impl App {
             | SettingId::Modeless
             | SettingId::ModeHints
             | SettingId::StartMode
+            | SettingId::KeyStyle
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => (
                 self.editor_prefs.choice_index(id),
@@ -4047,6 +4051,7 @@ impl App {
             | SettingId::Modeless
             | SettingId::ModeHints
             | SettingId::StartMode
+            | SettingId::KeyStyle
             | SettingId::MatchBrackets
             | SettingId::ColorizeBrackets => {
                 self.editor_prefs.reset(id);
@@ -5288,12 +5293,17 @@ impl App {
                     self.request_close()?;
                 }
             }
+            CommandId::KeyStyle => self.set_key_style(arg)?,
             CommandId::CopyLine
             | CommandId::CutLine
             | CommandId::PasteAfter
             | CommandId::PasteBefore
             | CommandId::HalfPageDown
-            | CommandId::HalfPageUp => {
+            | CommandId::HalfPageUp
+            | CommandId::CopyWord
+            | CommandId::CutWord
+            | CommandId::SelectWord
+            | CommandId::CopyAll => {
                 if self.editor_prefs.modeless {
                     return Err(format!("{} applies with Modeless off", spec(id).name));
                 }
