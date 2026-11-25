@@ -76,6 +76,10 @@ pub enum CommandId {
     GotoReferences,
     /// Jump to the bracket paired with the one under the cursor.
     MatchBracket,
+    /// Move to the next `()[]{}` character after the cursor.
+    NextBracket,
+    /// Move to the previous `()[]{}` character before the cursor.
+    PrevBracket,
     /// Open the completion list at the cursor.
     Complete,
     /// Add or remove a line comment.
@@ -762,6 +766,24 @@ pub const COMMANDS: &[CommandSpec] = &[
         explorer: false,
     },
     CommandSpec {
+        id: CommandId::NextBracket,
+        name: "next-bracket",
+        description: "Jump to the next ( ) [ ] { } character after the cursor",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
+        id: CommandId::PrevBracket,
+        name: "prev-bracket",
+        description: "Jump to the previous ( ) [ ] { } character before the cursor",
+        shortcut: "",
+        arg: None,
+        editor: true,
+        explorer: false,
+    },
+    CommandSpec {
         id: CommandId::SelectBracket,
         name: "select-bracket",
         description: "Select through the matching bracket",
@@ -1204,6 +1226,8 @@ fn importance(id: CommandId) -> u16 {
         CommandId::GotoDefinition => 110,
         CommandId::GotoReferences => 112,
         CommandId::MatchBracket => 115,
+        CommandId::NextBracket => 116,
+        CommandId::PrevBracket => 117,
         CommandId::SelectBracket => 274,
         CommandId::SelectInsideQuotes => 276,
         CommandId::SelectInsideParens => 277,
@@ -1795,6 +1819,8 @@ mod tests {
                 "goto-definition",
                 "goto-references",
                 "match-bracket",
+                "next-bracket",
+                "prev-bracket",
                 "complete",
                 "hover",
                 "format",
