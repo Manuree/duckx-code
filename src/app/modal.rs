@@ -25,6 +25,8 @@ pub(super) struct ModalBefore {
     collapse: bool,
     /// A Visual Line move already shaped the selection.
     line_motion: bool,
+    /// Left/Right after `si` must not drop the nest.
+    keeps_nest: bool,
     focus: Focus,
     active: crate::layout::EditorId,
 }
@@ -82,6 +84,11 @@ impl App {
         self.editor_prefs.mode_hints && self.modal_input().is_some()
     }
 
+    /// True when Left/Right walk the nest `si` selected.
+    pub fn inside_nest_active(&self) -> bool {
+        self.modal_input().is_some_and(|state| state.nest.is_some())
+    }
+
     /// Follows Settings → Editor → Modeless: offer or hide the mode commands, and
     /// start in the Start mode whenever Modeless turns off.
     pub(super) fn sync_modal(&mut self) {
@@ -94,6 +101,7 @@ impl App {
             self.modal_state.pending = None;
             self.modal_state.count = None;
             self.modal_state.key_list = None;
+            self.modal_state.nest = None;
         }
         if on == self.modal_applied {
             return;
@@ -190,6 +198,7 @@ impl App {
                     )))
             ),
             line_motion: false,
+            keeps_nest: keeps_inside_nest(action),
             focus: self.focus(),
             active: self.active_id(),
         })
@@ -211,6 +220,9 @@ impl App {
         }
         if !before.keeps_notice {
             self.modal_state.notice = None;
+        }
+        if !before.keeps_nest {
+            self.modal_state.nest = None;
         }
         if self.active_id() != before.active && self.modal_state.mode.is_visual() {
             self.leave_visual(false);
@@ -840,6 +852,8 @@ impl App {
             }
             CommandId::SelectBracket
             | CommandId::SelectInside
+            | CommandId::SelectInsideOuter
+            | CommandId::SelectInsideInner
             | CommandId::SelectInsideQuotes
             | CommandId::SelectInsideParens
             | CommandId::SelectInsideBraces
@@ -945,6 +959,20 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+fn keeps_inside_nest(action: &SemanticAction) -> bool {
+    fn is_nest(id: CommandId) -> bool {
+        matches!(
+            id,
+            CommandId::SelectInside | CommandId::SelectInsideOuter | CommandId::SelectInsideInner
+        )
+    }
+    match action {
+        SemanticAction::Modal(ModalAction::Run(id)) => is_nest(*id),
+        SemanticAction::Modal(ModalAction::Repeat(_, inner)) => keeps_inside_nest(inner),
+        _ => false,
     }
 }
 
@@ -1910,5 +1938,58 @@ mod tests {
         keys(&mut app, "si");
         assert_eq!(mode(&app), EditMode::Visual { line: false });
         assert_eq!(app.buffer().selected_text(), "x: i32");
+    }
+
+    #[test]
+    fn arrows_after_si_walk_the_nest_and_other_keys_exit() {
+        let mut app = modal_app(
+            "{[(x)]}
+",
+        );
+        let at = app.buffer().rope().chars().position(|c| c == 'x').unwrap();
+        app.buffer_mut().move_to(at, false);
+        keys(&mut app, "vsi");
+        assert_eq!(mode(&app), EditMode::Visual { line: false });
+        assert_eq!(app.buffer().selected_text(), "x");
+        assert!(app.inside_nest_active());
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.buffer().selected_text(), "(x)");
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.buffer().selected_text(), "[(x)]");
+        // Outermost: Right stays put and the nest stays active.
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.buffer().selected_text(), "[(x)]");
+        assert!(app.inside_nest_active());
+        press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.buffer().selected_text(), "(x)");
+        press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.buffer().selected_text(), "x");
+        press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.buffer().selected_text(), "x");
+        // Another key leaves the mode; a later arrow is ordinary Visual movement.
+        keys(&mut app, "l");
+        assert!(!app.inside_nest_active());
+        let after_l = app.buffer().selected_text();
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_ne!(app.buffer().selected_text(), after_l);
+        assert!(!app.inside_nest_active());
+    }
+
+    #[test]
+    fn mnemonic_normal_si_then_arrows_walk_the_nest() {
+        let mut app = mnemonic_app(
+            "{[(x)]}
+",
+        );
+        let at = app.buffer().rope().chars().position(|c| c == 'x').unwrap();
+        app.buffer_mut().move_to(at, false);
+        keys(&mut app, "si");
+        assert_eq!(mode(&app), EditMode::Visual { line: false });
+        assert_eq!(app.buffer().selected_text(), "x");
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.buffer().selected_text(), "(x)");
+        press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.buffer().selected_text(), "x");
+        assert!(app.inside_nest_active());
     }
 }

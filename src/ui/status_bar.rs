@@ -149,7 +149,9 @@ fn mode_line(app: &App, state: &crate::modal::ModalState, width: usize) -> Vec<S
     let head = spans_width(&spans);
     let after_full = after_hint_spans(app, usize::MAX);
     let hint_room = width.saturating_sub(head + spans_width(&after_full));
-    let hints = if app.mode_hints_shown() {
+    let hints = if app.inside_nest_active() {
+        super::command_bar::inside_nest_hint_spans(app, hint_room)
+    } else if app.mode_hints_shown() {
         super::command_bar::status_hint_spans(app, state, hint_room)
     } else {
         Vec::new()

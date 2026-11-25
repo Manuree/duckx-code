@@ -570,7 +570,7 @@ pub const KEYS: &[ModalKey] = &[
         "si",
         Modes::Visual,
         cmd(CommandId::SelectInside),
-        "Select inside the nearest quotes or brackets",
+        "Select inside the nearest quotes or brackets; then → outer, ← inner",
         "Select inside",
     ),
     key(
@@ -1065,7 +1065,7 @@ pub const MNEMONIC_KEYS: &[ModalKey] = &[
         "si",
         Modes::Both,
         cmd(CommandId::SelectInside),
-        "Select inside the nearest quotes or brackets; again expands",
+        "Select inside the nearest quotes or brackets; then → outer, ← inner",
         "Select inside",
     ),
     key(
@@ -1499,6 +1499,15 @@ pub struct ModalState {
     pub line: Option<LineSelect>,
     /// The key table Normal and Visual use.
     pub style: KeyStyle,
+    /// After `si` / `select-inside`: Left/Right walk the nest until another key.
+    pub nest: Option<InsideNest>,
+}
+
+/// The enclosing-pair nest `si` left selected, innermost first, for Left/Right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsideNest {
+    pub inners: Vec<(usize, usize)>,
+    pub index: usize,
 }
 
 /// Actions only modal editing produces.
@@ -1630,6 +1639,19 @@ fn route_key(key: &KeyEvent, state: &ModalState, keys: &KeyMap) -> Option<Semant
         } else {
             Some(SemanticAction::Dismiss)
         };
+    }
+    // After `si`, bare Left/Right walk the nest; any other key is routed as usual
+    // and the app drops the nest after that action.
+    if state.nest.is_some() && key.modifiers.is_empty() {
+        match key.code {
+            KeyCode::Right => {
+                return modal(ModalAction::Run(CommandId::SelectInsideOuter));
+            }
+            KeyCode::Left => {
+                return modal(ModalAction::Run(CommandId::SelectInsideInner));
+            }
+            _ => {}
+        }
     }
     // `Shift+Space` opens the Command Bar; it is not a space to look up.
     if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -2021,6 +2043,15 @@ pub fn marks(name: &str, keys: &str) -> Option<Vec<(usize, char)>> {
         from = index + 1;
     }
     Some(found)
+}
+
+/// Status-bar hints while Left/Right walk the nest `si` selected.
+pub fn inside_nest_hints() -> Vec<Hint> {
+    vec![
+        hint("→", "outer"),
+        hint("←", "inner"),
+        hint("Esc", "normal"),
+    ]
 }
 
 /// The hint row for `state`: what the next key can do. The last entry is the one to
@@ -3112,6 +3143,58 @@ mod tests {
         assert!(key_list(KeyStyle::Vim, EditMode::Visual { line: false }, "si(").is_empty());
         let entry = lookup(KeyStyle::Vim, EditMode::Visual { line: false }, "si").unwrap();
         assert_eq!(list_hint(entry).plain(), "[s]elect [i]nside");
+        assert!(
+            entry.label.contains("then → outer, ← inner"),
+            "{}",
+            entry.label
+        );
+    }
+
+    #[test]
+    fn left_and_right_walk_the_si_nest_only_while_it_is_active() {
+        let visual = state(EditMode::Visual { line: false });
+        let keys = KeyMap::defaults();
+        let left = press(KeyCode::Left, KeyModifiers::NONE);
+        let right = press(KeyCode::Right, KeyModifiers::NONE);
+        // Without a nest, arrows are ordinary (Visual) movement.
+        assert!(matches!(
+            route(&right, &visual, &keys),
+            Some(SemanticAction::Move { .. })
+        ));
+        let nest = ModalState {
+            nest: Some(InsideNest {
+                inners: vec![(1, 2), (0, 3)],
+                index: 0,
+            }),
+            ..visual.clone()
+        };
+        assert_eq!(
+            route(&right, &nest, &keys),
+            run(CommandId::SelectInsideOuter)
+        );
+        assert_eq!(
+            route(&left, &nest, &keys),
+            run(CommandId::SelectInsideInner)
+        );
+        // A shifted arrow is still movement, and `h` is still a key.
+        assert!(matches!(
+            route(&press(KeyCode::Right, KeyModifiers::SHIFT), &nest, &keys),
+            Some(SemanticAction::Move { .. })
+        ));
+        assert_eq!(
+            route(&ch('h'), &nest, &keys),
+            Some(SemanticAction::Move {
+                movement: crate::buffer::Movement::Left,
+                extend: true,
+            })
+        );
+        assert_eq!(
+            inside_nest_hints()
+                .iter()
+                .map(Hint::plain)
+                .collect::<Vec<_>>(),
+            ["→ outer", "← inner", "Esc normal"]
+        );
     }
 
     #[test]

@@ -5213,6 +5213,8 @@ impl App {
             CommandId::PrevBracket => self.jump_bracket(false),
             CommandId::SelectBracket => self.match_bracket(true),
             CommandId::SelectInside => self.select_inside(),
+            CommandId::SelectInsideOuter => self.step_inside_nest(1),
+            CommandId::SelectInsideInner => self.step_inside_nest(-1),
             CommandId::SelectInsideQuotes => self.select_inside_quotes(),
             CommandId::SelectInsideParens => self.select_inside_pair('(', ')'),
             CommandId::SelectInsideBraces => self.select_inside_pair('{', '}'),
@@ -6002,53 +6004,112 @@ impl App {
     /// in the actual nest, and wraps back to the innermost after the outermost.
     /// Quotes are found on the current line (or by the syntax tree); brackets may
     /// span lines. `<>` is not paired. No enclosing pair leaves a short message.
+    /// A successful selection starts Left/Right nest walking (no wrap on arrows).
     fn select_inside(&mut self) {
         self.dismiss_lsp_popups();
         self.clear_snippet();
-        let range = {
-            let tab = self.active_editor().tab();
-            let rope = tab.buffer.rope();
-            let selection = tab.buffer.selection();
-            let current = (
-                selection.anchor.min(selection.head),
-                selection.anchor.max(selection.head),
-            );
-            // After an expand the caret may sit on a delimiter; a point inside
-            // the selection keeps the nest around the original contents.
-            let at = if current.0 < current.1 {
-                current.0 + (current.1 - current.0) / 2
-            } else {
-                selection.head
-            };
-            let quotes = match tab
-                .syntax
-                .as_ref()
-                .filter(|state| state.has_tree())
-                .and_then(|state| state.string_span(rope, at))
-            {
-                Some(Some(span)) => vec![span],
-                Some(None) => Vec::new(),
-                None => crate::quotes::enclosing_on_line(rope, at),
-            };
-            let literals = tab
-                .syntax
-                .as_ref()
-                .filter(|state| state.has_tree())
-                .map(|state| state.literal_ranges(rope, 0, rope.len_chars()))
-                .unwrap_or_default();
-            let literal_of = |at: usize| {
-                let after = literals.partition_point(|(from, _)| *from <= at);
-                (after > 0 && at < literals[after - 1].1).then(|| literals[after - 1])
-            };
-            let pairs = crate::brackets::enclosing_inside(rope, at, &quotes, &literal_of);
-            crate::brackets::next_inside(&pairs, current)
-        };
-        let Some(range) = range else {
+        let (pairs, current) = self.inside_nest_pairs();
+        let Some(range) = crate::brackets::next_inside(&pairs, current) else {
             self.message = Some("No enclosing pair".to_string());
+            self.modal_state.nest = None;
             return;
         };
         self.buffer_mut().select_span(range.0, range.1);
         self.scroll_to_cursor();
+        self.set_inside_nest(pairs, range);
+    }
+
+    /// Expand (`dir > 0`) or shrink (`dir < 0`) the `select-inside` nest by one
+    /// level. At the outermost or innermost pair this is a no-op; the nest stays
+    /// active so the other arrow still works.
+    fn step_inside_nest(&mut self, dir: i32) {
+        self.dismiss_lsp_popups();
+        self.clear_snippet();
+        let (pairs, current) = self.inside_nest_pairs();
+        let inners: Vec<(usize, usize)> = pairs.iter().map(|span| span.inner).collect();
+        if inners.is_empty() {
+            self.message = Some("No enclosing pair".to_string());
+            self.modal_state.nest = None;
+            return;
+        }
+        let index = self
+            .modal_state
+            .nest
+            .as_ref()
+            .filter(|nest| nest.inners == inners)
+            .and_then(|nest| {
+                (nest.index < inners.len() && inners[nest.index] == current).then_some(nest.index)
+            })
+            .or_else(|| inners.iter().rposition(|&span| span == current));
+        let next = match index {
+            // No current inside-selection: start at the innermost pair.
+            None => 0,
+            Some(index) if dir > 0 && index + 1 < inners.len() => index + 1,
+            Some(index) if dir < 0 && index > 0 => index - 1,
+            Some(index) => {
+                // Already at the outermost or innermost: no-op, keep the nest.
+                self.set_inside_nest(pairs, inners[index]);
+                return;
+            }
+        };
+        let range = inners[next];
+        self.buffer_mut().select_span(range.0, range.1);
+        self.scroll_to_cursor();
+        self.set_inside_nest(pairs, range);
+    }
+
+    /// Enclosing inside-spans around the caret or the mid-point of the selection,
+    /// plus the current selection range.
+    fn inside_nest_pairs(&self) -> (Vec<crate::brackets::InsideSpan>, (usize, usize)) {
+        let tab = self.active_editor().tab();
+        let rope = tab.buffer.rope();
+        let selection = tab.buffer.selection();
+        let current = (
+            selection.anchor.min(selection.head),
+            selection.anchor.max(selection.head),
+        );
+        // After an expand the caret may sit on a delimiter; a point inside
+        // the selection keeps the nest around the original contents.
+        let at = if current.0 < current.1 {
+            current.0 + (current.1 - current.0) / 2
+        } else {
+            selection.head
+        };
+        let quotes = match tab
+            .syntax
+            .as_ref()
+            .filter(|state| state.has_tree())
+            .and_then(|state| state.string_span(rope, at))
+        {
+            Some(Some(span)) => vec![span],
+            Some(None) => Vec::new(),
+            None => crate::quotes::enclosing_on_line(rope, at),
+        };
+        let literals = tab
+            .syntax
+            .as_ref()
+            .filter(|state| state.has_tree())
+            .map(|state| state.literal_ranges(rope, 0, rope.len_chars()))
+            .unwrap_or_default();
+        let literal_of = |at: usize| {
+            let after = literals.partition_point(|(from, _)| *from <= at);
+            (after > 0 && at < literals[after - 1].1).then(|| literals[after - 1])
+        };
+        let pairs = crate::brackets::enclosing_inside(rope, at, &quotes, &literal_of);
+        (pairs, current)
+    }
+
+    fn set_inside_nest(
+        &mut self,
+        pairs: Vec<crate::brackets::InsideSpan>,
+        current: (usize, usize),
+    ) {
+        let inners: Vec<(usize, usize)> = pairs.iter().map(|span| span.inner).collect();
+        let index = inners
+            .iter()
+            .rposition(|&span| span == current)
+            .unwrap_or(0);
+        self.modal_state.nest = Some(crate::modal::InsideNest { inners, index });
     }
 
     /// Selects the text inside the quotes around the cursor, like `vi"`. When that is already the
@@ -7821,6 +7882,32 @@ mod tests {
         // Multi-line brackets.
         let mut app = quotes_app("fn f() {\n    if x {\n        y|;\n    }\n}\n", None, false);
         assert_eq!(select_pair(&mut app, SelectInside), "\n        y;\n    ");
+    }
+
+    #[test]
+    fn select_inside_arrows_walk_the_nest_without_wrapping() {
+        use crate::command::CommandId::{SelectInside, SelectInsideInner, SelectInsideOuter};
+        let mut app = quotes_app("{[(x|)]}", None, false);
+        assert_eq!(select_pair(&mut app, SelectInside), "x");
+        assert!(app.modal_state.nest.is_some());
+        assert_eq!(select_pair(&mut app, SelectInsideOuter), "(x)");
+        assert_eq!(select_pair(&mut app, SelectInsideOuter), "[(x)]");
+        // Outermost: Right is a no-op and the nest stays.
+        assert_eq!(select_pair(&mut app, SelectInsideOuter), "[(x)]");
+        assert_eq!(select_pair(&mut app, SelectInsideInner), "(x)");
+        assert_eq!(select_pair(&mut app, SelectInsideInner), "x");
+        // Innermost: Left is a no-op.
+        assert_eq!(select_pair(&mut app, SelectInsideInner), "x");
+        assert!(app.modal_state.nest.is_some());
+        // Command Bar names start a nest even without a prior `si` session.
+        let mut app = quotes_app("{[(x|)]}", None, false);
+        assert_eq!(select_pair(&mut app, SelectInsideOuter), "x");
+        assert_eq!(select_pair(&mut app, SelectInsideOuter), "(x)");
+        assert_eq!(select_pair(&mut app, SelectInsideInner), "x");
+        let mut app = quotes_app("let x| = 1;", None, false);
+        assert_eq!(select_pair(&mut app, SelectInsideOuter), "");
+        assert_eq!(app.message.as_deref(), Some("No enclosing pair"));
+        assert!(app.modal_state.nest.is_none());
     }
 
     #[test]
