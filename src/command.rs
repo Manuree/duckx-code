@@ -399,7 +399,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::ModeInsert,
         name: "mode-insert",
-        description: "Type at the cursor (Insert mode). From Visual, drops the selection and keeps the cursor where it is",
+        description: "Type at the cursor (Insert mode). From Visual, keeps the selection so the first typed character or paste replaces it",
         shortcut: "i",
         arg: None,
         editor: true,

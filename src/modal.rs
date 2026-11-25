@@ -190,10 +190,17 @@ pub const KEYS: &[ModalKey] = &[
     // Changing mode.
     key(
         "i",
-        Modes::Both,
+        Modes::Normal,
         cmd(CommandId::ModeInsert),
         "Type at the cursor (Insert)",
         "Insert",
+    ),
+    key(
+        "i",
+        Modes::Visual,
+        cmd(CommandId::ModeInsert),
+        "Type over the selection (Insert)",
+        "Insert over",
     ),
     key(
         "a",
@@ -751,10 +758,17 @@ pub const MNEMONIC_KEYS: &[ModalKey] = &[
     // Changing mode: the same keys as Vim.
     key(
         "i",
-        Modes::Both,
+        Modes::Normal,
         cmd(CommandId::ModeInsert),
         "Type at the cursor (Insert)",
         "Insert",
+    ),
+    key(
+        "i",
+        Modes::Visual,
+        cmd(CommandId::ModeInsert),
+        "Type over the selection (Insert)",
+        "Insert over",
     ),
     key(
         "a",
@@ -2568,7 +2582,10 @@ mod tests {
             ]
         );
         let visual_hints = words(&state(EditMode::Visual { line: true }));
-        assert_eq!(visual_hints.first().map(String::as_str), Some("[i]nsert"));
+        assert_eq!(
+            visual_hints.first().map(String::as_str),
+            Some("[i]nsert over")
+        );
         assert!(visual_hints.iter().any(|h| h == "[d]elete (cut)"));
         assert_eq!(visual_hints.last().map(String::as_str), Some("Esc normal"));
         let pending_s = ModalState {
@@ -2813,7 +2830,7 @@ mod tests {
         assert_eq!(
             words(&mnemonic(EditMode::Visual { line: false })),
             [
-                "[i]nsert",
+                "[i]nsert over",
                 "[c]opy",
                 "x cut",
                 "[e]dit",

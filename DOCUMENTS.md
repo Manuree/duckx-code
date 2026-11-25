@@ -405,13 +405,13 @@ Printable keys never type in Normal. A key with no command shows *No command on 
 | `>` `<` `Tab` `Shift + Tab` | Indent / outdent every selected line (stays in Visual) |
 | `gc` | Comment or uncomment the lines |
 | `o` | Move the cursor to the other end |
-| `i` | Insert at the cursor, dropping the selection. The cursor stays where it is (in Visual Line, on the column it was on). The selected text is not deleted — that is `c`. Use `o` first to type at the other end. |
+| `i` | Insert, keeping the selection highlighted. The first typed character or paste replaces it (one undo restores it); Backspace or Delete deletes it; a move or `Esc` clears it without deleting. The replaced text is not copied to the clipboard — `c` cuts, then Insert. The same in Visual Line, over the selected lines. |
 | `s"` `s'` `s(` `s{` `s[` (or the closing bracket) | Select inside quotes or brackets (`select-inside-quotes`, `select-inside-parens`, `select-inside-braces`, `select-inside-brackets`) |
 | `%` | Select to the matching bracket |
 | `v` `V` | Switch between Visual and Visual Line, or leave |
 | `Esc` | Back to Normal, dropping the selection |
 
-In Visual Line, `y` and `d` take the line break after the last line, so `p` / `P` in Normal bring back whole lines. Counts work: `3yy` copies three lines. Unlike vim, Visual `i` enters Insert instead of starting an inner text object.
+In Visual Line, `y` and `d` take the line break after the last line, so `p` / `P` in Normal bring back whole lines. Counts work: `3yy` copies three lines. Unlike vim, Visual `i` enters Insert (keeping the selection so you can type over it) instead of starting an inner text object.
 
 ### Mnemonic keys
 
@@ -445,7 +445,7 @@ With **Key style** set to Mnemonic, a key names its command: a verb letter, then
 
 | Keys (Visual) | Does |
 | :--- | :--- |
-| `i` | Insert at the cursor, dropping the selection, as in Vim style |
+| `i` | Insert over the selection, as in Vim style (type or paste to replace; not copied) |
 | `c` | Copy the selection |
 | `x` | Cut it |
 | `e` | Edit: delete it and Insert (`change-selection`) |
@@ -486,7 +486,7 @@ An `Esc` that leaves Insert or Visual, or cancels a count or sequence, is not th
 | `mode-hints` | Show or hide the mode's keys in the status bar. Flips and saves **Mode hints** | — |
 | `key-style [vim\|mnemonic]` | Set **Key style**; with no name, switch between Vim and Mnemonic, and save it | — |
 | `mode-normal` | Back to Normal | `Esc` |
-| `mode-insert` | Insert at the cursor. From Visual, drops the selection and keeps the cursor where it is. | `i` (Normal and Visual) |
+| `mode-insert` | Insert at the cursor. From Visual, keeps the selection so the first typed character or paste replaces it. | `i` (Normal and Visual) |
 | `mode-visual` | Visual, or back to Normal from it | `v` |
 | `mode-visual-line` | Visual Line, or back to Normal from it | `V` |
 | `insert-after` | Insert after the cursor | `a` |

@@ -2701,16 +2701,19 @@ impl App {
             SemanticAction::Move { movement, extend } => {
                 self.dismiss_lsp_popups();
                 self.clear_snippet();
+                self.collapse_insert_selection(extend);
                 self.buffer_mut().move_cursor(movement, extend);
             }
             SemanticAction::PageUp { extend } => {
                 self.dismiss_lsp_popups();
                 self.clear_snippet();
+                self.collapse_insert_selection(extend);
                 self.page(false, extend);
             }
             SemanticAction::PageDown { extend } => {
                 self.dismiss_lsp_popups();
                 self.clear_snippet();
+                self.collapse_insert_selection(extend);
                 self.page(true, extend);
             }
             SemanticAction::InsertChar(c) if self.closer_dedent(c) => self.note_typed(Some(c)),
@@ -5479,6 +5482,20 @@ impl App {
 
     fn editor_mut(&mut self, id: EditorId) -> Option<&mut Editor> {
         self.editors.iter_mut().find(|editor| editor.id == id)
+    }
+
+    /// In Insert, a plain move or page drops a selection kept from Visual `i`
+    /// without deleting it, so the caret can leave the highlight.
+    fn collapse_insert_selection(&mut self, extend: bool) {
+        if extend {
+            return;
+        }
+        if self
+            .modal()
+            .is_some_and(|state| state.mode == crate::modal::EditMode::Insert)
+        {
+            self.buffer_mut().deselect();
+        }
     }
 
     /// `deselect` / `Ctrl+D`: clears the selection, sticky or live.
