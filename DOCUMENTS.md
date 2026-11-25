@@ -253,7 +253,7 @@ Each file with unsaved edits asks `Yes` / `No` / `Cancel` before the switch. `Ye
 | `save <path>` | Save the focused editor to that path and remember it. A relative path is inside the open folder. |
 
 * **Atomic write:** the new text is written to a temporary file in the same directory, flushed, then renamed over the real file. A failed save leaves the previous file as it was.
-* **Encoding:** the status bar shows the encoding after the line ending (`4 LF UTF-8`). A file opens as UTF-8, or as UTF-8 or UTF-16 when a BOM is present. `encoding utf-16le` makes the next save write that encoding. `reload` reads the file again with the encoding it already has. `reload windows-874` reads those bytes as that encoding. A character the encoding cannot store is not written, and a notice says so. Names: `utf-8`, `utf-8-bom`, `utf-16le`, `utf-16be`, `windows-1252`, `windows-874`.
+* **Encoding:** a file opens as UTF-8, or as UTF-8 or UTF-16 when a BOM is present. `encoding` shows the encoding of the focused file. `encoding utf-16le` makes the next save write that encoding. `reload` reads the file again with the encoding it already has. `reload windows-874` reads those bytes as that encoding. A character the encoding cannot store is not written, and a notice says so. Names: `utf-8`, `utf-8-bom`, `utf-16le`, `utf-16be`, `windows-1252`, `windows-874`. Tab width and line endings are in Settings → Editor.
 * **Changed on disk:** about once a second, a clean file whose copy on disk changed is reloaded and the cursor stays on the same line. A file with unsaved edits asks first. `Reload` discards those edits. `Keep` and `Esc` leave the editor text; the next save writes over the disk copy. A save from duckx-code itself is not treated as an outside change.
 * **Modified marker:** `[+]` appears after the file name on that tab and in the status bar while the text differs from the last successful load or save. Undoing or deleting back to that text clears it.
 * **No path yet:** `Ctrl + S` opens the Command Bar with `save ` so you can type a path. A name with no folder, such as `hello.rs`, is saved in the directory duckx-code was started from. The status bar then shows that folder, dimmed, in front of the file name, and `Saved` includes the full path. A missing directory is created.
@@ -339,7 +339,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 Settings → Editor → **Modeless** is On by default, and then nothing in this section applies: keys work exactly as described everywhere else in this file. Turn it Off (or run `modeless`) for three modes in the editor. The mode is shown in three places at once, so it is never a guess:
 
 * **The status bar badge:** `NORMAL` (blue), `INSERT` (green), `VISUAL` or `V-LINE` (pink). Each mode has its own color in every built-in theme, never shared with another badge. A started key sequence or count shows right after it, such as `3d` or `g`.
-* **The hint row** just above the status bar lists the keys that do something in this mode by name, all in lowercase, with the letters to press highlighted in the mode color, bold, and underlined (`insert  visual  dd cut line … ? keys`: the `i` of insert and the `v` of visual are marked). A highlighted letter is uppercase only when that key needs Shift (`V` is **V**isual line, `fP` is **f**ind **P**revious). When a key's letters are not all in its name, or it is a symbol, a named key, or a `Ctrl` key, the key is shown before the name instead (`dd cut line`, `Tab jump forward`, `? keys`). While a sequence is started it lists only the keys that can finish it, with the next letter highlighted (after `g`, the `d` of goto definition, or the `T` of goto previous Tab), plus `Esc cancel`. Turn it off with Settings → Editor → **Mode hints** or `mode-hints`.
+* **The hints in the status bar,** right after the mode badge, list the keys that do something in this mode by name, all in lowercase, with the letters to press highlighted in the mode color, bold, and underlined (`insert  visual  dd cut line … ? keys`: the `i` of insert and the `v` of visual are marked). A highlighted letter is uppercase only when that key needs Shift (`V` is **V**isual line, `fP` is **f**ind **P**revious). When a key's letters are not all in its name, or it is a symbol, a named key, or a `Ctrl` key, the key is shown before the name instead (`dd cut line`, `Tab jump forward`, `? keys`). Hints that do not fit are dropped from the end so the file name stays visible. While a sequence is started it lists only the keys that can finish it, with the next letter highlighted (after `g`, the `d` of goto definition, or the `T` of goto previous Tab), plus `Esc cancel`. Turn it off with Settings → Editor → **Mode hints** or `mode-hints`.
 * **The cursor:** a block in Normal, a green underline in Insert, and a pink block in Visual. The cursor line number takes the mode color too.
 
 **Start mode** (Settings → Editor) picks the mode when Modeless turns off and when duckx-code starts: Normal (the default) or Insert. There is one mode for the whole app; switching windows or tabs keeps it, except that Visual becomes Normal when another window gets the focus.
@@ -354,7 +354,7 @@ Typing works exactly like Modeless: every key does what it does with Modeless On
 
 ### Normal
 
-Printable keys never type in Normal. A key with no command shows *No command on q. Press i to type, ? for keys* in the hint row.
+Printable keys never type in Normal. A key with no command shows *No command on q. Press i to type, ? for keys* after the mode badge.
 
 | Keys | Does |
 | :--- | :--- |
@@ -450,7 +450,7 @@ With **Key style** set to Mnemonic, a key names its command: a verb letter, then
 | `>` `<` `Tab` `Shift + Tab` `gc` `o` | Indent, outdent, comment, other end, as in Vim style |
 | `s…` | The select keys above change the selection |
 
-The hint row names each verb (`insert  select  copy  x cut  paste  undo  redo  find  : commands  ? keys`) and, after `c`, shows `copy line  copy word  copy all`. `x` is not a letter of "cut", so it is shown before the name.
+The hints after the mode badge name each verb (`insert  select  copy  x cut  paste  undo  redo  find  : commands  ? keys`) and, after `c`, shows `copy line  copy word  copy all`. `x` is not a letter of "cut", so it is shown before the name.
 
 ### Keys that differ from vim
 
@@ -467,7 +467,7 @@ These keep their duckx-code meaning in every mode; the `?` list shows them too (
 
 ### The key list
 
-`?` in Normal or Visual (or the `keys` command) opens a list of every key of the mode in the current Key style: the key, its name with the letters highlighted as in the hint row, what it does, and the command or key it mirrors. Type to filter, `Up` / `Down` to move, `Enter` to run the highlighted key, `Esc` to close.
+`?` in Normal or Visual (or the `keys` command) opens a list of every key of the mode in the current Key style: the key, its name with the letters highlighted as in the status-bar hints, what it does, and the command or key it mirrors. Type to filter, `Up` / `Down` to move, `Enter` to run the highlighted key, `Esc` to close.
 
 ### Esc and Double Esc
 
@@ -480,7 +480,7 @@ An `Esc` that leaves Insert or Visual, or cancels a count or sequence, is not th
 | Command | Description | Mode key |
 | :--- | :--- | :--- |
 | `modeless` | Turn Modeless on or off. Flips and saves **Modeless** (Settings → Editor) | — |
-| `mode-hints` | Show or hide the hint row. Flips and saves **Mode hints** | — |
+| `mode-hints` | Show or hide the mode's keys in the status bar. Flips and saves **Mode hints** | — |
 | `key-style [vim\|mnemonic]` | Set **Key style**; with no name, switch between Vim and Mnemonic, and save it | — |
 | `mode-normal` | Back to Normal | `Esc` |
 | `mode-insert` | Insert at the cursor | `i` |
@@ -793,7 +793,7 @@ A folder shows the strongest marker of anything inside it. Markers need `git` on
 The layout follows Neovim's lualine (Tokyo Night colors), with powerline separators between sections:
 
 ```text
- NORMAL  master  src/DESIGN.md                    12 selected   8%   8:209   4 LF
+ NORMAL  src/DESIGN.md                    12 selected   8%   8:209   master
 ```
 
 While the Command Bar is open the file name is hidden, and matching commands float over the editor, just above the status line:
@@ -803,13 +803,13 @@ While the Command Bar is open the file name is hidden, and matching commands flo
  │› split-right      Open an empty editor to the right       │
  │  split-down       Open an empty editor below              │
  ╰─────────────────────────────────── ↑↓  tab  enter  esc ───╯
- COMMAND  ❯ spli                                     12 selected   8%   8:209   4 LF
+ COMMAND  ❯ spli                                     12 selected   8%   8:209   master
 ```
 
 | Section | Element | Meaning |
 | :--- | :--- | :--- |
 | Left | `NORMAL` / `FILE` / `COMMAND` / `FIND` / `REPLACE` / `OPEN` / `SETTINGS` / `ABOUT` | Where keystrokes go. `NORMAL` (blue) while editing the file or the sidebar. `FILE` (orange) while the explorer is in FILE mode, entered with `select`. `FILTER` (teal) while the explorer is showing a file search. `COMMAND` (purple) while the Command Bar is open. `FIND` (yellow) while searching; printable keys jump to that text instead of inserting. `REPLACE` (orange) while typing a replacement. `OPEN` (purple) while the file picker is open. `SETTINGS` (slate gray) while the settings page is open. `ABOUT` (yellow) while the about page is open. Printable keys insert text while the badge reads `NORMAL`. With Modeless off, `NORMAL`, `INSERT` (green), `VISUAL` and `V-LINE` (pink) show the editing mode instead; see [Modal editing](#modal-editing-modeless-off). |
-| Left | Git branch | Shown while the bar is closed and the working directory is inside a repository. The branch icon and the branch name sit between the badge and the file. A detached HEAD shows the first 7 characters of the commit hash. Outside a repository this section is omitted. Hidden while the Command Bar, FIND mode, or REPLACE mode is open. |
+| Left | Mode hints | With Modeless off and Mode hints on, the keys of the current mode sit after the mode badge (and after a started sequence such as `c` or `3d`). Hints that do not fit are dropped from the end so the file name and `[+]` stay visible. Hidden when Mode hints is off, when Modeless is on, and when another badge (`SETTINGS`, `COMMAND`, `FIND`, …) has the bar. |
 | Left | Icon + path | Shown while the Command Bar, FIND mode, and REPLACE mode are closed. File-type icon, the directory dimmed, and the file name in bold. A file saved as a bare name shows the folder duckx-code was started from. `[No Name]` when the buffer has no path. `[+]` after the name while there are unsaved changes. A yellow message after it is state of the moment only (`Saving hello.rs…`, `3 of 12`, `Press Enter again to delete Lab`) and goes at the next key press. Results and errors (`Saved E:\Work\duckx-code\hello.rs`, `Copied 5 characters`) are [notices](#notices). |
 | Left | `❯` input | Shown while the bar is open, in place of the file name. Matching commands are stacked on the rows above this line. |
 | Right | `E 2 W 1` | Diagnostics in this file per level (`E`, `W`, `I`, `H`), each in its color. A level with none is omitted. The message for the cursor line is the colored bar above this line, with the file's diagnostic count at its right edge. |
@@ -817,7 +817,7 @@ While the Command Bar is open the file name is hidden, and matching commands flo
 | Right | `N selected` | Number of selected characters (only while selecting). |
 | Right | `Top` / `N%` / `Bot` | Cursor position through the file: `Top` on the first line, `Bot` on the last, otherwise a percentage. |
 | Right | `line:col` | Cursor position (1-based; the column is the on-screen column). |
-| Right | `4 LF UTF-8` | Indent, line ending, and encoding of the focused file. A number is how many spaces one Tab inserts (`4 LF UTF-8`). `Tab 4` means Tab inserts a tab character, drawn that many columns wide (`Tab 4 CRLF UTF-8`). `LF` or `CRLF` is the ending a new line break uses. With line endings set to Auto, that is the ending detected in the file. LF or CRLF in settings is what the next save writes. The encoding is what the next save writes. `encoding` changes it. |
+| Right | Git branch | Shown while the working directory is inside a repository. The branch icon and the branch name sit at the right edge, in the accent slot. A detached HEAD shows the first 7 characters of the commit hash. Outside a repository this section is omitted. Tab width and line endings are in Settings → Editor. The encoding of the focused file is shown or set with `encoding`; `reload` rereads the file, optionally with another encoding. |
 
 The icons and separators are Nerd Font glyphs; use a [Nerd Font](https://www.nerdfonts.com/) in your terminal or they render as empty boxes.
 
@@ -829,7 +829,7 @@ Results, errors, and notes appear in a rounded snackbar at the bottom right, jus
                                         ╭ Done ───────────────────────────────╮
                                         │ Saved E:\Work\Duckx Canvas\PRODUCT.md │
                                         ╰─────────────────────────────────────╯
- NORMAL  master  PRODUCT.md                                    Top   1:1   4 LF UTF-8
+ NORMAL  PRODUCT.md                                    Top   1:1   master
 ```
 
 | Title and color | For | Stays |
@@ -859,7 +859,7 @@ Editor, Files, and Keybindings are saved in the same `settings.json` as the them
 | Mouse | On, Off | On lets clicks, drags, and the wheel work inside duckx-code (see [Mouse](#mouse)); `Shift` + drag still uses the terminal's own selection. Off leaves the mouse to the terminal, so dragging selects screen text as usual. The default is On. |
 | Double Esc opens Command Bar | On, Off | On opens the Command Bar when `Esc` is pressed twice quickly (within 0.4 s) in the editor and the first `Esc` had nothing to close (no hover, completion, code action or reference list, and no snippet). A single `Esc` works as before, and `Alt` chords never count. Off leaves `Esc` as it was. The default is On. The `double-esc` command flips it. |
 | Modeless | On, Off | On (the default) keeps the editor modeless: every printable key types. Off adds Normal, Insert, and Visual modes (see [Modal editing](#modal-editing-modeless-off)). The `modeless` command flips it. |
-| Mode hints | On, Off | With Modeless Off, On shows the keys of the current mode in a row above the status bar. The default is On. The `mode-hints` command flips it. |
+| Mode hints | On, Off | With Modeless Off, On shows the keys of the current mode after the mode badge in the status bar. The default is On. The `mode-hints` command flips it. |
 | Start mode | Normal, Insert | With Modeless Off, the mode after start and after turning Modeless off. The default is Normal. |
 | Key style | Vim, Mnemonic | With Modeless Off, the keys of Normal and Visual. Vim (the default) uses `yy`, `dd`, …; Mnemonic names the command, such as `cl` copy line and `xl` cut line (see [Mnemonic keys](#mnemonic-keys)). The `key-style` command sets or switches it. |
 | Match brackets | On, Off | On draws the bracket at the cursor (or just before it) and its pair bold on a soft background, in the focused window, when both are on screen. A bracket with no pair is drawn in the error color. Brackets in strings and comments are skipped. The default is On. The `bracket-match` command flips it. |

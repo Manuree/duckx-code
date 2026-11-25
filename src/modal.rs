@@ -13,8 +13,8 @@
 //!   either runs a Command Bar command or behaves like a modeless key (`h` is
 //!   `Left`), so nothing here is reachable only by a letter.
 //!
-//! The selling point is clarity, so the same table feeds the hint row above the
-//! status bar ([`hints`]) and the `?` key list ([`key_list`]). Both show each key's
+//! The selling point is clarity, so the same table feeds the hints in the status
+//! bar ([`hints`]) and the `?` key list ([`key_list`]). Both show each key's
 //! name with the letters to press marked in it ([`marks`]), or the key before the
 //! name when the name does not hold them.
 

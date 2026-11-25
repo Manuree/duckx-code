@@ -77,7 +77,7 @@ impl App {
             .unwrap_or("")
     }
 
-    /// True when the hint row is drawn above the status bar.
+    /// True when the mode's keys are shown in the status bar after the mode badge.
     pub fn mode_hints_shown(&self) -> bool {
         self.editor_prefs.mode_hints && self.modal_input().is_some()
     }
