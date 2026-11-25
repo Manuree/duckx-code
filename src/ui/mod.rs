@@ -757,21 +757,31 @@ mod tests {
     }
 
     /// The status-bar hints of a modal app: the last line's text and the cells
-    /// drawn bold and underlined (the letters to press).
+    /// drawn bold in the mode color (the letters to press).
     fn hint_row(app: &App, width: u16, height: u16) -> (String, String) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         let buffer = terminal.backend().buffer();
         let y = height - 1;
+        let mark_fg = app.mode_color();
         let text: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
         let marked: String = (0..width)
             .map(|x| {
                 let cell = &buffer[(x, y)];
                 let on = cell.modifier.contains(ratatui::style::Modifier::BOLD)
-                    && cell.modifier.contains(ratatui::style::Modifier::UNDERLINED);
+                    && mark_fg.is_some_and(|color| cell.fg == color);
                 if on { cell.symbol() } else { " " }.to_string()
             })
             .collect();
+        assert!(
+            (0..width).all(|x| {
+                let cell = &buffer[(x, y)];
+                let marked = cell.modifier.contains(ratatui::style::Modifier::BOLD)
+                    && mark_fg.is_some_and(|color| cell.fg == color);
+                !marked || !cell.modifier.contains(ratatui::style::Modifier::UNDERLINED)
+            }),
+            "hint letters must not be underlined"
+        );
         (text, marked)
     }
 

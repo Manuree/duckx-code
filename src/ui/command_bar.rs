@@ -120,8 +120,8 @@ pub(crate) fn fit_hints(pairs: &[crate::modal::Hint], room: usize) -> Vec<&crate
     shown
 }
 
-/// Spans for one fitted hint: the letters to press in `mark` (mode color, bold,
-/// underline), the rest in `base`.
+/// Spans for one fitted hint: the letters to press in `mark` (mode color and
+/// bold), the rest in `base`.
 pub(crate) fn hint_spans(
     hint: &crate::modal::Hint,
     base: Style,
@@ -147,10 +147,7 @@ pub(crate) fn status_hint_spans(
     let theme = *app.styles();
     let color = app.mode_color().unwrap_or(theme.status_a_bg);
     let base = theme.status_c;
-    let mark = theme
-        .status_c
-        .fg(color)
-        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mark = theme.status_c.fg(color).add_modifier(Modifier::BOLD);
     let mut spans = Vec::new();
     let mut used = 0;
     if let Some(notice) = state.notice.as_deref() {
@@ -225,11 +222,7 @@ pub fn render_key_list(frame: &mut Frame, app: &App, area: Rect, floor: u16) {
     let theme = theme_of(app);
     let color = app.mode_color().unwrap_or(theme.status_a_bg);
     let dropdown = List::new(&title, "↑↓  enter  type to filter  esc ", &rows)
-        .marks(
-            Style::new()
-                .fg(color)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        )
+        .marks(Style::new().fg(color).add_modifier(Modifier::BOLD))
         .selected(Some(list.selected))
         .empty("No key matches")
         .label_width(4);
