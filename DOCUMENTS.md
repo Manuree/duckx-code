@@ -339,7 +339,7 @@ The completion list filters as you keep typing. `Up` and `Down` move the highlig
 Settings → Editor → **Modeless** is On by default, and then nothing in this section applies: keys work exactly as described everywhere else in this file. Turn it Off (or run `modeless`) for three modes in the editor. The mode is shown in three places at once, so it is never a guess:
 
 * **The status bar badge:** `NORMAL` (blue), `INSERT` (green), `VISUAL` or `V-LINE` (pink). Each mode has its own color in every built-in theme, never shared with another badge. A started key sequence or count shows right after it, such as `3d` or `g`.
-* **The hint row** just above the status bar lists the keys that do something in this mode by name, with the letters to press highlighted in the mode color, bold, and underlined (`Insert  Visual  dd Cut line … ? Keys`: the `I` of Insert and the `V` of Visual are marked). When a key's letters are not all in its name, or it is a symbol, a named key, or a `Ctrl` key, the key is shown before the name instead (`dd Cut line`, `Tab Jump forward`, `? Keys`). While a sequence is started it lists only the keys that can finish it, with the next letter highlighted (after `g`, the `D` of goto Definition), plus `Esc cancel`. Turn it off with Settings → Editor → **Mode hints** or `mode-hints`.
+* **The hint row** just above the status bar lists the keys that do something in this mode by name, all in lowercase, with the letters to press highlighted in the mode color, bold, and underlined (`insert  visual  dd cut line … ? keys`: the `i` of insert and the `v` of visual are marked). A highlighted letter is uppercase only when that key needs Shift (`V` is **V**isual line, `fP` is **f**ind **P**revious). When a key's letters are not all in its name, or it is a symbol, a named key, or a `Ctrl` key, the key is shown before the name instead (`dd cut line`, `Tab jump forward`, `? keys`). While a sequence is started it lists only the keys that can finish it, with the next letter highlighted (after `g`, the `d` of goto definition, or the `T` of goto previous Tab), plus `Esc cancel`. Turn it off with Settings → Editor → **Mode hints** or `mode-hints`.
 * **The cursor:** a block in Normal, a green underline in Insert, and a pink block in Visual. The cursor line number takes the mode color too.
 
 **Start mode** (Settings → Editor) picks the mode when Modeless turns off and when duckx-code starts: Normal (the default) or Insert. There is one mode for the whole app; switching windows or tabs keeps it, except that Visual becomes Normal when another window gets the focus.
@@ -450,7 +450,7 @@ With **Key style** set to Mnemonic, a key names its command: a verb letter, then
 | `>` `<` `Tab` `Shift + Tab` `gc` `o` | Indent, outdent, comment, other end, as in Vim style |
 | `s…` | The select keys above change the selection |
 
-The hint row names each verb (`Insert  Select  Copy  x Cut  Paste  Undo  Redo  Find  : Commands  ? Keys`) and, after `c`, shows `copy Line  copy Word  copy All`. `x` is not a letter of "Cut", so it is shown before the name.
+The hint row names each verb (`insert  select  copy  x cut  paste  undo  redo  find  : commands  ? keys`) and, after `c`, shows `copy line  copy word  copy all`. `x` is not a letter of "cut", so it is shown before the name.
 
 ### Keys that differ from vim
 
